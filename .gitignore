@@ -1,0 +1,14 @@
+node_modules/
+out/
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
+
+# Generated voiceover audio (regenerated from data/videos.ts + GEMINI_API_KEY)
+public/audio/voiceovers/*.wav
+public/audio/voiceovers/*.sha256
+
+# Remotion caches
+.remotion/

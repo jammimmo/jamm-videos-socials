@@ -1,0 +1,84 @@
+name: Render JAMM videos
+
+# Manually triggered. Choose a single video or 'all' to fan out 10 parallel
+# jobs. Each job renders one MP4 and uploads it as an artifact.
+#
+# Required repo secret: GEMINI_API_KEY  (Google AI Studio key for Gemini TTS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_id:
+        description: 'Which video to render (or "all" for matrix-parallel)'
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - video-001
+          - video-002
+          - video-003
+          - video-004
+          - video-005
+          - video-006
+          - video-007
+          - video-008
+          - video-009
+          - video-010
+
+jobs:
+  prepare:
+    name: Decide matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        run: |
+          if [ "${{ inputs.video_id }}" = "all" ]; then
+            echo 'matrix=["video-001","video-002","video-003","video-004","video-005","video-006","video-007","video-008","video-009","video-010"]' >> $GITHUB_OUTPUT
+          else
+            echo 'matrix=["${{ inputs.video_id }}"]' >> $GITHUB_OUTPUT
+          fi
+
+  render:
+    name: Render ${{ matrix.video_id }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        video_id: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Remotion browser (Chromium)
+        run: npx remotion browser ensure
+
+      - name: Validate content
+        run: npm run content:build
+
+      - name: Render ${{ matrix.video_id }}
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: npm run render:batch -- --id ${{ matrix.video_id }}
+
+      - name: Upload MP4 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.video_id }}-mp4
+          path: out/batch/${{ matrix.video_id }}.mp4
+          retention-days: 30
+          if-no-files-found: error

@@ -1,0 +1,30 @@
+{
+  "name": "dakar-real-estate",
+  "version": "1.0.0",
+  "description": "TikTok-style real estate comparison video for Dakar - JAMM Immobilier",
+  "scripts": {
+    "build": "remotion render src/index.ts DakarRealEstate out/dakar-real-estate.mp4",
+    "preview": "remotion preview src/index.ts",
+    "still": "remotion still src/index.ts DakarRealEstate out/still.png",
+    "voiceover": "node scripts/generate-gemini-voiceover.mjs",
+    "render:batch": "tsx scripts/render-batch.mjs",
+    "content:build": "tsx scripts/content-build.mjs",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@google/genai": "^1.0.0",
+    "@remotion/bundler": "^4.0.464",
+    "@remotion/cli": "^4.0.464",
+    "@remotion/renderer": "^4.0.464",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "remotion": "^4.0.464"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "tsx": "^4.22.3",
+    "typescript": "^5.7.2"
+  }
+}
