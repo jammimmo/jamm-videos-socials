@@ -37,7 +37,7 @@ export type VideoSpec = {
 
 export const VIDEOS: VideoSpec[] = [
   {
-    id: 'video-001',
+    id: '01-paiement-avant-visite',
     title: '01 - Payer avant la visite',
     hook: {
       title: 'PAYER AVANT LA VISITE ?',
@@ -92,7 +92,7 @@ export const VIDEOS: VideoSpec[] = [
       'À Dakar, payer avant la visite peut coûter très cher. Ne vous fiez pas seulement aux photos : vérifiez l’adresse sur place et visitez d’abord l’appartement. Si le paiement arrive avant le contrôle, stop : ne payez jamais avant la visite. Après l’envoi, le contact peut disparaître ou bloquer votre numéro. Ne payez rien sans preuve lisible : demandez un reçu clair, une identité et une adresse confirmée. La règle est simple : pas de visite, pas d’avance. Avec JAMM IMMO, vous visitez mieux, vous vérifiez mieux, et vous louez avec plus de sécurité.',
   },
   {
-    id: 'video-002',
+    id: '02-caution-mobile-money',
     title: '02 - Envoyer la caution par Mobile Money',
     hook: {
       title: 'CAUTION TROP VITE ?',
@@ -146,7 +146,7 @@ export const VIDEOS: VideoSpec[] = [
       'À Dakar, envoyer la caution trop vite par Mobile Money est un piège fréquent. Premier signal d’alerte : un numéro inconnu qui réclame l’avance immédiate. Avant tout transfert, demandez l’identité complète du destinataire. Exigez un reçu clair, avec date, montant et nom lisible. Et surtout, ne payez aucune avance sans avoir visité le logement. Vérifiez toujours avant de payer. Avec JAMM IMMO, votre caution est sécurisée, votre dossier est clair, et votre location commence sans mauvaise surprise.',
   },
   {
-    id: 'video-003',
+    id: '03-tester-eau',
     title: '03 - Ne pas tester l’eau',
     hook: {
       title: 'L’EAU, TU L’AS TESTÉE ?',
@@ -199,7 +199,7 @@ export const VIDEOS: VideoSpec[] = [
       'À Dakar, l’eau peut faire la différence entre un bon et un mauvais appartement. Pendant la visite, ouvrez tous les robinets de la cuisine et de la salle de bain. Vérifiez la pression sous la douche et le débit du lavabo. Testez aussi les évacuations : un siphon bouché annonce de gros problèmes. Vérifiez le compteur d’eau et demandez les horaires de coupure dans le quartier. Une bonne pression d’eau, c’est une vraie tranquillité. Avec JAMM IMMO, on vérifie chaque détail avant de vous remettre les clés.',
   },
   {
-    id: 'video-004',
+    id: '04-visite-jour-nuit',
     title: '04 - Visiter seulement le jour',
     hook: {
       title: 'VISITE DE JOUR SEULEMENT ?',
@@ -251,7 +251,7 @@ export const VIDEOS: VideoSpec[] = [
       'À Dakar, un appartement magnifique le jour peut devenir un cauchemar la nuit. Ne signez jamais après une seule visite en journée. Revenez après le coucher du soleil pour tester l’éclairage de l’entrée et des couloirs. Regardez la sécurité, les coins sombres, les voisins du soir. Écoutez le bruit ambiant, les générateurs, les bars du quartier. Visitez aussi la nuit avant de vous engager. Avec JAMM IMMO, vous découvrez votre futur logement à toute heure.',
   },
   {
-    id: 'video-005',
+    id: '05-trajet-dakar',
     title: '05 - Sous-estimer le trajet',
     hook: {
       title: 'LE TRAJET, TU L’AS TESTÉ ?',
@@ -304,7 +304,7 @@ export const VIDEOS: VideoSpec[] = [
       'À Dakar, le trajet domicile-travail peut transformer votre quotidien. Avant de signer, testez le trajet aux heures de pointe, jamais le week-end. Faites le test du matin entre sept et neuf heures. Faites le test du retour le soir entre dix-sept et vingt heures. Repérez les bus, les taxis, les accès réels au quartier. Calculez votre budget transport pour un mois complet. Avec JAMM IMMO, on vous aide à choisir un quartier vraiment fait pour votre vie.',
   },
   {
-    id: 'video-006',
+    id: '06-verifier-proprietaire',
     title: '06 - Ne pas vérifier le propriétaire',
     hook: {
       title: 'EST-IL VRAIMENT PROPRIÉTAIRE ?',
@@ -358,7 +358,7 @@ export const VIDEOS: VideoSpec[] = [
       'À Dakar, vérifier que vous parlez bien au vrai propriétaire évite de gros problèmes. Demandez une pièce d’identité officielle dès le premier contact sérieux. Comparez la pièce, le bail et les factures d’eau et d’électricité. Le reçu doit toujours porter le bon nom, jamais celui d’un intermédiaire flou. Vérifiez le lien réel entre la personne et le logement. Identité avant paiement, c’est la règle d’or. Avec JAMM IMMO, chaque bail est vérifié, chaque propriétaire est confirmé.',
   },
   {
-    id: 'video-007',
+    id: '07-contrat-bail',
     title: '07 - Signer sans contrat',
     hook: {
       title: 'SANS CONTRAT, SANS RECOURS',
@@ -412,7 +412,7 @@ export const VIDEOS: VideoSpec[] = [
       'À Dakar, un accord verbal ne vous protège ni d’un loyer qui augmente, ni d’une expulsion soudaine. Exigez un bail écrit clair, signé, avec loyer, durée et caution. La caution doit être détaillée et remboursable selon des règles précises. Vérifiez bien les clauses importantes avant toute signature. Le paiement doit toujours suivre la signature du contrat, jamais avant. Faites un état des lieux daté et signé avant d’entrer. Avec JAMM IMMO, vous signez en toute confiance.',
   },
   {
-    id: 'video-008',
+    id: '08-clauses-bail',
     title: '08 - Ne pas lire les clauses',
     hook: {
       title: 'LIRE LES CLAUSES, OBLIGATOIRE',
@@ -464,7 +464,7 @@ export const VIDEOS: VideoSpec[] = [
       'À Dakar, une seule ligne de bail mal lue peut coûter des mois de loyer. Vérifiez la clause d’augmentation : combien, et tous les combien. Cherchez les pénalités cachées en cas de retard de paiement. Vérifiez aussi le préavis exigé pour partir, parfois trois mois au lieu d’un. Demandez la liste détaillée des charges incluses dans le loyer. Lisez chaque ligne avant de signer, sans pression. Avec JAMM IMMO, on vous explique chaque clause en français clair.',
   },
   {
-    id: 'video-009',
+    id: '09-recu-paiement',
     title: '09 - Payer sans reçu',
     hook: {
       title: 'PAS DE REÇU, PAS DE PREUVE',
@@ -519,7 +519,7 @@ export const VIDEOS: VideoSpec[] = [
       'À Dakar, payer sans reçu, c’est offrir votre argent sans retour. Pas de preuve, pas de paiement, c’est la règle simple. Exigez un reçu daté avant même de remettre l’argent. Le nom du propriétaire doit être lisible et correspondre au bail. Vérifiez aussi que le reçu correspond bien au mois et au montant convenus. Gardez une copie nette, papier ou photo, dans un endroit sûr. Avec JAMM IMMO, chaque paiement laisse une trace claire et protégée.',
   },
   {
-    id: 'video-010',
+    id: '10-compteurs-entree',
     title: '10 - Oublier les compteurs',
     hook: {
       title: 'LES COMPTEURS À L’ENTRÉE',

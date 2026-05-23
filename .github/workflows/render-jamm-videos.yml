@@ -15,16 +15,16 @@ on:
         default: all
         options:
           - all
-          - video-001
-          - video-002
-          - video-003
-          - video-004
-          - video-005
-          - video-006
-          - video-007
-          - video-008
-          - video-009
-          - video-010
+          - 01-paiement-avant-visite
+          - 02-caution-mobile-money
+          - 03-tester-eau
+          - 04-visite-jour-nuit
+          - 05-trajet-dakar
+          - 06-verifier-proprietaire
+          - 07-contrat-bail
+          - 08-clauses-bail
+          - 09-recu-paiement
+          - 10-compteurs-entree
 
 jobs:
   prepare:
@@ -36,7 +36,7 @@ jobs:
       - id: set
         run: |
           if [ "${{ inputs.video_id }}" = "all" ]; then
-            echo 'matrix=["video-001","video-002","video-003","video-004","video-005","video-006","video-007","video-008","video-009","video-010"]' >> $GITHUB_OUTPUT
+            echo 'matrix=["01-paiement-avant-visite","02-caution-mobile-money","03-tester-eau","04-visite-jour-nuit","05-trajet-dakar","06-verifier-proprietaire","07-contrat-bail","08-clauses-bail","09-recu-paiement","10-compteurs-entree"]' >> $GITHUB_OUTPUT
           else
             echo 'matrix=["${{ inputs.video_id }}"]' >> $GITHUB_OUTPUT
           fi

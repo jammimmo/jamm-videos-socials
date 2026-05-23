@@ -34,7 +34,7 @@ export const LogoWatermark: React.FC = () => {
       >
         <Img
           src={staticFile('jamm-logo-trim.png')}
-          style={{ width: 240, height: 'auto', display: 'block', borderRadius: 4 }}
+          style={{ width: 320, height: 'auto', display: 'block', borderRadius: 4 }}
         />
       </div>
     </div>

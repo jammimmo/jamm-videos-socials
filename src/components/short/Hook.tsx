@@ -48,7 +48,7 @@ export const Hook: React.FC<{ spec: HookSpec; durationInFrames: number }> = ({ s
         <div
           style={{
             fontFamily: theme.fonts.display,
-            fontSize: 92,
+            fontSize: 108,
             fontWeight: 900,
             lineHeight: 1.0,
             letterSpacing: -2,
@@ -70,7 +70,7 @@ export const Hook: React.FC<{ spec: HookSpec; durationInFrames: number }> = ({ s
             marginTop: 14,
             color: theme.jamm.snow,
             fontFamily: theme.fonts.display,
-            fontSize: 44,
+            fontSize: 52,
             fontWeight: 700,
             fontStyle: 'italic',
             letterSpacing: 1,
@@ -116,18 +116,18 @@ export const Hook: React.FC<{ spec: HookSpec; durationInFrames: number }> = ({ s
         </div>
       </div>
 
-      {/* Hook cards */}
+      {/* Hook cards — stacked vertically so long phrases don't get clipped */}
       <div
         style={{
           position: 'absolute',
-          bottom: 320,
+          bottom: 280,
           left: 0,
           right: 0,
           display: 'flex',
-          justifyContent: 'center',
-          gap: 18,
-          flexWrap: 'wrap',
-          padding: '0 60px',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 14,
+          padding: '0 80px',
           opacity: cardsEnter,
         }}
       >
@@ -137,8 +137,8 @@ export const Hook: React.FC<{ spec: HookSpec; durationInFrames: number }> = ({ s
             <div
               key={`${card}-${i}`}
               style={{
-                padding: '16px 28px',
-                background: 'rgba(255,255,255,0.12)',
+                padding: '14px 36px',
+                background: 'rgba(255,255,255,0.14)',
                 backdropFilter: 'blur(10px)',
                 border: `3px solid ${theme.jamm.orange}`,
                 borderRadius: 999,
@@ -148,7 +148,8 @@ export const Hook: React.FC<{ spec: HookSpec; durationInFrames: number }> = ({ s
                 fontSize: 32,
                 letterSpacing: 1,
                 opacity: cardSpring,
-                transform: `scale(${cardSpring})`,
+                transform: `scale(${cardSpring}) translateY(${interpolate(cardSpring, [0, 1], [20, 0])}px)`,
+                whiteSpace: 'nowrap',
               }}
             >
               {card}

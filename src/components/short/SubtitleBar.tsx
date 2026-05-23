@@ -42,13 +42,13 @@ export const SubtitleBar: React.FC<Props> = ({ text, textEn, voiceoverFr, voiceo
       {/* Chip — short headline */}
       <div
         style={{
-          padding: '10px 22px',
+          padding: '12px 28px',
           background: theme.jamm.orange,
           borderRadius: 999,
           color: 'white',
           fontFamily: theme.fonts.display,
           fontWeight: 900,
-          fontSize: 26,
+          fontSize: 32,
           letterSpacing: 1.5,
           textTransform: 'uppercase',
           boxShadow: '0 6px 18px rgba(0,0,0,0.5)',
@@ -81,7 +81,7 @@ export const SubtitleBar: React.FC<Props> = ({ text, textEn, voiceoverFr, voiceo
             style={{
               color: 'white',
               fontFamily: theme.fonts.display,
-              fontSize: 46,
+              fontSize: 54,
               fontWeight: 800,
               lineHeight: 1.12,
               textAlign: 'center',
@@ -99,7 +99,7 @@ export const SubtitleBar: React.FC<Props> = ({ text, textEn, voiceoverFr, voiceo
             style={{
               color: theme.jamm.cream,
               fontFamily: theme.fonts.display,
-              fontSize: 30,
+              fontSize: 36,
               fontWeight: 500,
               fontStyle: 'italic',
               lineHeight: 1.15,
