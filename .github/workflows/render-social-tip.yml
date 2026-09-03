@@ -1,0 +1,85 @@
+name: Render Jamm Immo social tip
+
+on:
+  repository_dispatch:
+    types: [render-jamm-tip]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: render-social-tip-${{ github.event.client_payload.job.id || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Ensure Remotion Chromium
+        run: npx remotion browser ensure
+
+      - name: Validate and materialise the signed delivery contract
+        env:
+          TIP_DISPATCH: ${{ toJSON(github.event.client_payload) }}
+        run: |
+          printf '%s' "${TIP_DISPATCH}" > dispatch.json
+          node scripts/materialize-dispatched-tip.mjs \
+            --payload dispatch.json \
+            --spec dispatched-tip.json \
+            --env "${GITHUB_ENV}"
+
+      - name: Render the dynamic social tip
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: npm run render:batch -- --spec-file "${TIP_SPEC_FILE}" --voice-only
+
+      - name: Stream the MP4 to the Jamm Immo Worker
+        run: |
+          VIDEO="out/batch/tip-${TIP_JOB_ID}.mp4"
+          test -s "${VIDEO}"
+          SHA256=$(sha256sum "${VIDEO}" | cut -d' ' -f1)
+          CODE=$(curl --fail-with-body --silent --show-error \
+            --output upload-response.json --write-out '%{http_code}' \
+            -X POST "${TIP_UPLOAD_URL}" \
+            -H "Authorization: Bearer ${TIP_CALLBACK_TOKEN}" \
+            -H 'Content-Type: video/mp4' \
+            -H "X-Job-Id: ${TIP_JOB_ID}" \
+            -H "X-Media-Sha256: ${SHA256}" \
+            -H 'X-Duration: 45' \
+            -H 'X-Width: 1080' \
+            -H 'X-Height: 1920' \
+            --data-binary @"${VIDEO}")
+          cat upload-response.json
+          test "${CODE}" = '200'
+
+      - name: Report a terminal renderer failure
+        if: ${{ failure() }}
+        continue-on-error: true
+        run: |
+          if [ -n "${TIP_UPLOAD_URL:-}" ] && [ -n "${TIP_CALLBACK_TOKEN:-}" ] && [ -n "${TIP_JOB_ID:-}" ]; then
+            curl --silent --show-error \
+              -X POST "${TIP_UPLOAD_URL}&status=failed" \
+              -H "Authorization: Bearer ${TIP_CALLBACK_TOKEN}" \
+              -H "X-Job-Id: ${TIP_JOB_ID}" \
+              -H "X-Error: render workflow failed; GitHub run ${GITHUB_RUN_ID}" || true
+          fi
+
+      - name: Keep the rendered MP4 for audit
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: social-tip-${{ github.event.client_payload.job.id }}
+          path: out/batch/*.mp4
+          retention-days: 14
+          if-no-files-found: ignore
