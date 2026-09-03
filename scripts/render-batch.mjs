@@ -131,18 +131,25 @@ async function renderOne(spec, { noAudio, voiceOnly }) {
 
 async function main() {
   const args = parseArgs(process.argv);
+  const specFile = args['spec-file'];
   const id = args.id;
   const noAudio = args._flags.has('no-audio');
   const voiceOnly = args._flags.has('voice-only');
 
-  if (!id) {
-    console.error('Usage: npm run render:batch -- --id <video-001..video-010|all> [--no-audio | --voice-only]');
+  if (!id && !specFile) {
+    console.error('Usage: npm run render:batch -- (--id <video-001..video-010|all> | --spec-file <json>) [--no-audio | --voice-only]');
     process.exit(1);
   }
 
   const { VIDEOS } = await import('../src/data/videos.ts');
-
-  const targets = id === 'all' ? VIDEOS : VIDEOS.filter((v) => v.id === id);
+  let targets;
+  if (specFile) {
+    const specPath = resolve(ROOT, specFile);
+    const parsed = JSON.parse(await readFile(specPath, 'utf8'));
+    targets = [parsed];
+  } else {
+    targets = id === 'all' ? VIDEOS : VIDEOS.filter((v) => v.id === id);
+  }
   if (targets.length === 0) {
     console.error(`Unknown video id: ${id}. Known: ${VIDEOS.map((v) => v.id).join(', ')}`);
     process.exit(1);
