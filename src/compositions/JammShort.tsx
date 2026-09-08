@@ -40,9 +40,11 @@ export type JammShortProps = {
   // 'voice-only' => voiceover only.
   // 'full'     => voiceover + sourate. Used by render-batch in CI.
   audioMode: 'silent' | 'voice-only' | 'full';
+  // Dispatched tips: the exact caption sentence owns its own checked WAV.
+  sceneVoices?: boolean;
 };
 
-export const JammShort: React.FC<JammShortProps> = ({ spec, audioMode }) => {
+export const JammShort: React.FC<JammShortProps> = ({ spec, audioMode, sceneVoices = false }) => {
   const { fps } = useVideoConfig();
 
   const voiceSrc = staticFile(`audio/voiceovers/${spec.id}.wav`);
@@ -67,6 +69,12 @@ export const JammShort: React.FC<JammShortProps> = ({ spec, audioMode }) => {
           return (
             <Sequence key={i} from={seg.from} durationInFrames={seg.duration}>
               <Scene spec={sceneSpec} durationInFrames={seg.duration} />
+              {showVoice && sceneVoices && (
+                <Audio
+                  src={staticFile(`audio/voiceovers/${spec.id}-scene-${seg.sceneIndex + 1}.wav`)}
+                  volume={VOICEOVER_VOLUME}
+                />
+              )}
             </Sequence>
           );
         }
@@ -78,7 +86,7 @@ export const JammShort: React.FC<JammShortProps> = ({ spec, audioMode }) => {
       })}
 
       {/* Voice-over — full duration, plays at natural rate */}
-      {showVoice && (
+      {showVoice && !sceneVoices && (
         <Audio src={voiceSrc} volume={VOICEOVER_VOLUME} />
       )}
 

@@ -8,7 +8,7 @@
     "still": "remotion still src/index.ts DakarRealEstate out/still.png",
     "voiceover": "node scripts/generate-gemini-voiceover.mjs",
     "render:batch": "tsx scripts/render-batch.mjs",
-    "test:dispatch": "node --test scripts/materialize-dispatched-tip.test.mjs scripts/social-brand.test.mjs",
+    "test:dispatch": "node --test scripts/materialize-dispatched-tip.test.mjs scripts/social-brand.test.mjs scripts/scene-voice.test.mjs",
     "content:build": "tsx scripts/content-build.mjs",
     "lint": "tsc --noEmit"
   },

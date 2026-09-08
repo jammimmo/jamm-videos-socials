@@ -16,6 +16,7 @@ import { existsSync } from 'node:fs';
 import { readFile, mkdir, stat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertSceneVoiceFits, sceneVoiceSpecs } from './scene-voice.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -102,17 +103,22 @@ async function resolveAudioMode({ noAudio, voiceOnly }) {
   return 'full';
 }
 
-async function renderOne(spec, { noAudio, voiceOnly }) {
+async function renderOne(spec, { noAudio, voiceOnly, sceneVoices }) {
   await mkdir(OUT_DIR, { recursive: true });
 
   const audioMode = await resolveAudioMode({ noAudio, voiceOnly });
   if (audioMode === 'silent') {
     console.log(`▸ ${spec.id} — silent render, skipping Gemini TTS`);
+  } else if (sceneVoices) {
+    for (const [index, scene] of sceneVoiceSpecs(spec).entries()) {
+      await ensureVoiceover(scene);
+      assertSceneVoiceFits(await readFile(resolve(VOICEOVER_DIR, `${scene.id}.wav`)), index);
+    }
   } else {
     await ensureVoiceover(spec);
   }
 
-  const propsJson = JSON.stringify({ spec, audioMode });
+  const propsJson = JSON.stringify({ spec, audioMode, sceneVoices: sceneVoices && audioMode !== 'silent' });
   const outFile = resolve(OUT_DIR, `${spec.id}.mp4`);
 
   console.log(`▶ ${spec.id} — remotion render (audio: ${audioMode}) → ${outFile}`);
@@ -156,7 +162,7 @@ async function main() {
   }
 
   for (const spec of targets) {
-    await renderOne(spec, { noAudio, voiceOnly });
+    await renderOne(spec, { noAudio, voiceOnly, sceneVoices: Boolean(specFile) });
   }
 
   console.log(`✓ render-batch complete (${targets.length} video${targets.length > 1 ? 's' : ''})`);
