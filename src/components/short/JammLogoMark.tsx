@@ -27,7 +27,8 @@ export const JammLogoMark: React.FC<{ size?: Size; glow?: boolean }> = ({
     }}
   >
     <Img
-      src={staticFile('jamm-logo-trim.png')}
+      src={staticFile('jamm-immo-logo.png')}
+      alt="Jamm Immo"
       style={{ width: widths[size], height: 'auto', display: 'block', borderRadius: 8 }}
     />
   </div>

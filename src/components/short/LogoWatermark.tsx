@@ -33,7 +33,8 @@ export const LogoWatermark: React.FC = () => {
         }}
       >
         <Img
-          src={staticFile('jamm-logo-trim.png')}
+          src={staticFile('jamm-immo-logo.png')}
+          alt="Jamm Immo"
           style={{ width: 320, height: 'auto', display: 'block', borderRadius: 4 }}
         />
       </div>
