@@ -26,6 +26,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify dispatch and official social brand
+        run: npm run test:dispatch
+
       - name: Ensure Remotion Chromium
         run: npx remotion browser ensure
 
