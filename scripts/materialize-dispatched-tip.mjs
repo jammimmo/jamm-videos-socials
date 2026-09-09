@@ -49,9 +49,11 @@ function short(value, max) {
 }
 
 const VISUALS = {
-  advice: ['document-stack', 'id-check', 'contract', 'calendar-notice', 'building'],
-  tips: ['listing-address', 'fine-print', 'budget-calc', 'schedule-clock', 'receipt'],
-  market_education: ['building', 'traffic', 'expenses-breakdown', 'calendar-notice', 'verbal-handshake'],
+  // Dynamic scripts carry no verified legal deadlines, prices or identities.
+  // Only neutral illustrations may be selected as automatic fallbacks.
+  advice: ['building', 'document-stack', 'document-stack', 'building', 'building'],
+  tips: ['building', 'document-stack', 'building', 'document-stack', 'building'],
+  market_education: ['building', 'document-stack', 'building', 'document-stack', 'building'],
 };
 
 export function materializeDispatchedTip(raw) {
@@ -97,6 +99,11 @@ export function materializeDispatchedTip(raw) {
 
   const fr = sentencesToFiveParts(scriptFr);
   const en = sentencesToFiveParts(scriptEn);
+  const meterTopic = /\bcompteurs?\b/iu.test(`${title} ${scriptFr}`);
+  const visuals = meterTopic
+    ? ['meter', 'meter', 'document-stack', 'building', 'building'] : VISUALS[family];
+  const variants = meterTopic
+    ? ['water-illustration', 'electric-illustration', 'bills', undefined, 'key'] : [];
   const cards = content.hashtags.slice(0, 3).map((tag) => short(tag.replace(/^#/, ''), 24));
   while (cards.length < 3) cards.push(['Conseil', 'Dakar', 'Jamm Immo'][cards.length]);
 
@@ -111,7 +118,8 @@ export function materializeDispatchedTip(raw) {
       cards,
     },
     scenes: fr.map((voiceoverFr, index) => ({
-      visualType: VISUALS[family][index],
+      visualType: visuals[index],
+      ...(variants[index] ? { variant: variants[index] } : {}),
       subtitle: short(voiceoverFr.toUpperCase(), 58),
       subtitleEn: short(en[index], 58),
       voiceoverFr,

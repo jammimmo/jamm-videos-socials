@@ -63,6 +63,19 @@ test('rejects an attacker-controlled delivery host', () => {
   assert.throws(() => materializeDispatchedTip(value), /exact production callback URL/);
 });
 
+test('automatic illustrations add no unsupported deadlines, prices or identities', () => {
+  for (const family of ['advice', 'tips', 'market_education']) {
+    const value = payload(); value.job.family = family;
+    assert.ok(materializeDispatchedTip(value).spec.scenes.every((s) => ['building', 'document-stack'].includes(s.visualType)));
+  }
+  const meters = payload(); meters.content.title = "Compteurs à l'entrée";
+  const scenes = materializeDispatchedTip(meters).spec.scenes;
+  assert.deepEqual(scenes.map(s => s.visualType), ['meter','meter','document-stack','building','building']);
+  assert.equal(scenes[0].variant, 'water-illustration');
+  assert.equal(scenes[1].variant, 'electric-illustration');
+  assert.equal(scenes[2].variant, 'bills');
+});
+
 test('rejects malformed capabilities and brand drift', () => {
   const badToken = payload();
   badToken.delivery.callbackToken = 'secret';

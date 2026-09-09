@@ -7,7 +7,8 @@ export const MeterVisual: React.FC<SceneVisualProps> = ({ variant, durationInFra
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   const enter = spring({ frame, fps, config: { damping: 14, stiffness: 110 } });
-  const isElectric = variant === 'electric';
+  const isElectric = variant === 'electric' || variant === 'electric-illustration';
+  const isIllustration = variant?.endsWith('-illustration');
   const isSigned = variant === 'signed';
 
   const ticker = Math.floor(interpolate(frame, [0, durationInFrames], [0, 9999])) % 10000;
@@ -37,6 +38,11 @@ export const MeterVisual: React.FC<SceneVisualProps> = ({ variant, durationInFra
           <div style={{ marginTop: 24, fontSize: 36, fontWeight: 800, color: 'white', fontFamily: theme.fonts.display, textAlign: 'center', letterSpacing: 2 }}>
             {label}
           </div>
+          {isIllustration && (
+            <div style={{ marginTop: 16, fontSize: 24, fontWeight: 800, color: 'white', textAlign: 'center' }}>
+              EXEMPLE ILLUSTRATIF
+            </div>
+          )}
 
           {/* Signature line */}
           {isSigned && (
