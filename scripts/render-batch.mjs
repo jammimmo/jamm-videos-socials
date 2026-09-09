@@ -13,10 +13,10 @@
 import { spawn } from 'node:child_process';
 import { voiceCacheHash } from './voice-profile.mjs';
 import { existsSync } from 'node:fs';
-import { readFile, mkdir, stat } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { continuousSceneFrames, sceneVoiceSpecs } from './scene-voice.mjs';
+import { pcmWavDuration, sceneVoiceSpecs } from './scene-voice.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -115,7 +115,13 @@ async function renderOne(spec, { noAudio, voiceOnly, sceneVoices }) {
     const exactScript = sceneVoiceSpecs(spec).map(s => s.voiceoverScript).join(' ');
     if (spec.voiceoverScript !== exactScript) throw new Error('Continuous narration does not match the caption script');
     await ensureVoiceover(spec);
-    sceneFrames = continuousSceneFrames(await readFile(resolve(VOICEOVER_DIR, `${spec.id}.wav`)));
+    const wavPath = resolve(VOICEOVER_DIR, `${spec.id}.wav`);
+    if (pcmWavDuration(await readFile(wavPath)) > 30.3) throw new Error('Narration exceeds scene budget');
+    const specPath = resolve(OUT_DIR, `${spec.id}.spec.json`);
+    const alignmentPath = resolve(OUT_DIR, `${spec.id}.alignment.json`);
+    await writeFile(specPath, JSON.stringify(spec));
+    await runStreaming('python3', ['scripts/align-narration.py', '--wav', wavPath, '--spec', specPath, '--output', alignmentPath]);
+    sceneFrames = JSON.parse(await readFile(alignmentPath, 'utf8')).sceneFrames;
   } else {
     await ensureVoiceover(spec);
   }

@@ -75,8 +75,8 @@ test('dispatch rendering validates scene audio and uses the same scene sequence 
   const renderer = await readFile(new URL('./render-batch.mjs', import.meta.url), 'utf8');
   const composition = await readFile(new URL('../src/compositions/JammShort.tsx', import.meta.url), 'utf8');
   assert.match(renderer, /sceneVoices: Boolean\(specFile\)/);
-  assert.ok(renderer.includes('sceneFrames = continuousSceneFrames('));
-  assert.ok(renderer.indexOf('sceneFrames = continuousSceneFrames(') < renderer.indexOf('const propsJson'));
+  assert.ok(renderer.includes('scripts/align-narration.py'));
+  assert.ok(renderer.indexOf('scripts/align-narration.py') < renderer.indexOf('const propsJson'));
   assert.doesNotMatch(renderer, /await ensureVoiceover\(scene\)/);
   assert.match(renderer, /continuousVoice: sceneVoices/);
   assert.match(composition, /sceneFrames\[segment.sceneIndex\]/);
