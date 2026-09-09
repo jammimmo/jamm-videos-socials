@@ -21,7 +21,6 @@ export const SubtitleBar: React.FC<Props> = ({ text, textEn, voiceoverFr, voiceo
   const { fps } = useVideoConfig();
   const enter = spring({ frame, fps, config: { damping: 18, stiffness: 110 } });
   const voiceEnter = spring({ frame: frame - 6, fps, config: { damping: 18, stiffness: 110 } });
-  const voiceEnEnter = spring({ frame: frame - 12, fps, config: { damping: 18, stiffness: 110 } });
   const y = interpolate(enter, [0, 1], [60, 0]);
 
   return (
@@ -64,6 +63,7 @@ export const SubtitleBar: React.FC<Props> = ({ text, textEn, voiceoverFr, voiceo
       <div
         style={{
           width: '100%',
+          boxSizing: 'border-box',
           padding: '22px 32px',
           background: 'rgba(8, 10, 30, 0.88)',
           backdropFilter: 'blur(10px)',
@@ -105,7 +105,7 @@ export const SubtitleBar: React.FC<Props> = ({ text, textEn, voiceoverFr, voiceo
               lineHeight: 1.15,
               textAlign: 'center',
               letterSpacing: 0.3,
-              opacity: voiceEnEnter * 0.95,
+              opacity: voiceEnter * 0.95,
               borderTop: `1px solid rgba(232,220,203,0.3)`,
               paddingTop: 10,
               width: '100%',

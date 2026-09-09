@@ -11,12 +11,12 @@
 // dynamic import of src/data/videos.ts gets transpiled on the fly.
 
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { voiceCacheHash } from './voice-profile.mjs';
 import { existsSync } from 'node:fs';
 import { readFile, mkdir, stat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { allocateSceneFrames, pcmWavDuration, sceneVoiceSpecs } from './scene-voice.mjs';
+import { continuousSceneFrames, sceneVoiceSpecs } from './scene-voice.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -59,7 +59,7 @@ async function ensureVoiceover(spec) {
   await mkdir(VOICEOVER_DIR, { recursive: true });
   const wavPath = resolve(VOICEOVER_DIR, `${spec.id}.wav`);
   const hashPath = resolve(VOICEOVER_DIR, `${spec.id}.sha256`);
-  const expected = createHash('sha256').update(spec.voiceoverScript, 'utf8').digest('hex');
+  const expected = voiceCacheHash(spec.voiceoverScript, spec.narrationContext);
 
   let cached = false;
   if (existsSync(wavPath) && existsSync(hashPath)) {
@@ -84,6 +84,7 @@ async function ensureVoiceover(spec) {
     '--id', spec.id,
     '--title', spec.title,
     '--script', spec.voiceoverScript,
+    ...(spec.narrationContext ? ['--context', spec.narrationContext] : []),
   ]);
 }
 
@@ -111,17 +112,15 @@ async function renderOne(spec, { noAudio, voiceOnly, sceneVoices }) {
   if (audioMode === 'silent') {
     console.log(`▸ ${spec.id} — silent render, skipping Gemini TTS`);
   } else if (sceneVoices) {
-    const durations = [];
-    for (const scene of sceneVoiceSpecs(spec)) {
-      await ensureVoiceover(scene);
-      durations.push(pcmWavDuration(await readFile(resolve(VOICEOVER_DIR, `${scene.id}.wav`))));
-    }
-    sceneFrames = allocateSceneFrames(durations);
+    const exactScript = sceneVoiceSpecs(spec).map(s => s.voiceoverScript).join(' ');
+    if (spec.voiceoverScript !== exactScript) throw new Error('Continuous narration does not match the caption script');
+    await ensureVoiceover(spec);
+    sceneFrames = continuousSceneFrames(await readFile(resolve(VOICEOVER_DIR, `${spec.id}.wav`)));
   } else {
     await ensureVoiceover(spec);
   }
 
-  const propsJson = JSON.stringify({ spec, audioMode, sceneFrames, sceneVoices: sceneVoices && audioMode !== 'silent' });
+  const propsJson = JSON.stringify({ spec, audioMode, sceneFrames, continuousVoice: sceneVoices && audioMode !== 'silent' });
   const outFile = resolve(OUT_DIR, `${spec.id}.mp4`);
 
   console.log(`▶ ${spec.id} — remotion render (audio: ${audioMode}) → ${outFile}`);

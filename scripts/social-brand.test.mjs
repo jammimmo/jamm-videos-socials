@@ -15,3 +15,14 @@ test('social shorts use the verified Jamm Immo lockup, never the retired wordmar
     assert.match(source, /alt="Jamm Immo"/);
   }
 });
+
+test('shorts keep the commercial site throughout and all five platform icons on the ending', async () => {
+  const source = await readFile(new URL('../src/components/short/SocialBranding.tsx', import.meta.url), 'utf8');
+  assert.match(source, /jammimmo\.com/);
+  for (const name of ['Facebook', 'Instagram', 'YouTube', 'LinkedIn', 'TikTok']) assert.ok(source.includes(`name: '${name}'`));
+  const ending = await readFile(new URL('../src/components/short/Ending.tsx', import.meta.url), 'utf8');
+  assert.match(ending, /<SocialIcons \/>/);
+  assert.match(ending, /jammimmo\.com/);
+  const composition = await readFile(new URL('../src/compositions/JammShort.tsx', import.meta.url), 'utf8');
+  assert.match(composition, /<CommercialWebsite \/>/);
+});

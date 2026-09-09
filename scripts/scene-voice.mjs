@@ -28,6 +28,7 @@ export function sceneVoiceSpecs(spec) {
       id: `${spec.id}-scene-${index + 1}`,
       title: spec.title,
       voiceoverScript: scene.voiceoverFr,
+      narrationContext: spec.scenes.map((s) => s.voiceoverFr).join(' '),
     };
   });
 }
@@ -51,4 +52,37 @@ export function allocateSceneFrames(durations) {
   const spare = 915 - frames.reduce((a, b) => a + b, 0);
   if (spare < 0) throw new Error('Complete voice exceeds the 45-second scene budget; shorten the script');
   return frames.map((n, i) => n + Math.floor(spare / 5) + (i < spare % 5 ? 1 : 0));
+}
+
+// One uncut voice track; move captions at the midpoint of four clear pauses.
+// This is timing evidence, not a transcript attestation: the editorial ASR/
+// human review gate must still confirm that the five sentences were spoken.
+// Ambiguous pause counts fail closed rather than guessing word-based timings.
+export function continuousSceneFrames(bytes) {
+  const seconds = pcmWavDuration(bytes);
+  if (seconds > 30.3) throw new Error('Continuous narration exceeds the scene budget');
+  const windowSamples = 240; // 10 ms @ 24 kHz
+  const count = (bytes.length - 44) / 2;
+  const silent = [];
+  for (let start = 0; start < count; start += windowSamples) {
+    let sum = 0;
+    const end = Math.min(count, start + windowSamples);
+    for (let i = start; i < end; i++) sum += bytes.readInt16LE(44 + i * 2) ** 2;
+    silent.push(Math.sqrt(sum / (end - start)) < 100);
+  }
+  const pauses = [];
+  let start = null;
+  for (let i = 0; i <= silent.length; i++) {
+    if (silent[i]) { if (start === null) start = i; }
+    else if (start !== null) {
+      // Exclude leading/trailing silence and pauses shorter than 320 ms.
+      if (start > 0 && i < silent.length && i - start >= 32) pauses.push((start + i) / 200);
+      start = null;
+    }
+  }
+  if (pauses.length !== 4) throw new Error(`Ambiguous narration alignment: expected 4 sentence pauses, found ${pauses.length}`);
+  const boundaries = [0, ...pauses.map(s => Math.round(s * 30)), 915];
+  const frames = boundaries.slice(1).map((end, i) => end - boundaries[i]);
+  if (frames.some(n => n < 60)) throw new Error('Ambiguous narration alignment: scene shorter than 2 seconds');
+  return frames;
 }

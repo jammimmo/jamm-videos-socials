@@ -2,6 +2,7 @@ import React from 'react';
 import { AbsoluteFill, useCurrentFrame, useVideoConfig, spring, interpolate } from 'remotion';
 import { theme } from '../../styles/theme';
 import { JammLogoMark } from './JammLogoMark';
+import { SocialIcons } from './SocialBranding';
 
 // Ending: a stylised "key-handover" tableau — JAMM IMMO agent (orange suit
 // silhouette, no head) extending a key toward a family silhouette (parent +
@@ -238,7 +239,7 @@ export const Ending: React.FC<{ durationInFrames: number }> = ({ durationInFrame
       <div
         style={{
           position: 'absolute',
-          bottom: 280,
+          bottom: 490,
           left: 0,
           right: 0,
           display: 'flex',
@@ -255,11 +256,13 @@ export const Ending: React.FC<{ durationInFrames: number }> = ({ durationInFrame
       <div
         style={{
           position: 'absolute',
-          bottom: 150,
+          bottom: 250,
           left: 0,
           right: 0,
           display: 'flex',
           justifyContent: 'center',
+          alignItems: 'center',
+          flexDirection: 'column',
           gap: 16,
           opacity: ctaEnter,
           transform: `scale(${ctaPulse})`,
@@ -279,8 +282,9 @@ export const Ending: React.FC<{ durationInFrames: number }> = ({ durationInFrame
             boxShadow: '0 16px 32px rgba(0,0,0,0.5)',
           }}
         >
-          📱 WHATSAPP JAMM IMMO
+          jammimmo.com
         </div>
+        <SocialIcons />
       </div>
     </AbsoluteFill>
   );
