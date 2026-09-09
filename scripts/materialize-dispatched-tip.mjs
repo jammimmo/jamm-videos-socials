@@ -134,6 +134,10 @@ async function main() {
     throw new Error('usage: --payload <json> --spec <json> --env <github-env>');
   }
   const result = materializeDispatchedTip(JSON.parse(await readFile(resolve(args.payload), 'utf8')));
+  // Mask ephemeral delivery capabilities before later Actions steps print env.
+  for (const value of [result.callbackToken, result.callbackUrl, result.uploadUrl]) {
+    console.log(`::add-mask::${value}`);
+  }
   await writeFile(resolve(args.spec), `${JSON.stringify(result.spec)}\n`, { mode: 0o600 });
   await appendFile(resolve(args.env), [
     `TIP_JOB_ID=${result.jobId}`,
