@@ -10,13 +10,14 @@
 // Run me with `tsx scripts/render-batch.mjs` (not plain `node`) so the
 // dynamic import of src/data/videos.ts gets transpiled on the fly.
 
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { voiceCacheHash } from './voice-profile.mjs';
 import { existsSync } from 'node:fs';
 import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pcmWavDuration, sceneVoiceSpecs } from './scene-voice.mjs';
+import { OUTRO } from './fresh-tip-contract.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -108,15 +109,21 @@ async function renderOne(spec, { noAudio, voiceOnly, sceneVoices }) {
   await mkdir(OUT_DIR, { recursive: true });
 
   const audioMode = await resolveAudioMode({ noAudio, voiceOnly });
+  if (spec.template === 'spoken-tip-v2') {
+    if (spec.scenes.length !== 4 || spec.scenes[3].voiceoverFr !== OUTRO.map(s=>s.voiceoverFr).join(' ')
+      || spec.scenes[3].voiceoverEn !== OUTRO.map(s=>s.voiceoverEn).join(' ')) throw new Error('Fresh outro does not match the approved spoken and displayed brand contract');
+    if (spec.title.length > 80 || spec.scenes.slice(0,3).some(s => s.voiceoverFr.length>200 || s.voiceoverEn.length>200)) throw new Error('Fresh tip needs shorter complete captions for the mobile safe area');
+  }
   let sceneFrames;
   if (audioMode === 'silent') {
     console.log(`▸ ${spec.id} — silent render, skipping Gemini TTS`);
   } else if (sceneVoices) {
-    const exactScript = sceneVoiceSpecs(spec).map(s => s.voiceoverScript).join(' ');
+    const fresh = spec.template === 'spoken-tip-v2';
+    const exactScript = fresh ? spec.scenes.map(s => s.voiceoverFr).join(' ') : sceneVoiceSpecs(spec).map(s => s.voiceoverScript).join(' ');
     if (spec.voiceoverScript !== exactScript) throw new Error('Continuous narration does not match the caption script');
     await ensureVoiceover(spec);
     const wavPath = resolve(VOICEOVER_DIR, `${spec.id}.wav`);
-    if (pcmWavDuration(await readFile(wavPath)) > 30.3) throw new Error('Narration exceeds scene budget');
+    if (pcmWavDuration(await readFile(wavPath)) > (fresh ? 59.2 : 30.3)) throw new Error('Narration exceeds scene budget');
     const specPath = resolve(OUT_DIR, `${spec.id}.spec.json`);
     const alignmentPath = resolve(OUT_DIR, `${spec.id}.alignment.json`);
     await writeFile(specPath, JSON.stringify(spec));
@@ -127,6 +134,7 @@ async function renderOne(spec, { noAudio, voiceOnly, sceneVoices }) {
   }
 
   const propsJson = JSON.stringify({ spec, audioMode, sceneFrames, continuousVoice: sceneVoices && audioMode !== 'silent' });
+  await writeFile(resolve(OUT_DIR, `${spec.id}.props.json`), propsJson);
   const outFile = resolve(OUT_DIR, `${spec.id}.mp4`);
 
   console.log(`▶ ${spec.id} — remotion render (audio: ${audioMode}) → ${outFile}`);
@@ -140,6 +148,11 @@ async function renderOne(spec, { noAudio, voiceOnly, sceneVoices }) {
   ]);
 
   const s = await stat(outFile);
+  const probe = JSON.parse(execFileSync('ffprobe', ['-v','error','-show_entries','format=duration:stream=codec_type,width,height','-of','json',outFile], {encoding:'utf8'}));
+  const seconds = Number(probe.format.duration);
+  const video = probe.streams.find(s => s.codec_type === 'video');
+  if (!Number.isFinite(seconds) || seconds<=0 || (spec.template === 'spoken-tip-v2' && seconds>60) || video?.width!==1080 || video?.height!==1920) throw new Error('Invalid rendered media dimensions or duration');
+  await writeFile(resolve(OUT_DIR, `${spec.id}.media.json`), JSON.stringify({duration:seconds,durationHeader:Math.ceil(seconds),width:video.width,height:video.height}));
   console.log(`✓ ${spec.id} — ${(s.size / (1024 * 1024)).toFixed(2)} MB (audio: ${audioMode})`);
 }
 

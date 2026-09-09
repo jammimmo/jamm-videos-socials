@@ -41,6 +41,25 @@ class AlignmentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             alignment.align(self.sentences, self.words, 31)
 
+    def test_fresh_outro_does_not_attest_wolof_or_invent_internal_cuts(self):
+        lines = self.sentences[:3] + ['Retrouvez-nous chez Jamm Immo. Kër gu baax, xel mu dal.']
+        actual = self.sentences[:3] + ['Retrouvez-nous chez Jamm Immo. Quelque chose en wolof.']
+        words = [{'word':t,'start':i*.6,'end':i*.6+.4,'probability':.99} for i,t in enumerate(' '.join(actual).split())]
+        duration = words[-1]['end']+.2
+        frames=alignment.align(lines,words,duration,fresh=True)
+        self.assertEqual(len(frames),4)
+        self.assertLessEqual(sum(frames)/30-words[-1]['end'],1)
+        self.assertGreaterEqual(sum(frames)/30,duration)
+        with self.assertRaisesRegex(ValueError,'silence'):
+            alignment.align(lines,words,duration+2,fresh=True)
+        words[12]['word']='Autre'
+        with self.assertRaisesRegex(ValueError,'boundary'):
+            alignment.align(lines,words,duration,fresh=True)
+
+    def test_phone_and_domain_numeric_transcripts_normalize(self):
+        self.assertEqual(alignment.tokens('+221 76 944 48 49'), alignment.tokens('plus deux cent vingt et un soixante-seize neuf cent quarante-quatre quarante-huit quarante-neuf'))
+        self.assertEqual(alignment.tokens('jammimmo.com'), alignment.tokens('jamm immo point com'))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -4,6 +4,7 @@ import { Main, totalDuration } from './Main';
 import { JammShort, TOTAL_DURATION_FRAMES } from './compositions/JammShort';
 import { theme } from './styles/theme';
 import { VIDEOS } from './data/videos';
+import { spokenDuration } from './compositions/SpokenTip';
 
 export const RemotionRoot: React.FC = () => {
   return (
@@ -24,6 +25,7 @@ export const RemotionRoot: React.FC = () => {
       <Composition
         id="JammShort"
         component={JammShort}
+        calculateMetadata={({props}) => ({durationInFrames: props.spec.template === 'spoken-tip-v2' ? spokenDuration(props.sceneFrames) : TOTAL_DURATION_FRAMES})}
         durationInFrames={TOTAL_DURATION_FRAMES}
         fps={theme.video.fps}
         width={theme.video.width}

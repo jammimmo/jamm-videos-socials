@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { materializeDispatchedTip } from './materialize-dispatched-tip.mjs';
+import { materializeDispatchedTip as materialize } from './materialize-dispatched-tip.mjs';
+const materializeDispatchedTip = value => materialize(value, { legacy: true });
 
 const id = '11111111-1111-4111-8111-111111111111';
 const attempt = '22222222-2222-4222-8222-222222222222';
@@ -92,4 +93,20 @@ test('rejects malformed capabilities and brand drift', () => {
   const badBrand = payload();
   badBrand.content.scriptFr = badBrand.content.scriptFr.replace('Jamm Immo', 'Autre marque');
   assert.throws(() => materializeDispatchedTip(badBrand), /must be spoken/);
+});
+
+test('fresh dispatch preserves all three substantive sentences and records its original scripts', () => {
+  const value=payload();
+  const fr=value.content.scriptFr.split(/(?<=[.!?])\s+/u).slice(0,3);
+  const en=value.content.scriptEn.split(/(?<=[.!?])\s+/u).slice(0,3);
+  value.content.scriptFr=[...fr,'La vérité avant la visite.','Contactez Jamm Immo pour préparer votre entrée dans le logement et poser vos questions.'].join(' ');
+  value.content.scriptEn=[...en,'The truth before the visit.','Contact Jamm Immo to prepare for moving into your home and ask your questions.'].join(' ');
+  const {spec}=materialize(value);
+  assert.equal(spec.template,'spoken-tip-v2');
+  assert.equal(spec.scenes.length,4);
+  assert.deepEqual(spec.scenes.slice(0,3).map(s=>s.voiceoverFr),fr);
+  assert.deepEqual(spec.scenes.slice(0,3).map(s=>s.voiceoverEn),en);
+  assert.equal(spec.sourceScripts.fr,value.content.scriptFr);
+  assert.equal(spec.voiceoverScript,spec.scenes.map(s=>s.voiceoverFr).join(' '));
+  assert.throws(()=>materialize(payload()),/needs re-scripting/);
 });
