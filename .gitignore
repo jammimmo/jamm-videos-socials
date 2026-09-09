@@ -12,3 +12,4 @@ public/audio/voiceovers/*.sha256
 
 # Remotion caches
 .remotion/
+__pycache__/
