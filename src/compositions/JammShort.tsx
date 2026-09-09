@@ -42,10 +42,24 @@ export type JammShortProps = {
   audioMode: 'silent' | 'voice-only' | 'full';
   // Dispatched tips: the exact caption sentence owns its own checked WAV.
   sceneVoices?: boolean;
+  sceneFrames?: number[];
 };
 
-export const JammShort: React.FC<JammShortProps> = ({ spec, audioMode, sceneVoices = false }) => {
+export const JammShort: React.FC<JammShortProps> = ({ spec, audioMode, sceneVoices = false, sceneFrames }) => {
   const { fps } = useVideoConfig();
+  if (sceneFrames && (sceneFrames.length !== 5
+    || sceneFrames.some((n) => !Number.isInteger(n) || n < 60)
+    || sceneFrames.reduce((a, b) => a + b, 0) !== 915)) {
+    throw new Error('Invalid measured scene timeline');
+  }
+  let sceneStart = 75;
+  const segments = SEGMENTS.map((segment) => {
+    if (segment.type !== 'scene' || !sceneFrames) return segment;
+    const duration = sceneFrames[segment.sceneIndex];
+    const adjusted = { ...segment, from: sceneStart, duration };
+    sceneStart += duration;
+    return adjusted;
+  });
 
   const voiceSrc = staticFile(`audio/voiceovers/${spec.id}.wav`);
   const suraSrc = staticFile(SURA_FILE);
@@ -56,7 +70,7 @@ export const JammShort: React.FC<JammShortProps> = ({ spec, audioMode, sceneVoic
 
   return (
     <AbsoluteFill style={{ background: '#000' }}>
-      {SEGMENTS.map((seg, i) => {
+      {segments.map((seg, i) => {
         if (seg.type === 'hook') {
           return (
             <Sequence key={i} from={seg.from} durationInFrames={seg.duration}>

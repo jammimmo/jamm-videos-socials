@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { assertSceneVoiceFits, pcmWavDuration, sceneVoiceSpecs } from './scene-voice.mjs';
+import { allocateSceneFrames, assertSceneVoiceFits, pcmWavDuration, sceneVoiceSpecs } from './scene-voice.mjs';
 
 function wav(seconds) {
   const size = Math.round(seconds * 48000);
@@ -47,11 +47,25 @@ test('corrupt, empty and truncated WAVs fail closed', () => {
   }
 });
 
+test('measured voice redistributes scenes without altering the 45-second video', () => {
+  for (const durations of [[4.8, 6.0, 6.1, 2, 6], [1, 1, 1, 1, 1], [6, 6, 6, 5, 6]]) {
+    const frames = allocateSceneFrames(durations);
+    assert.equal(frames.reduce((a,b) => a+b, 0), 915);
+    frames.forEach((n, i) => assert.ok(n >= Math.ceil(durations[i] * 30) + 6));
+    assert.equal(75 + frames.reduce((a,b) => a+b, 0) + 360, 1350);
+  }
+  assert.throws(() => allocateSceneFrames([10,10,10,10,10]), /budget/);
+  assert.throws(() => allocateSceneFrames([1,2,3,4,NaN]), /valid/);
+  assert.throws(() => allocateSceneFrames([1,2]), /Five/);
+});
+
 test('dispatch rendering validates scene audio and uses the same scene sequence as captions', async () => {
   const renderer = await readFile(new URL('./render-batch.mjs', import.meta.url), 'utf8');
   const composition = await readFile(new URL('../src/compositions/JammShort.tsx', import.meta.url), 'utf8');
   assert.match(renderer, /sceneVoices: Boolean\(specFile\)/);
-  assert.ok(renderer.indexOf('assertSceneVoiceFits(await') < renderer.indexOf('const propsJson'));
+  assert.ok(renderer.includes('sceneFrames = allocateSceneFrames(durations)'));
+  assert.ok(renderer.indexOf('sceneFrames = allocateSceneFrames(durations)') < renderer.indexOf('const propsJson'));
+  assert.match(composition, /sceneFrames\[segment.sceneIndex\]/);
   assert.match(composition, /<Scene spec=\{sceneSpec\}[^]*?showVoice && sceneVoices[^]*?sceneIndex \+ 1[^]*?<\/Sequence>/);
   assert.match(composition, /showVoice && !sceneVoices/);
 });

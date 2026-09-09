@@ -40,3 +40,15 @@ export function assertSceneVoiceFits(bytes, index) {
   if (seconds > available) throw new Error(`Scene ${index + 1} voice exceeds ${available}s; shorten its script before rendering`);
   return seconds;
 }
+
+// Preserve the 45-second delivery contract (hook 75 + scenes 915 + ending 360).
+// Allocate the scene budget from measured audio, never truncate or speed up.
+export function allocateSceneFrames(durations) {
+  if (durations.length !== 5 || durations.some((s) => !Number.isFinite(s) || s <= 0)) {
+    throw new Error('Five valid measured voice durations required');
+  }
+  const frames = durations.map((s) => Math.max(60, Math.ceil(s * 30) + 6));
+  const spare = 915 - frames.reduce((a, b) => a + b, 0);
+  if (spare < 0) throw new Error('Complete voice exceeds the 45-second scene budget; shorten the script');
+  return frames.map((n, i) => n + Math.floor(spare / 5) + (i < spare % 5 ? 1 : 0));
+}
