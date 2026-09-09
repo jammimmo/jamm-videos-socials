@@ -28,10 +28,11 @@ export type HookSpec = {
 };
 
 export type VideoSpec = {
+  template?: 'spoken-tip-v2';
   id: string;
   title: string;
   hook: HookSpec;
-  scenes: [SceneSpec, SceneSpec, SceneSpec, SceneSpec, SceneSpec];
+  scenes: SceneSpec[];
   voiceoverScript: string;
 };
 

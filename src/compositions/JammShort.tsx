@@ -13,6 +13,7 @@ import {
   VOICEOVER_VOLUME,
 } from '../data/audio-config';
 import type { VideoSpec } from '../data/videos';
+import { SpokenTip } from './SpokenTip';
 
 // Timeline (frames @ 30fps):
 // 0–75   Hook (2.5s)
@@ -49,6 +50,7 @@ export type JammShortProps = {
 
 export const JammShort: React.FC<JammShortProps> = ({ spec, audioMode, sceneVoices = false, sceneFrames, continuousVoice = false }) => {
   const { fps } = useVideoConfig();
+  if (spec.template === 'spoken-tip-v2') return <SpokenTip spec={spec} sceneFrames={sceneFrames} audioMode={audioMode}/>;
   if (continuousVoice && (!sceneFrames || sceneVoices)) throw new Error('Continuous voice requires one measured timeline');
   if (sceneFrames && (sceneFrames.length !== 5
     || sceneFrames.some((n) => !Number.isInteger(n) || n < 60)

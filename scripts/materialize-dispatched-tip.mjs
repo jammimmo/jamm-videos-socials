@@ -3,6 +3,7 @@
 import { appendFile, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { freshTipContract, OUTRO } from './fresh-tip-contract.mjs';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HEX64_RE = /^[a-f0-9]{64}$/;
@@ -56,7 +57,7 @@ const VISUALS = {
   market_education: ['building', 'document-stack', 'building', 'document-stack', 'building'],
 };
 
-export function materializeDispatchedTip(raw) {
+export function materializeDispatchedTip(raw, { legacy = false } = {}) {
   const payload = object(raw, 'payload');
   if (payload.contract !== 'jamm-tip-render-v1') throw new Error('unsupported render contract');
   const job = object(payload.job, 'job');
@@ -128,6 +129,16 @@ export function materializeDispatchedTip(raw) {
     voiceoverScript: scriptFr,
   };
 
+  if (!freshTipContract(fr, en) && !legacy) throw new Error('Narration needs re-scripting: expected approved signature and generic CTA in both languages; no content was discarded');
+  if (freshTipContract(fr, en)) {
+    spec.template = 'spoken-tip-v2';
+    spec.sourceScripts = { fr: scriptFr, en: scriptEn };
+    spec.scenes = [...spec.scenes.slice(0, 3), {
+      voiceoverFr: OUTRO.map(s => s.voiceoverFr).join(' '), voiceoverEn: OUTRO.map(s => s.voiceoverEn).join(' '),
+      visualType: 'building', subtitle: 'Retrouvez-nous', subtitleEn: 'Find us',
+    }];
+    spec.voiceoverScript = spec.scenes.map(s => s.voiceoverFr).join(' ');
+  }
   return { jobId, callbackUrl, uploadUrl, callbackToken, spec };
 }
 

@@ -66,6 +66,7 @@ jobs:
           VIDEO="out/batch/tip-${TIP_JOB_ID}.mp4"
           test -s "${VIDEO}"
           SHA256=$(sha256sum "${VIDEO}" | cut -d' ' -f1)
+          DURATION=$(node -p "require('./out/batch/tip-${TIP_JOB_ID}.media.json').durationHeader")
           CODE=$(curl --fail-with-body --silent --show-error \
             --output upload-response.json --write-out '%{http_code}' \
             -X POST "${TIP_UPLOAD_URL}" \
@@ -73,7 +74,7 @@ jobs:
             -H 'Content-Type: video/mp4' \
             -H "X-Job-Id: ${TIP_JOB_ID}" \
             -H "X-Media-Sha256: ${SHA256}" \
-            -H 'X-Duration: 45' \
+            -H "X-Duration: ${DURATION}" \
             -H 'X-Width: 1080' \
             -H 'X-Height: 1920' \
             --data-binary @"${VIDEO}")
@@ -100,6 +101,8 @@ jobs:
           path: |
             out/batch/*.mp4
             out/batch/*.alignment.json
+            out/batch/*.props.json
+            out/batch/*.media.json
             public/audio/voiceovers/*.wav
           retention-days: 14
           if-no-files-found: ignore
