@@ -28,6 +28,7 @@ export function sceneVoiceSpecs(spec) {
       id: `${spec.id}-scene-${index + 1}`,
       title: spec.title,
       voiceoverScript: scene.voiceoverFr,
+      narrationContext: spec.scenes.map((s) => s.voiceoverFr).join(' '),
     };
   });
 }

@@ -4,6 +4,7 @@ import { Hook } from '../components/short/Hook';
 import { Scene } from '../components/short/Scene';
 import { Ending } from '../components/short/Ending';
 import { BrandBorder } from '../components/short/BrandBorder';
+import { CommercialWebsite } from '../components/short/SocialBranding';
 import {
   SURA_FILE,
   SURA_ORIGINAL_DURATION_SEC,
@@ -116,6 +117,7 @@ export const JammShort: React.FC<JammShortProps> = ({ spec, audioMode, sceneVoic
 
       {/* Persistent brand border on top of everything */}
       <BrandBorder />
+      <CommercialWebsite />
     </AbsoluteFill>
   );
 };

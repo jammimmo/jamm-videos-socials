@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { allocateSceneFrames, assertSceneVoiceFits, pcmWavDuration, sceneVoiceSpecs } from './scene-voice.mjs';
+import { voiceCacheHash, voicePrompt } from './voice-profile.mjs';
 
 function wav(seconds) {
   const size = Math.round(seconds * 48000);
@@ -21,9 +22,20 @@ test('voices preserve the exact text displayed in each scene and have separate c
   const voices = sceneVoiceSpecs(spec);
   assert.equal(new Set(voices.map(v => v.id)).size, 5);
   assert.deepEqual(voices.map(v => v.voiceoverScript), spec.scenes.map(s => s.voiceoverFr));
+  assert.ok(voices.every(v => v.narrationContext === spec.scenes.map(s => s.voiceoverFr).join(' ')));
   assert.throws(() => sceneVoiceSpecs({ ...spec, scenes: [] }));
   assert.throws(() => sceneVoiceSpecs({ ...spec, id: '../invalid' }));
   assert.throws(() => sceneVoiceSpecs({ ...spec, scenes: Array(5).fill({}) }));
+});
+
+test('narrator cache includes the shared profile and context, with no per-scene model fallback', async () => {
+  assert.equal(voiceCacheHash('Bonjour.'), voiceCacheHash('Bonjour.'));
+  assert.notEqual(voiceCacheHash('Bonjour.'), voiceCacheHash('Bonsoir.'));
+  assert.notEqual(voiceCacheHash('Bonjour.'), voiceCacheHash('Bonjour.', 'Contexte.'));
+  assert.match(voicePrompt('Bonjour.', 'Contexte.'), /continuity only \(do not read\)/);
+  const generator = await readFile(new URL('./generate-gemini-voiceover.mjs', import.meta.url), 'utf8');
+  assert.doesNotMatch(generator, /FALLBACK_MODEL/);
+  assert.match(generator, /voiceCacheHash\(script, args.context\)/);
 });
 
 test('audio must fit before its caption disappears, with a 100ms tail', () => {

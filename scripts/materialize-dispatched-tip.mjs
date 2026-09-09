@@ -112,7 +112,7 @@ export function materializeDispatchedTip(raw) {
     title,
     hook: {
       title: short(title.toUpperCase(), 54),
-      titleEn: short(en[0], 54),
+      titleEn: en[0],
       subline: 'La vérité avant la visite.',
       sublineEn: 'The truth before the visit.',
       cards,
@@ -120,8 +120,8 @@ export function materializeDispatchedTip(raw) {
     scenes: fr.map((voiceoverFr, index) => ({
       visualType: visuals[index],
       ...(variants[index] ? { variant: variants[index] } : {}),
-      subtitle: short(voiceoverFr.toUpperCase(), 58),
-      subtitleEn: short(en[index], 58),
+      subtitle: `CONSEIL ${index + 1} / 5`,
+      subtitleEn: `TIP ${index + 1} / 5`,
       voiceoverFr,
       voiceoverEn: en[index],
     })),

@@ -11,7 +11,7 @@
 // dynamic import of src/data/videos.ts gets transpiled on the fly.
 
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { voiceCacheHash } from './voice-profile.mjs';
 import { existsSync } from 'node:fs';
 import { readFile, mkdir, stat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -59,7 +59,7 @@ async function ensureVoiceover(spec) {
   await mkdir(VOICEOVER_DIR, { recursive: true });
   const wavPath = resolve(VOICEOVER_DIR, `${spec.id}.wav`);
   const hashPath = resolve(VOICEOVER_DIR, `${spec.id}.sha256`);
-  const expected = createHash('sha256').update(spec.voiceoverScript, 'utf8').digest('hex');
+  const expected = voiceCacheHash(spec.voiceoverScript, spec.narrationContext);
 
   let cached = false;
   if (existsSync(wavPath) && existsSync(hashPath)) {
@@ -84,6 +84,7 @@ async function ensureVoiceover(spec) {
     '--id', spec.id,
     '--title', spec.title,
     '--script', spec.voiceoverScript,
+    ...(spec.narrationContext ? ['--context', spec.narrationContext] : []),
   ]);
 }
 

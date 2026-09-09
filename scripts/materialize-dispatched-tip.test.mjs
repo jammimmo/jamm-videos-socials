@@ -57,6 +57,15 @@ test('rejects legacy word-sliced scripts and mismatched translation scene counts
   assert.throws(() => materializeDispatchedTip(english), /five complete sentences/);
 });
 
+test('English narration and opening sentence remain complete, without ellipsis excerpts', () => {
+  const value = payload();
+  value.content.scriptEn = 'At key handover, carefully take readings from both the water and electricity meters. Record the readings and date, then keep a clear photograph of each meter. These records help you compare future bills and report any discrepancy. The truth before the visit. Contact Jamm Immo to prepare for moving into your home and ask your questions.';
+  const { spec } = materializeDispatchedTip(value);
+  assert.equal(spec.hook.titleEn, value.content.scriptEn.split('. ')[0] + '.');
+  assert.equal(spec.scenes.map(s => s.voiceoverEn).join(' '), value.content.scriptEn);
+  assert.ok(spec.scenes.every(s => !s.subtitleEn.includes('…')));
+});
+
 test('rejects an attacker-controlled delivery host', () => {
   const value = payload();
   value.delivery.uploadUrl = `https://attacker.example/api/tour/upload?attempt=${attempt}`;

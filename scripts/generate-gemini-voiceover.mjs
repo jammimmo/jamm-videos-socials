@@ -14,7 +14,6 @@
 //   public/audio/voiceovers/<id>.sha256   (hash of the input script, for cache invalidation)
 
 import { GoogleGenAI } from '@google/genai';
-import { createHash } from 'node:crypto';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,11 +21,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
 
-const VOICE_NAME = 'Charon';
-const PRIMARY_MODEL = 'gemini-3.1-flash-tts-preview';
-const FALLBACK_MODEL = 'gemini-2.5-flash-preview-tts';
-const STYLE_DIRECTION =
-  'Read in French with a confident male West African voice, natural Dakar/Senegalese influence, warm real estate advisor tone, cinematic urgency, clear pronunciation, not exaggerated';
+import { VOICE_NAME, PRIMARY_MODEL, voiceCacheHash, voicePrompt } from './voice-profile.mjs';
 
 // Gemini TTS returns raw little-endian 16-bit PCM mono at 24000 Hz.
 const SAMPLE_RATE = 24000;
@@ -109,7 +104,7 @@ async function main() {
     );
   }
 
-  const prompt = `${STYLE_DIRECTION}:\n\n${script}`;
+  const prompt = voicePrompt(script, args.context);
   const ai = new GoogleGenAI({ apiKey });
 
   let pcm;
@@ -118,15 +113,8 @@ async function main() {
     pcm = await callGemini(ai, PRIMARY_MODEL, prompt);
   } catch (primaryErr) {
     const msg = primaryErr?.message ?? String(primaryErr);
-    console.warn(`⚠ Primary model ${PRIMARY_MODEL} failed (${msg.split('\n')[0]}). Falling back to ${FALLBACK_MODEL}.`);
-    try {
-      pcm = await callGemini(ai, FALLBACK_MODEL, prompt);
-    } catch (fallbackErr) {
-      const fmsg = fallbackErr?.message ?? String(fallbackErr);
-      abort(
-        `Both Gemini TTS models failed.\n  primary  ${PRIMARY_MODEL}: ${msg.split('\n')[0]}\n  fallback ${FALLBACK_MODEL}: ${fmsg.split('\n')[0]}`,
-      );
-    }
+    // Never silently switch narrator models halfway through a video.
+    abort(`Consistent narrator unavailable (${PRIMARY_MODEL}): ${msg.split('\n')[0]}`);
   }
 
   const wav = pcmToWav(pcm);
@@ -134,7 +122,7 @@ async function main() {
   await mkdir(outDir, { recursive: true });
   const wavPath = resolve(outDir, `${id}.wav`);
   const hashPath = resolve(outDir, `${id}.sha256`);
-  const hash = createHash('sha256').update(script, 'utf8').digest('hex');
+  const hash = voiceCacheHash(script, args.context);
 
   await writeFile(wavPath, wav);
   await writeFile(hashPath, `${hash}\n`);
