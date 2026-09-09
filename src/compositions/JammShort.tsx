@@ -44,10 +44,12 @@ export type JammShortProps = {
   // Dispatched tips: the exact caption sentence owns its own checked WAV.
   sceneVoices?: boolean;
   sceneFrames?: number[];
+  continuousVoice?: boolean;
 };
 
-export const JammShort: React.FC<JammShortProps> = ({ spec, audioMode, sceneVoices = false, sceneFrames }) => {
+export const JammShort: React.FC<JammShortProps> = ({ spec, audioMode, sceneVoices = false, sceneFrames, continuousVoice = false }) => {
   const { fps } = useVideoConfig();
+  if (continuousVoice && (!sceneFrames || sceneVoices)) throw new Error('Continuous voice requires one measured timeline');
   if (sceneFrames && (sceneFrames.length !== 5
     || sceneFrames.some((n) => !Number.isInteger(n) || n < 60)
     || sceneFrames.reduce((a, b) => a + b, 0) !== 915)) {
@@ -101,8 +103,13 @@ export const JammShort: React.FC<JammShortProps> = ({ spec, audioMode, sceneVoic
       })}
 
       {/* Voice-over — full duration, plays at natural rate */}
-      {showVoice && !sceneVoices && (
+      {showVoice && !sceneVoices && !continuousVoice && (
         <Audio src={voiceSrc} volume={VOICEOVER_VOLUME} />
+      )}
+      {showVoice && continuousVoice && (
+        <Sequence from={75} durationInFrames={915}>
+          <Audio src={voiceSrc} volume={VOICEOVER_VOLUME} />
+        </Sequence>
       )}
 
       {/* Background sourate — sped up to fit 44s, silenced for the final 1s */}

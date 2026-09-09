@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { allocateSceneFrames, assertSceneVoiceFits, pcmWavDuration, sceneVoiceSpecs } from './scene-voice.mjs';
+import { allocateSceneFrames, assertSceneVoiceFits, pcmWavDuration, sceneVoiceSpecs, continuousSceneFrames } from './scene-voice.mjs';
 import { voiceCacheHash, voicePrompt } from './voice-profile.mjs';
 
 function wav(seconds) {
@@ -75,9 +75,31 @@ test('dispatch rendering validates scene audio and uses the same scene sequence 
   const renderer = await readFile(new URL('./render-batch.mjs', import.meta.url), 'utf8');
   const composition = await readFile(new URL('../src/compositions/JammShort.tsx', import.meta.url), 'utf8');
   assert.match(renderer, /sceneVoices: Boolean\(specFile\)/);
-  assert.ok(renderer.includes('sceneFrames = allocateSceneFrames(durations)'));
-  assert.ok(renderer.indexOf('sceneFrames = allocateSceneFrames(durations)') < renderer.indexOf('const propsJson'));
+  assert.ok(renderer.includes('sceneFrames = continuousSceneFrames('));
+  assert.ok(renderer.indexOf('sceneFrames = continuousSceneFrames(') < renderer.indexOf('const propsJson'));
+  assert.doesNotMatch(renderer, /await ensureVoiceover\(scene\)/);
+  assert.match(renderer, /continuousVoice: sceneVoices/);
   assert.match(composition, /sceneFrames\[segment.sceneIndex\]/);
   assert.match(composition, /<Scene spec=\{sceneSpec\}[^]*?showVoice && sceneVoices[^]*?sceneIndex \+ 1[^]*?<\/Sequence>/);
   assert.match(composition, /showVoice && !sceneVoices/);
+  assert.match(composition, /showVoice && continuousVoice[^]*?<Sequence from=\{75\} durationInFrames=\{915\}>[^]*?<Audio src=\{voiceSrc\}/);
+});
+
+function narration(pauses = [3, 7, 11, 15]) {
+  const bytes = wav(20);
+  for (let i = 0; i < 20 * 24000; i++) {
+    const t = i / 24000;
+    const quiet = t < .2 || t >= 19.8 || pauses.some(p => t >= p && t < p + .5);
+    bytes.writeInt16LE(quiet ? 0 : (i % 2 ? 4000 : -4000), 44 + i * 2);
+  }
+  return bytes;
+}
+
+test('one continuous take aligns captions at measured pauses without stretching the voice', () => {
+  assert.deepEqual(continuousSceneFrames(narration()), [98, 120, 120, 120, 457]);
+  assert.throws(() => continuousSceneFrames(narration([3, 7, 11])), /expected 4/);
+  assert.throws(() => continuousSceneFrames(narration([3, 5, 7, 11, 15])), /expected 4/);
+  assert.throws(() => continuousSceneFrames(narration([.5, 7, 11, 15])), /shorter/);
+  assert.throws(() => continuousSceneFrames(wav(20)), /expected 4/);
+  assert.throws(() => continuousSceneFrames(wav(31)), /budget/);
 });
