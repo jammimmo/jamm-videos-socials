@@ -32,14 +32,12 @@ function deliveryUrl(value, pathname, attempt) {
   return url.toString();
 }
 
-function wordsToFiveParts(value) {
-  const words = value.split(/\s+/).filter(Boolean);
-  if (words.length < 10) throw new Error('script is too short for five scenes');
-  const parts = [];
-  for (let index = 0; index < 5; index++) {
-    const start = Math.floor((index * words.length) / 5);
-    const end = Math.floor(((index + 1) * words.length) / 5);
-    parts.push(words.slice(start, end).join(' '));
+function sentencesToFiveParts(value) {
+  // Keep the generator's complete sentences intact: no word-count slicing,
+  // no invented punctuation, and no splitting the brand across voice clips.
+  const parts = value.trim().split(/(?<=[.!?])\s+/u);
+  if (parts.length !== 5 || parts.some((part) => !/[.!?]$/u.test(part))) {
+    throw new Error('script requires exactly five complete sentences; regenerate the draft');
   }
   return parts;
 }
@@ -97,8 +95,8 @@ export function materializeDispatchedTip(raw) {
   const callbackToken = text(delivery.callbackToken, 'delivery.callbackToken', 64).toLowerCase();
   if (!HEX64_RE.test(callbackToken)) throw new Error('invalid callback capability');
 
-  const fr = wordsToFiveParts(scriptFr);
-  const en = wordsToFiveParts(scriptEn);
+  const fr = sentencesToFiveParts(scriptFr);
+  const en = sentencesToFiveParts(scriptEn);
   const cards = content.hashtags.slice(0, 3).map((tag) => short(tag.replace(/^#/, ''), 24));
   while (cards.length < 3) cards.push(['Conseil', 'Dakar', 'Jamm Immo'][cards.length]);
 

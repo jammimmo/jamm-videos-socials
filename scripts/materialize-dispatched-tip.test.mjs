@@ -43,6 +43,18 @@ test('materialises an exact five-scene Jamm Immo tip', () => {
   assert.equal(result.spec.voiceoverScript, payload().content.scriptFr);
   assert.equal(result.uploadUrl, `${worker}/api/tour/upload?attempt=${attempt}`);
   assert.match(JSON.stringify(result.spec), /Jamm Immo/i);
+  assert.equal(result.spec.scenes.map((scene) => scene.voiceoverFr).join(' '), payload().content.scriptFr);
+  assert.equal(result.spec.scenes[0].voiceoverFr, 'À Dakar, préparez chaque document avant votre visite.');
+  assert.equal(result.spec.scenes[4].voiceoverEn, 'Jamm Immo guides you with a clear and safe method.');
+});
+
+test('rejects legacy word-sliced scripts and mismatched translation scene counts', () => {
+  const value = payload();
+  value.content.scriptFr = "Lors de la remise des clés, relevez les compteurs d'eau et d'électricité pour éviter les mauvaises surprises. La vérité avant la visite. Contactez Jamm Immo pour un accompagnement personnalisé.";
+  assert.throws(() => materializeDispatchedTip(value), /five complete sentences/);
+  const english = payload();
+  english.content.scriptEn += ' One extra sentence.';
+  assert.throws(() => materializeDispatchedTip(english), /five complete sentences/);
 });
 
 test('rejects an attacker-controlled delivery host', () => {
