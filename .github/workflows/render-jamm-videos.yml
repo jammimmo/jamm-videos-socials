@@ -120,13 +120,13 @@ jobs:
         if: ${{ always() && matrix.video_id == 'fresh-compteurs' }}
         uses: actions/upload-artifact@v4
         with:
-          name: fresh-compteurs-v2-audit
+          name: fresh-compteurs-v3-audit
           path: |
-            out/batch/fresh-compteurs-v2.mp4
-            out/batch/fresh-compteurs-v2.alignment.json
-            out/batch/fresh-compteurs-v2.props.json
-            out/batch/fresh-compteurs-v2.media.json
-            out/batch/fresh-compteurs-v2.spec.json
-            public/audio/voiceovers/fresh-compteurs-v2.wav
+            out/batch/fresh-compteurs-v3.mp4
+            out/batch/fresh-compteurs-v3.alignment.json
+            out/batch/fresh-compteurs-v3.props.json
+            out/batch/fresh-compteurs-v3.media.json
+            out/batch/fresh-compteurs-v3.spec.json
+            public/audio/voiceovers/fresh-compteurs-v3.wav
           retention-days: 30
           if-no-files-found: warn
