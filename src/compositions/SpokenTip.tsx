@@ -101,11 +101,11 @@ const Panel:React.FC<{spec:VideoSpec;index:number}> = ({spec,index}) => {
   </AbsoluteFill>;
 };
 
-export const SpokenTip:React.FC<{spec:VideoSpec;sceneFrames?:number[];audioMode:string}> = ({spec,sceneFrames,audioMode}) => {
+export const SpokenTip:React.FC<{spec:VideoSpec;sceneFrames?:number[];audioMode:string;fullSceneAudio?:boolean}> = ({spec,sceneFrames,audioMode,fullSceneAudio}) => {
   spokenDuration(sceneFrames);
   if(spec.scenes.length!==4) throw new Error('Invalid spoken-tip content contract');
   let start=0;
   return <AbsoluteFill>{sceneFrames!.map((duration,index)=>{const from=start;start+=duration;return <Sequence key={index} from={from} durationInFrames={duration}><Panel spec={spec} index={index}/></Sequence>;})}
-    {audioMode!=='silent' && <Audio src={staticFile(`audio/voiceovers/${spec.id}.wav`)}/>}
+    {audioMode!=='silent' && <Audio src={staticFile(`audio/voiceovers/${spec.id}${fullSceneAudio?'-full-scenes':''}.wav`)}/>}
   </AbsoluteFill>;
 };

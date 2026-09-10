@@ -45,12 +45,13 @@ export type JammShortProps = {
   // Dispatched tips: the exact caption sentence owns its own checked WAV.
   sceneVoices?: boolean;
   sceneFrames?: number[];
+  fullSceneAudio?: boolean;
   continuousVoice?: boolean;
 };
 
-export const JammShort: React.FC<JammShortProps> = ({ spec, audioMode, sceneVoices = false, sceneFrames, continuousVoice = false }) => {
+export const JammShort: React.FC<JammShortProps> = ({ spec, audioMode, sceneVoices = false, sceneFrames, continuousVoice = false, fullSceneAudio }) => {
   const { fps } = useVideoConfig();
-  if (spec.template === 'spoken-tip-v2') return <SpokenTip spec={spec} sceneFrames={sceneFrames} audioMode={audioMode}/>;
+  if (spec.template === 'spoken-tip-v2') return <SpokenTip spec={spec} sceneFrames={sceneFrames} audioMode={audioMode} fullSceneAudio={fullSceneAudio}/>;
   if (continuousVoice && (!sceneFrames || sceneVoices)) throw new Error('Continuous voice requires one measured timeline');
   if (sceneFrames && (sceneFrames.length !== 5
     || sceneFrames.some((n) => !Number.isInteger(n) || n < 60)

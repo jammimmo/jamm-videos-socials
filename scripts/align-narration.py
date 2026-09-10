@@ -11,6 +11,34 @@ import unicodedata
 import wave
 
 
+def preserve_full_scenes(frames, pcm, sample_rate=24000, minimums=(180, 120, 180, 360)):
+    """Extend visual slots, inserting silence at verified sentence boundaries.
+
+    Every original PCM sample is retained once, in order, at its original rate.
+    The authored visual duration is a floor, never replaced by a short sentence.
+    """
+    if sample_rate != 24000 or len(pcm) % 2 or len(frames) != 4:
+        raise ValueError('Expected four scenes and 24kHz mono PCM16')
+    if len(minimums) != 4 or any(type(n) is not int or n < 30 for n in minimums):
+        raise ValueError('Invalid authored scene durations')
+    if any(type(n) is not int or n < 30 for n in frames):
+        raise ValueError('Invalid speech timeline')
+    full = [max(a, b) for a, b in zip(frames, minimums)]
+    if sum(full) > 1800:
+        raise ValueError('Full scenes exceed 60 seconds; revise script, never cut scenes')
+    samples_per_frame = sample_rate // 30
+    if len(pcm) > sum(frames) * samples_per_frame * 2:
+        raise ValueError('Speech extends beyond measured timeline')
+    chunks, cursor, source_frame = [], 0, 0
+    for original, complete in zip(frames, full):
+        source_frame += original
+        end = min(source_frame * samples_per_frame * 2, len(pcm))
+        segment = pcm[cursor:end]
+        chunks.append(segment + bytes(complete * samples_per_frame * 2 - len(segment)))
+        cursor = end
+    return full, b''.join(chunks)
+
+
 def tokens(text):
     plain = ''.join(c for c in unicodedata.normalize('NFKD', text.lower())
                     if not unicodedata.combining(c))
@@ -92,6 +120,7 @@ def main():
     parser.add_argument('--wav', required=True)
     parser.add_argument('--spec', required=True)
     parser.add_argument('--output', required=True)
+    parser.add_argument('--padded-wav')
     args = parser.parse_args()
     import torch
     import whisper
@@ -109,13 +138,26 @@ def main():
     words = [w for segment in result['segments'] for w in segment.get('words', [])]
     try:
         frames = align([s['voiceoverFr'] for s in spec['scenes']], words, duration, fresh=fresh)
+        speech_frames = list(frames)
+        if fresh:
+            if not args.padded_wav:
+                raise ValueError('Full-scene narration output required')
+            with wave.open(args.wav, 'rb') as source:
+                if source.getnchannels() != 1 or source.getsampwidth() != 2:
+                    raise ValueError('Expected mono PCM16')
+                frames, padded = preserve_full_scenes(frames, source.readframes(source.getnframes()), source.getframerate(),
+                    [s.get('durationInFrames', default) for s, default in zip(spec['scenes'], (180,120,180,360))])
+            with wave.open(args.padded_wav, 'wb') as target:
+                target.setparams((1, 2, 24000, 0, 'NONE', 'not compressed'))
+                target.writeframes(padded)
     except ValueError as error:
         with open(args.output, 'w', encoding='utf8') as target:
             json.dump({'wavDuration': duration, 'transcript': result['text'], 'words': words,
                        'reviewRequired': True, 'alignmentError': str(error)}, target)
         raise
     with open(args.output, 'w', encoding='utf8') as target:
-        json.dump({'sceneFrames': frames, 'durationInFrames': sum(frames), 'wavDuration': duration, 'transcript': result['text'], 'words': words,
+        json.dump({'sceneFrames': frames, 'speechSceneFrames': speech_frames, 'durationInFrames': sum(frames), 'wavDuration': duration, 'transcript': result['text'], 'words': words,
+                   'wordTimestampBasis': 'original-unpadded-wav', 'paddedWav': args.padded_wav if fresh else None,
                    'method': 'whisper-base-word-anchors-v1', 'reviewRequired': True,
                    'unverifiedPronunciation': ['Jamm Immo', 'website', 'phone', 'Wolof'] if fresh else []}, target)
 
