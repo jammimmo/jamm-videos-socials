@@ -8,6 +8,34 @@ spec.loader.exec_module(alignment)
 
 
 class AlignmentTests(unittest.TestCase):
+    def test_full_scenes_keep_every_sample_and_delay_next_sentence(self):
+        frames = [60, 30, 90, 360]
+        segments = [bytes([n, n]) * (frames[n-1]*800) for n in range(1,5)]
+        full, pcm = alignment.preserve_full_scenes(frames, b''.join(segments))
+        self.assertEqual(full, [180,120,180,360])
+        cursor = 0
+        for original, complete, segment in zip(frames, full, segments):
+            self.assertEqual(pcm[cursor:cursor+len(segment)], segment)
+            self.assertEqual(pcm[cursor+len(segment):cursor+complete*1600], bytes((complete-original)*1600))
+            cursor += complete*1600
+        self.assertEqual(len(pcm), sum(full)*1600)
+
+    def test_long_speech_extends_scene_never_truncates(self):
+        frames = [240,150,210,400]
+        source = bytes([1,2])*sum(frames)*800
+        full, pcm = alignment.preserve_full_scenes(frames, source)
+        self.assertEqual(full, frames)
+        self.assertEqual(pcm, source)
+        with self.assertRaisesRegex(ValueError, 'never cut'):
+            alignment.preserve_full_scenes([600]*4, b'')
+
+    def test_authored_duration_and_entire_wav_tail_preserved(self):
+        frames = [90,90,90,360]
+        source = bytes([1,2])*(sum(frames)*800-200)
+        full, pcm = alignment.preserve_full_scenes(frames, source, minimums=[210,150,180,400])
+        self.assertEqual(full,[210,150,180,400])
+        self.assertEqual(pcm.count(bytes([1,2])),len(source)//2)
+
     def setUp(self):
         self.sentences = ['Voici le premier compteur.', 'Photographiez ensuite chaque index.',
                           'Conservez vos preuves ensemble.', 'Comparez les prochaines factures.',

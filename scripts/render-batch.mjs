@@ -57,6 +57,10 @@ function runStreaming(cmd, args, env = process.env) {
 }
 
 async function ensureVoiceover(spec) {
+  if (spec.template === 'spoken-tip-v2') {
+    const targets = spec.scenes.map((scene, index) => `Scene ${index+1}: about ${(scene.durationInFrames ?? [180,120,180,360][index])/30} seconds, without rushing. Exact passage: ${scene.voiceoverFr}`).join('\n');
+    spec = { ...spec, narrationContext: `${spec.narrationContext ?? ''}\nPacing targets, not spoken text:\n${targets}\nTake natural breaths. Do not add words or change the script to fill time; a small silence is acceptable.` };
+  }
   await mkdir(VOICEOVER_DIR, { recursive: true });
   const wavPath = resolve(VOICEOVER_DIR, `${spec.id}.wav`);
   const hashPath = resolve(VOICEOVER_DIR, `${spec.id}.sha256`);
@@ -127,13 +131,14 @@ async function renderOne(spec, { noAudio, voiceOnly, sceneVoices }) {
     const specPath = resolve(OUT_DIR, `${spec.id}.spec.json`);
     const alignmentPath = resolve(OUT_DIR, `${spec.id}.alignment.json`);
     await writeFile(specPath, JSON.stringify(spec));
-    await runStreaming('python3', ['scripts/align-narration.py', '--wav', wavPath, '--spec', specPath, '--output', alignmentPath]);
+    await runStreaming('python3', ['scripts/align-narration.py', '--wav', wavPath, '--spec', specPath, '--output', alignmentPath,
+      ...(fresh ? ['--padded-wav', resolve(VOICEOVER_DIR, `${spec.id}-full-scenes.wav`)] : [])]);
     sceneFrames = JSON.parse(await readFile(alignmentPath, 'utf8')).sceneFrames;
   } else {
     await ensureVoiceover(spec);
   }
 
-  const propsJson = JSON.stringify({ spec, audioMode, sceneFrames, continuousVoice: sceneVoices && audioMode !== 'silent' });
+  const propsJson = JSON.stringify({ spec, audioMode, sceneFrames, fullSceneAudio: spec.template === 'spoken-tip-v2' && sceneVoices && audioMode !== 'silent', continuousVoice: sceneVoices && audioMode !== 'silent' });
   await writeFile(resolve(OUT_DIR, `${spec.id}.props.json`), propsJson);
   const outFile = resolve(OUT_DIR, `${spec.id}.mp4`);
 

@@ -128,5 +128,6 @@ jobs:
             out/batch/fresh-compteurs-v3.media.json
             out/batch/fresh-compteurs-v3.spec.json
             public/audio/voiceovers/fresh-compteurs-v3.wav
+            public/audio/voiceovers/fresh-compteurs-v3-full-scenes.wav
           retention-days: 30
           if-no-files-found: warn
