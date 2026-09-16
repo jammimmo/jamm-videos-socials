@@ -70,8 +70,8 @@ const EndCard:React.FC = () => {
     <div style={{marginTop:70,fontSize:29,color:'#D6DCFF'}}>Retrouvez-nous <span style={{fontSize:24,color:'#B1BDF3'}}>/ Find us</span></div>
     <div style={{marginTop:18,fontSize:79,fontWeight:800,letterSpacing:-2,color:orange}}>jammimmo.com</div>
     <div style={{width:70,height:5,background:orange,borderRadius:5,margin:'52px auto'}}/>
-    <div style={{fontSize:29,color:'#D6DCFF'}}>Appelez-nous <span style={{fontSize:24,color:'#B1BDF3'}}>/ Call us</span></div>
-    <div style={{marginTop:18,fontSize:80,fontWeight:800,letterSpacing:1}}>76 944 48 49</div>
+    <div style={{fontSize:29,color:'#D6DCFF'}}>Téléphone ou WhatsApp <span style={{fontSize:24,color:'#B1BDF3'}}>/ Call or WhatsApp</span></div>
+    <div style={{marginTop:18,fontSize:72,fontWeight:800,letterSpacing:1}}>+221 76 944 48 49</div>
     <div style={{marginTop:90,fontSize:53,fontWeight:700,lineHeight:1.25}}>Kër gu baax, xel mu dal</div>
     <div style={{marginTop:20,fontSize:27,color:'#D6DCFF'}}>Un bon chez-soi, l’esprit tranquille.</div>
     <div style={{marginTop:10,fontSize:25,color:'#B1BDF3'}}>A good home, a peaceful mind.</div>

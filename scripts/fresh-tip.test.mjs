@@ -25,7 +25,10 @@ test('fresh composition has one natural-rate track, bounded drawing and end-only
   assert.match(source,/height:590,overflow:'hidden'/);
   assert.equal((source.match(/jammimmo\.com/g)||[]).length,1); // one end-card site label
   assert.match(source,/index===3 \? <EndCard\/>/);
-  assert.doesNotMatch(source,/221|captionFr|background:'white'/);
+  assert.doesNotMatch(source,/captionFr|background:'white'/);
+  assert.match(source,/\+221 76 944 48 49/);
+  assert.match(source,/Téléphone ou WhatsApp/);
+  assert.match(source,/Call or WhatsApp/);
   assert.match(source,/theme\.jamm/);
   assert.match(source,/Logo width=\{440\}/);
 });
