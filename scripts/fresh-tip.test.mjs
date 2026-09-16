@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BRAND, OUTRO, freshTipContract } from './fresh-tip-contract.mjs';
 import { readFile } from 'node:fs/promises';
+import { voiceCacheHash } from './voice-profile.mjs';
 
 test('only known boilerplate may be replaced, with bilingual evidence', () => {
   const fr=['a','b','c','La vérité avant la visite.','Contactez Jamm Immo pour préparer votre entrée dans le logement et poser vos questions.'];
@@ -36,7 +37,15 @@ test('fresh composition has one natural-rate track, bounded drawing and end-only
 test('manual prototype is isolated from the all matrix and preserves exact narration',async()=>{
   const workflow=await readFile(new URL('../.github/workflows/render-jamm-videos.yml',import.meta.url),'utf8');
   const spec=JSON.parse(await readFile(new URL('./fixtures/fresh-compteurs.spec.json',import.meta.url),'utf8'));
-  assert.equal(spec.id,'fresh-compteurs-v3');
+  assert.equal(spec.id,'fresh-compteurs-v4');
+  const old=JSON.parse(await readFile(new URL('./fixtures/fresh-compteurs-v3.spec.json',import.meta.url),'utf8'));
+  assert.equal(old.id,'fresh-compteurs-v3');
+  assert.doesNotMatch(old.voiceoverScript,/WhatsApp/);
+  assert.match(spec.voiceoverScript,/WhatsApp/);
+  assert.match(spec.scenes[3].voiceoverEn,/WhatsApp/);
+  assert.notEqual(voiceCacheHash(spec.voiceoverScript),voiceCacheHash(old.voiceoverScript));
+  assert.match(workflow,/fresh-compteurs-v4-audit/);
+  assert.doesNotMatch(workflow,/fresh-compteurs-v3/);
   assert.equal(spec.scenes[3].voiceoverFr,OUTRO.map(s=>s.voiceoverFr).join(' '));
   assert.equal(spec.scenes[3].voiceoverEn,OUTRO.map(s=>s.voiceoverEn).join(' '));
   assert.equal(spec.voiceoverScript,spec.scenes.map(s=>s.voiceoverFr).join(' '));
