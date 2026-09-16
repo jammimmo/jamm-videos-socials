@@ -3,7 +3,7 @@
 export const BRAND = Object.freeze({ website: 'jammimmo.com', phone: '76 944 48 49', slogan: 'Kër gu baax, xel mu dal' });
 export const OUTRO = [
   { voiceoverFr: 'Retrouvez-nous sur notre site jamm immo point com et sur nos réseaux sociaux.', voiceoverEn: 'Find us on our website jammimmo.com and on social media.' },
-  { voiceoverFr: 'Appelez-nous au soixante-seize, neuf cent quarante-quatre, quarante-huit, quarante-neuf.', voiceoverEn: 'Call 76 944 48 49.' },
+  { voiceoverFr: 'Appelez-nous ou écrivez-nous sur WhatsApp au soixante-seize, neuf cent quarante-quatre, quarante-huit, quarante-neuf.', voiceoverEn: 'Call or message us on WhatsApp at 76 944 48 49.' },
   { voiceoverFr: 'Jamm Immo. Kër gu baax, xel mu dal.', voiceoverEn: 'Jamm Immo. A good home, a peaceful mind.' },
 ];
 
