@@ -26,9 +26,33 @@ SIGNATURE_PREROLL_SECONDS = .10
 
 
 class SignatureEvidenceError(ValueError):
-    def __init__(self, preceding_end):
+    def __init__(self, preceding_end, matched_words, expected_words):
         super().__init__('Insufficient speech evidence: signature')
         self.preceding_end = preceding_end
+        self.matched_words = matched_words
+        self.expected_words = expected_words
+        self.reason = 'signature_evidence_insufficient'
+
+    def diagnostics(self):
+        return {'reason': self.reason, 'matched_words': self.matched_words, 'expected_words': self.expected_words}
+
+
+def report_alignment_failure(error, code_path=None):
+    if isinstance(error, SignatureEvidenceError):
+        diagnostics = error.diagnostics()
+    else:
+        reason = {
+            'Exact contact pronunciation not recognized: phone': 'phone_evidence_unconfirmed',
+            'Exact contact pronunciation not recognized: domain': 'website_evidence_unconfirmed',
+            'French speech differs substantially from the approved script': 'script_evidence_unconfirmed',
+        }.get(str(error), 'alignment_evidence_invalid')
+        diagnostics = {'reason': reason}
+    print('V11 alignment: ' + json.dumps(diagnostics), file=sys.stderr)
+    if code_path:
+        try:
+            Path(code_path).write_text(diagnostics['reason'] + '\n', encoding='utf8')
+        except OSError:
+            print('V11 alignment: failure marker unavailable', file=sys.stderr)
 
 
 def tokens(text):
@@ -126,7 +150,7 @@ def align(segments, words, duration, audible=None):
                     cursor += length
         elif coverage < (.25 if identifier in ('greeting', 'signature') else .68):
             if identifier == 'signature':
-                raise SignatureEvidenceError(preceding_social_end)
+                raise SignatureEvidenceError(preceding_social_end, len(matched), len(group))
             raise ValueError(f'Insufficient speech evidence: {identifier}')
         if not matched:
             raise ValueError(f'No speech anchors: {identifier}')
@@ -177,9 +201,11 @@ def align_with_signature_retry(segments, words, duration, sound, recognize_tail)
     except SignatureEvidenceError as error:
         boundary = error.preceding_end
         if boundary is None or not 1.2 <= duration - boundary <= 8 or segments[-1]['id'] != 'signature':
+            error.reason = 'signature_boundary_unconfirmed'
             raise
         voiced_tail = sum(max(0, end - max(start, boundary + .15)) for start, end in sound)
         if voiced_tail < .9:
+            error.reason = 'signature_tail_too_quiet'
             raise
         # Keep the original French body and exact contact evidence. A second
         # decode is useful only if the cropped audio supplies a closing anchor.
@@ -188,9 +214,14 @@ def align_with_signature_retry(segments, words, duration, sound, recognize_tail)
         closing = tokens(' '.join(word['word'] for word in tail))
         if not any(closing[index:index + 2] in (['a', 'bientot'], ['jamm', 'immo'])
                    for index in range(len(closing) - 1)):
+            error.reason = 'signature_closing_unrecognized'
             raise
         original = [word for word in words if word['end'] <= boundary + .001]
-        alignment = align(segments, original + tail, duration, sound)
+        try:
+            alignment = align(segments, original + tail, duration, sound)
+        except SignatureEvidenceError as retry_error:
+            retry_error.reason = 'signature_retry_insufficient'
+            raise
         alignment['method'] = 'french-v11-word-anchors-signature-retry'
         return alignment
 
@@ -220,6 +251,7 @@ def main():
     parser.add_argument('--spec', required=True)
     parser.add_argument('--output', required=True)
     parser.add_argument('--transcript', help='Premeasured local QA word timings')
+    parser.add_argument('--failure-code-file', help='Write an allowlisted classification for a failed render')
     args = parser.parse_args()
     with open(args.spec, encoding='utf8') as source:
         spec = json.load(source)
@@ -238,8 +270,12 @@ def main():
         model = WhisperModel(model_path, device='cpu', compute_type='int8',
                              local_files_only=True, cpu_threads=4)
         words = recognize_words(model, args.wav, beam_size=1)
-        alignment = align_with_signature_retry(spec['segments'], words, duration, sound,
-                                               lambda boundary: recognize_signature_tail(model, args.wav, boundary))
+        try:
+            alignment = align_with_signature_retry(spec['segments'], words, duration, sound,
+                                                   lambda boundary: recognize_signature_tail(model, args.wav, boundary))
+        except ValueError as error:
+            report_alignment_failure(error, args.failure_code_file)
+            raise
         if alignment['method'] == 'french-v11-word-anchors-signature-retry':
             print('V11 signature recovered by localized speech alignment; manual review still required')
     with open(args.output, 'w', encoding='utf8') as target:

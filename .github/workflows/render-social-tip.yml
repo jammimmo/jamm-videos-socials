@@ -65,7 +65,9 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TIPS_V11_ASSISTANT_PUBLIC: ${{ vars.TIPS_V11_ASSISTANT_PUBLIC }}
-        run: npm run render:batch -- --spec-file "${TIP_SPEC_FILE}" --voice-only
+        run: |
+          export TIP_V11_ALIGNMENT_FAILURE_CODE_FILE="${RUNNER_TEMP}/tip-v11-alignment-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          npm run render:batch -- --spec-file "${TIP_SPEC_FILE}" --voice-only
 
       - name: Stream the MP4 to the Jamm Immo Worker
         run: |
@@ -92,11 +94,21 @@ jobs:
         continue-on-error: true
         run: |
           if [ -n "${TIP_UPLOAD_URL:-}" ] && [ -n "${TIP_CALLBACK_TOKEN:-}" ] && [ -n "${TIP_JOB_ID:-}" ]; then
-            curl --silent --show-error \
+            reason="render workflow failed"
+            code_file="${RUNNER_TEMP}/tip-v11-alignment-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            if [ -f "${code_file}" ]; then
+              IFS= read -r code < "${code_file}" || code=""
+              case "${code}" in
+                signature_evidence_insufficient|signature_boundary_unconfirmed|signature_tail_too_quiet|signature_closing_unrecognized|signature_retry_insufficient|phone_evidence_unconfirmed|website_evidence_unconfirmed|script_evidence_unconfirmed|alignment_evidence_invalid)
+                  reason="V11 speech alignment failed (${code})"
+                  ;;
+              esac
+            fi
+            curl --silent --show-error --output /dev/null --write-out 'Renderer failure callback HTTP %{http_code}\n' \
               -X POST "${TIP_UPLOAD_URL}&status=failed" \
               -H "Authorization: Bearer ${TIP_CALLBACK_TOKEN}" \
               -H "X-Job-Id: ${TIP_JOB_ID}" \
-              -H "X-Error: render workflow failed; GitHub run ${GITHUB_RUN_ID}" || true
+              -H "X-Error: ${reason}; GitHub run ${GITHUB_RUN_ID}" || true
           fi
 
       - name: Keep a legacy render artifact for audit

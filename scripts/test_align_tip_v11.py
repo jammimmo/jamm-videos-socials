@@ -1,7 +1,11 @@
+from contextlib import redirect_stderr
+from io import StringIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock
 
-from align_tip_v11 import align, align_with_signature_retry, tokens
+from align_tip_v11 import SignatureEvidenceError, align, align_with_signature_retry, report_alignment_failure, tokens
 
 
 SEGMENTS = [
@@ -79,9 +83,30 @@ class V11AlignmentTest(unittest.TestCase):
         recognize_tail = Mock(return_value=unclear)
         sound = [(word['start'], word['end']) for word in words]
 
-        with self.assertRaisesRegex(ValueError, 'Insufficient speech evidence: signature'):
+        with self.assertRaisesRegex(SignatureEvidenceError, 'Insufficient speech evidence: signature') as rejected:
             align_with_signature_retry(SEGMENTS, body + unclear, 70, sound, recognize_tail)
+        self.assertEqual(rejected.exception.reason, 'signature_closing_unrecognized')
         recognize_tail.assert_called_once()
+
+    def test_partial_retry_is_reported_without_changing_the_failed_result(self):
+        words = speech(SEGMENTS)
+        tail_length = len(tokens(SEGMENTS[-1]['text']))
+        body, ending = words[:-tail_length], words[-tail_length:]
+        sound = [(word['start'], word['end']) for word in words]
+        with self.assertRaises(SignatureEvidenceError) as rejected:
+            align_with_signature_retry(SEGMENTS, body + ending[:2], 70, sound, lambda _: ending[2:4])
+        self.assertEqual(rejected.exception.diagnostics(), {
+            'reason': 'signature_retry_insufficient', 'matched_words': 2, 'expected_words': 10,
+        })
+
+    def test_failure_marker_contains_only_a_predefined_code(self):
+        with TemporaryDirectory() as directory, redirect_stderr(StringIO()) as stderr:
+            marker = Path(directory) / 'failure'
+            report_alignment_failure(ValueError('Unexpected private transcript'), marker)
+            self.assertEqual(marker.read_text(), 'alignment_evidence_invalid\n')
+            self.assertNotIn('private transcript', stderr.getvalue())
+            report_alignment_failure(ValueError('Exact contact pronunciation not recognized: phone'), marker)
+            self.assertEqual(marker.read_text(), 'phone_evidence_unconfirmed\n')
 
     def test_no_retry_after_a_short_but_silent_ending(self):
         words = speech(SEGMENTS)
@@ -89,8 +114,9 @@ class V11AlignmentTest(unittest.TestCase):
         sound = [(word['start'], word['end']) for word in body]
         recognize_tail = Mock()
 
-        with self.assertRaisesRegex(ValueError, 'Insufficient speech evidence: signature'):
+        with self.assertRaisesRegex(SignatureEvidenceError, 'Insufficient speech evidence: signature') as rejected:
             align_with_signature_retry(SEGMENTS, body, body[-1]['end'] + 2.2, sound, recognize_tail)
+        self.assertEqual(rejected.exception.reason, 'signature_tail_too_quiet')
         recognize_tail.assert_not_called()
 
     def test_does_not_redecode_when_contact_or_the_preceding_boundary_is_unproven(self):
@@ -104,6 +130,7 @@ class V11AlignmentTest(unittest.TestCase):
 
         ending_boundary = next(i for i, word in enumerate(words) if word['word'] == 'conseils')
         unanchored = words[:ending_boundary] + [{**word, 'word': 'murmure'} for word in words[ending_boundary:]]
-        with self.assertRaisesRegex(ValueError, 'Insufficient speech evidence: signature'):
+        with self.assertRaisesRegex(SignatureEvidenceError, 'Insufficient speech evidence: signature') as rejected:
             align_with_signature_retry(SEGMENTS, unanchored, 70, sound, recognize_tail)
+        self.assertEqual(rejected.exception.reason, 'signature_boundary_unconfirmed')
         recognize_tail.assert_not_called()
