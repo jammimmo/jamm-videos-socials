@@ -24,12 +24,9 @@ jobs:
           cache: npm
 
       - name: Validate and materialise the signed delivery contract
-        env:
-          TIP_DISPATCH: ${{ toJSON(github.event.client_payload) }}
         run: |
-          printf '%s' "${TIP_DISPATCH}" > dispatch.json
           node scripts/materialize-dispatched-tip.mjs \
-            --payload dispatch.json \
+            --event "$GITHUB_EVENT_PATH" \
             --spec dispatched-tip.json \
             --env "${GITHUB_ENV}"
 

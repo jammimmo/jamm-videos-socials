@@ -1,4 +1,9 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { materializeDispatchedTip as materialize } from './materialize-dispatched-tip.mjs';
 import { buildTipV11Narration, TIP_V11_SLOGAN } from './tip-v11-contract.mjs';
@@ -165,4 +170,21 @@ test('V11 fails closed on legacy voice, extra language, and incomplete advice', 
   const short = v11Payload();
   short.content.scriptFr = short.content.scriptFr.replace(/Retenez.*$/u, '');
   assert.throws(() => materialize(short), /five complete sentences/u);
+});
+
+test('the GitHub event file is consumed without logging the editorial payload', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'tip-dispatch-event-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const eventPath = join(directory, 'event.json');
+  const specPath = join(directory, 'spec.json');
+  const envPath = join(directory, 'env');
+  const input = v11Payload();
+  writeFileSync(eventPath, JSON.stringify({ action: 'render-jamm-tip', client_payload: input }));
+  const cli = fileURLToPath(new URL('./materialize-dispatched-tip.mjs', import.meta.url));
+  const stdout = execFileSync(process.execPath, [cli, '--event', eventPath, '--spec', specPath, '--env', envPath], { encoding: 'utf8' });
+  const withoutMaskDirectives = stdout.split('\n').filter(line => !line.startsWith('::add-mask::')).join('\n');
+  assert.match(withoutMaskDirectives, /^Dispatched tip payload validated\s*$/u);
+  assert.ok(stdout.includes(`::add-mask::${input.job.id}`));
+  assert.equal(JSON.parse(readFileSync(specPath, 'utf8')).body.join(' '), input.content.scriptFr);
+  assert.match(readFileSync(envPath, 'utf8'), new RegExp(`^TIP_JOB_ID=${input.job.id}$`, 'mu'));
 });

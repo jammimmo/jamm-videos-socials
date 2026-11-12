@@ -156,12 +156,13 @@ async function main() {
     }
     return pairs;
   }, []));
-  if (!args.payload || !args.spec || !args.env) {
-    throw new Error('usage: --payload <json> --spec <json> --env <github-env>');
+  if (Boolean(args.payload) === Boolean(args.event) || !args.spec || !args.env) {
+    throw new Error('usage: (--payload <json> | --event <github-event>) --spec <json> --env <github-env>');
   }
-  const result = materializeDispatchedTip(JSON.parse(await readFile(resolve(args.payload), 'utf8')));
+  const event = JSON.parse(await readFile(resolve(args.event ?? args.payload), 'utf8'));
+  const result = materializeDispatchedTip(args.event ? event.client_payload : event);
   // Mask ephemeral delivery capabilities before later Actions steps print env.
-  for (const value of [result.callbackToken, result.callbackUrl, result.uploadUrl]) {
+  for (const value of [result.callbackToken, result.callbackUrl, result.uploadUrl, result.jobId]) {
     console.log(`::add-mask::${value}`);
   }
   await writeFile(resolve(args.spec), `${JSON.stringify(result.spec)}\n`, { mode: 0o600 });
@@ -173,7 +174,7 @@ async function main() {
     `TIP_SPEC_FILE=${resolve(args.spec)}`,
     '',
   ].join('\n'));
-  console.log(`dispatched tip payload validated for job ${result.jobId}`);
+  console.log('Dispatched tip payload validated');
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
