@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
 
-import { VOICE_NAME, PRIMARY_MODEL, voiceCacheHash, voicePrompt } from './voice-profile.mjs';
+import { VOICE_NAME, TIP_V11_VOICE_NAME, PRIMARY_MODEL, voiceCacheHash, voicePrompt } from './voice-profile.mjs';
 
 // Gemini TTS returns raw little-endian 16-bit PCM mono at 24000 Hz.
 const SAMPLE_RATE = 24000;
@@ -69,7 +69,7 @@ function pcmToWav(pcm) {
   return Buffer.concat([header, pcm]);
 }
 
-async function callGemini(ai, modelName, prompt) {
+async function callGemini(ai, modelName, voiceName, prompt) {
   const response = await ai.models.generateContent({
     model: modelName,
     contents: [{ parts: [{ text: prompt }] }],
@@ -77,7 +77,7 @@ async function callGemini(ai, modelName, prompt) {
       responseModalities: ['AUDIO'],
       speechConfig: {
         voiceConfig: {
-          prebuiltVoiceConfig: { voiceName: VOICE_NAME },
+          prebuiltVoiceConfig: { voiceName },
         },
       },
     },
@@ -93,8 +93,11 @@ async function callGemini(ai, modelName, prompt) {
 async function main() {
   const args = parseArgs(process.argv);
   const { id, title, script } = args;
+  const profile = args.profile ?? '';
+  if (profile && profile !== 'tip-v11-fr') abort('Unknown voice profile');
+  const voiceName = profile === 'tip-v11-fr' ? TIP_V11_VOICE_NAME : VOICE_NAME;
 
-  if (!id) abort('Missing --id flag (e.g. --id video-001)');
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(id ?? '')) abort('Invalid --id flag (e.g. --id video-001)');
   if (!script) abort('Missing --script flag (the exact French voice-over text)');
 
   const apiKey = process.env.GEMINI_API_KEY;
@@ -104,17 +107,17 @@ async function main() {
     );
   }
 
-  const prompt = voicePrompt(script, args.context);
+  const prompt = voicePrompt(script, args.context, profile);
   const ai = new GoogleGenAI({ apiKey });
 
   let pcm;
   try {
-    console.log(`▶ ${id} — calling ${PRIMARY_MODEL} (Charon)${title ? ` for "${title}"` : ''}`);
-    pcm = await callGemini(ai, PRIMARY_MODEL, prompt);
+    console.log(`▶ ${id} — calling ${PRIMARY_MODEL} (${voiceName})${title ? ` for "${title}"` : ''}`);
+    pcm = await callGemini(ai, PRIMARY_MODEL, voiceName, prompt);
   } catch (primaryErr) {
-    const msg = primaryErr?.message ?? String(primaryErr);
+    const status = primaryErr?.status;
     // Never silently switch narrator models halfway through a video.
-    abort(`Consistent narrator unavailable (${PRIMARY_MODEL}): ${msg.split('\n')[0]}`);
+    abort(`Consistent narrator unavailable (${PRIMARY_MODEL})${Number.isInteger(status) ? ` (HTTP ${status})` : ''}`);
   }
 
   const wav = pcmToWav(pcm);
@@ -122,7 +125,7 @@ async function main() {
   await mkdir(outDir, { recursive: true });
   const wavPath = resolve(outDir, `${id}.wav`);
   const hashPath = resolve(outDir, `${id}.sha256`);
-  const hash = voiceCacheHash(script, args.context);
+  const hash = voiceCacheHash(script, args.context, profile);
 
   await writeFile(wavPath, wav);
   await writeFile(hashPath, `${hash}\n`);

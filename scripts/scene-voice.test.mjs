@@ -35,7 +35,7 @@ test('narrator cache includes the shared profile and context, with no per-scene 
   assert.match(voicePrompt('Bonjour.', 'Contexte.'), /continuity only \(do not read\)/);
   const generator = await readFile(new URL('./generate-gemini-voiceover.mjs', import.meta.url), 'utf8');
   assert.doesNotMatch(generator, /FALLBACK_MODEL/);
-  assert.match(generator, /voiceCacheHash\(script, args.context\)/);
+  assert.match(generator, /voiceCacheHash\(script, args.context, profile\)/);
 });
 
 test('audio must fit before its caption disappears, with a 100ms tail', () => {
