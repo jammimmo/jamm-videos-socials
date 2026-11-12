@@ -5,6 +5,11 @@ import { buildTipV11Narration, TIP_V11_TEMPLATE } from './tip-v11-contract.mjs';
 import { voiceCacheHash } from './voice-profile.mjs';
 import { tipV11Effects } from './tip-v11-effects.mjs';
 
+const MIN_NARRATION_SECONDS = 58.5;
+const MAX_NARRATION_SECONDS = 119;
+const DEFAULT_TEMPO = 1.03;
+const TEMPO_HEADROOM_SECONDS = 0.25;
+
 function run(command, args, cwd) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, { cwd, stdio: 'inherit' });
@@ -27,6 +32,41 @@ async function getNarration(root, audioDir, plan) {
   return raw;
 }
 
+function narrationDuration(path) {
+  return Number(execFileSync('ffprobe', [
+    '-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=duration',
+    '-of', 'default=noprint_wrappers=1:nokey=1', path,
+  ], { encoding: 'utf8', timeout: 20_000 }).trim());
+}
+
+export function tipV11NarrationTempo(rawSeconds) {
+  if (!Number.isFinite(rawSeconds) || rawSeconds < MIN_NARRATION_SECONDS
+    || rawSeconds > MAX_NARRATION_SECONDS * DEFAULT_TEMPO) {
+    throw new Error(`V11 raw narration cannot fit without stretching or truncation (${rawSeconds.toFixed(3)} s)`);
+  }
+  // A 60-second source falls below the 58.5-second alignment gate at 1.03×.
+  // Preserve its natural timing and keep the approved cadence elsewhere.
+  return rawSeconds / DEFAULT_TEMPO >= MIN_NARRATION_SECONDS + TEMPO_HEADROOM_SECONDS
+    ? DEFAULT_TEMPO
+    : 1;
+}
+
+export async function normalizeTipV11Narration(root, raw, normalizedPath) {
+  const rawSeconds = narrationDuration(raw);
+  const tempo = tipV11NarrationTempo(rawSeconds);
+  const normalize = 'loudnorm=I=-16:TP=-1.5:LRA=11';
+  const filters = tempo === 1 ? normalize : `atempo=${tempo},${normalize}`;
+  await run('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-i', raw, '-map', '0:a:0',
+    '-af', filters, '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', normalizedPath], root);
+  const normalizedSeconds = narrationDuration(normalizedPath);
+  if (!Number.isFinite(normalizedSeconds) || normalizedSeconds < MIN_NARRATION_SECONDS
+    || normalizedSeconds > MAX_NARRATION_SECONDS) {
+    throw new Error(`V11 normalized narration outside 58.5–119 s (${normalizedSeconds.toFixed(3)} s; raw ${rawSeconds.toFixed(3)} s; tempo ${tempo}×)`);
+  }
+  console.log(`V11 narration measured: ${rawSeconds.toFixed(3)} s raw, ${normalizedSeconds.toFixed(3)} s normalized, tempo ${tempo}×`);
+  return { rawSeconds, normalizedSeconds, tempo };
+}
+
 export async function renderTipV11(spec, {
   root, assistantEnabled = false, localNarration, localWordTimings,
 } = {}) {
@@ -44,9 +84,7 @@ export async function renderTipV11(spec, {
   const raw = localNarration ? resolve(localNarration) : await getNarration(root, audioDir, plan);
   const normalizedPath = resolve(root, 'public', normalized);
   if (raw === normalizedPath) throw new Error('Narration input must differ from processed output');
-  await run('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-i', raw, '-map', '0:a:0',
-    '-af', 'atempo=1.03,loudnorm=I=-16:TP=-1.5:LRA=11',
-    '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', normalizedPath], root);
+  await normalizeTipV11Narration(root, raw, normalizedPath);
   await writeFile(specPath, JSON.stringify(plan), { mode: 0o600 });
   await run('python3', ['scripts/align_tip_v11.py', '--wav', normalizedPath,
     '--spec', specPath, '--output', alignPath,

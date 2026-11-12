@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { materializeDispatchedTip as materialize } from './materialize-dispatched-tip.mjs';
+import { tipV11NarrationTempo } from './render-tip-v11.mjs';
 import { buildTipV11Narration, TIP_V11_SLOGAN } from './tip-v11-contract.mjs';
 import { voiceCacheHash, voicePrompt } from './voice-profile.mjs';
 const materializeDispatchedTip = value => materialize(value, { legacy: true });
@@ -13,6 +14,15 @@ const materializeDispatchedTip = value => materialize(value, { legacy: true });
 const id = '11111111-1111-4111-8111-111111111111';
 const attempt = '22222222-2222-4222-8222-222222222222';
 const worker = 'https://jammimmo-estate-flow.jammimmo221admin.workers.dev';
+
+test('V11 preserves borderline one-minute narration and the normal tempo for the reference master', () => {
+  assert.equal(tipV11NarrationTempo(58.5), 1);
+  assert.equal(tipV11NarrationTempo(60), 1);
+  assert.equal(tipV11NarrationTempo(61), 1.03);
+  assert.equal(tipV11NarrationTempo(71.015), 1.03);
+  assert.throws(() => tipV11NarrationTempo(58.49), /cannot fit/);
+  assert.throws(() => tipV11NarrationTempo(123), /cannot fit/);
+});
 
 function payload() {
   return {
