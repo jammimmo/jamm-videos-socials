@@ -18,6 +18,8 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pcmWavDuration, sceneVoiceSpecs } from './scene-voice.mjs';
 import { OUTRO } from './fresh-tip-contract.mjs';
+import { renderTipV11 } from './render-tip-v11.mjs';
+import { TIP_V11_TEMPLATE } from './tip-v11-contract.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -188,7 +190,14 @@ async function main() {
   }
 
   for (const spec of targets) {
-    await renderOne(spec, { noAudio, voiceOnly, sceneVoices: Boolean(specFile) });
+    if (spec.template === TIP_V11_TEMPLATE) {
+      if (noAudio) throw new Error('V11 requires French narration');
+      await renderTipV11(spec, {
+        root: ROOT, assistantEnabled: process.env.TIPS_V11_ASSISTANT_PUBLIC === 'true',
+      });
+    } else {
+      await renderOne(spec, { noAudio, voiceOnly, sceneVoices: Boolean(specFile) });
+    }
   }
 
   console.log(`✓ render-batch complete (${targets.length} video${targets.length > 1 ? 's' : ''})`);

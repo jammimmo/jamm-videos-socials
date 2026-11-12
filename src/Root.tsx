@@ -5,6 +5,7 @@ import { JammShort, TOTAL_DURATION_FRAMES } from './compositions/JammShort';
 import { theme } from './styles/theme';
 import { VIDEOS } from './data/videos';
 import { spokenDuration } from './compositions/SpokenTip';
+import { TipV11Fr, tipV11StudioProps } from './compositions/TipV11Fr';
 
 export const RemotionRoot: React.FC = () => {
   return (
@@ -34,6 +35,16 @@ export const RemotionRoot: React.FC = () => {
           spec: VIDEOS[0],
           audioMode: 'silent' as const,
         }}
+      />
+      <Composition
+        id="TipV11Fr"
+        component={TipV11Fr}
+        calculateMetadata={({props}) => ({durationInFrames: props.durationInFrames})}
+        durationInFrames={tipV11StudioProps.durationInFrames}
+        fps={30}
+        width={1080}
+        height={1920}
+        defaultProps={tipV11StudioProps}
       />
     </>
   );

@@ -4,6 +4,7 @@ import { appendFile, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { freshTipContract, OUTRO } from './fresh-tip-contract.mjs';
+import { makeTipV11Spec, TIP_V11_BRAND, TIP_V11_SLOGAN } from './tip-v11-contract.mjs';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HEX64_RE = /^[a-f0-9]{64}$/;
@@ -59,7 +60,8 @@ const VISUALS = {
 
 export function materializeDispatchedTip(raw, { legacy = false } = {}) {
   const payload = object(raw, 'payload');
-  if (payload.contract !== 'jamm-tip-render-v1') throw new Error('unsupported render contract');
+  const v11 = payload.contract === 'jamm-tip-render-v2';
+  if (!v11 && payload.contract !== 'jamm-tip-render-v1') throw new Error('unsupported render contract');
   const job = object(payload.job, 'job');
   const content = object(payload.content, 'content');
   const delivery = object(payload.delivery, 'delivery');
@@ -76,10 +78,11 @@ export function materializeDispatchedTip(raw, { legacy = false } = {}) {
 
   const title = text(content.title, 'content.title', 180);
   const scriptFr = text(content.scriptFr, 'content.scriptFr', 4000);
-  const scriptEn = text(content.scriptEn, 'content.scriptEn', 4000);
+  const scriptEn = v11 ? null : text(content.scriptEn, 'content.scriptEn', 4000);
   text(content.caption, 'content.caption', 2200);
-  if (content.voice !== 'Charon') throw new Error('unsupported voice');
-  if (!/Jamm Immo/i.test(scriptFr) || !/Jamm Immo/i.test(scriptEn)) {
+  if (content.voice !== (v11 ? 'Algenib' : 'Charon')) throw new Error('unsupported voice');
+  if (v11 && Object.hasOwn(content, 'scriptEn')) throw new Error('V11 tips require French narration only');
+  if (!v11 && (!/Jamm Immo/i.test(scriptFr) || !/Jamm Immo/i.test(scriptEn))) {
     throw new Error('Jamm Immo must be spoken in both scripts');
   }
   if (!Array.isArray(content.hashtags) || content.hashtags.length > 12
@@ -87,8 +90,8 @@ export function materializeDispatchedTip(raw, { legacy = false } = {}) {
     throw new Error('invalid hashtags');
   }
 
-  if (evidence.brandContract !== 'jamm-immo-v1'
-    || evidence.campaignSignature !== 'La vérité avant la visite.') {
+  if (evidence.brandContract !== (v11 ? TIP_V11_BRAND : 'jamm-immo-v1')
+    || evidence.campaignSignature !== (v11 ? TIP_V11_SLOGAN : 'La vérité avant la visite.')) {
     throw new Error('invalid brand evidence contract');
   }
   const attempt = new URL(text(delivery.uploadUrl, 'delivery.uploadUrl', 512)).searchParams.get('attempt') ?? '';
@@ -99,6 +102,10 @@ export function materializeDispatchedTip(raw, { legacy = false } = {}) {
   if (!HEX64_RE.test(callbackToken)) throw new Error('invalid callback capability');
 
   const fr = sentencesToFiveParts(scriptFr);
+  if (v11) {
+    const spec = makeTipV11Spec({ id: `tip-${jobId}`, title, body: fr });
+    return { jobId, callbackUrl, uploadUrl, callbackToken, spec };
+  }
   const en = sentencesToFiveParts(scriptEn);
   const meterTopic = /\bcompteurs?\b/iu.test(`${title} ${scriptFr}`);
   const visuals = meterTopic

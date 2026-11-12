@@ -78,3 +78,13 @@ import { Audio, staticFile } from 'remotion';
 ```
 
 Put the audio file in `public/`.
+
+## Conseils Jamm Immo en français
+
+Les nouveaux conseils arrivent dans le workflow `render-social-tip.yml` sous le contrat `jamm-tip-render-v2`. Le renderer reprend les cinq phrases du sujet, puis ajoute les éléments V11 de marque, les services, les deux outils et les coordonnées officielles. Le visuel varie selon le sujet. Les plans sur l’eau ne s’affichent que lorsqu’ils correspondent au conseil prononcé. Les sorties V1 déjà engagées conservent leur renderer.
+
+Le master V11 est vertical, en 1080 × 1920 à 30 images par seconde. Une seule prise Algenib couvre le conseil et les coordonnées. L’alignement local mesure les débuts de scène, contrôle le site et le numéro complets et cale les sous-titres français. Le cadre final conserve le site, le téléphone et les quatre comptes. Le rendu est livré au Worker pour validation éditoriale.
+
+La variable GitHub Actions `TIPS_V11_ASSISTANT_PUBLIC=true` ajoute la démo générale de l’Assistant Jamm. L’activer après vérification de sa présence sur la vitrine. Les trois exemples montrent une estimation, la recherche d’une annonce et la prise de contact avec un conseiller.
+
+La CI de PR exécute les tests de contrat et d’alignement sans Gemini. Pour une recette locale avec une piste déjà disponible, la fonction `renderTipV11` accepte `localNarration` et passe la piste par le même alignement et le même export.
