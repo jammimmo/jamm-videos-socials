@@ -76,6 +76,43 @@ function Hook({t}:{t:number}){const zoom=ease((t-2.75)/.45);return <>
   </g>
  </Drawing>
  </>;}
+
+function TapHook({t}:{t:number}) {
+ const opening=ease(t/.6), callout=ease((t-.35)/.4);
+ return <>
+  <Title kicker="LE RÉFLEXE EN VISITE" lines={['Ouvrez le robinet.','Observez le débit.']} local={t} first/>
+  <Drawing>
+   <g transform="translate(65 6) scale(1.1)">
+    <Sink t={t} flow={opening} lever={opening}/>
+    <g opacity={callout}>
+     <circle cx="367" cy="264" r="46" fill="none" stroke={C.orange} strokeWidth="3" strokeDasharray="6 8"/>
+     <path d="M413 264h146v-41" fill="none" stroke={C.orange} strokeWidth="3"/>
+     <Label x={526} y={208} orange>Débit</Label>
+    </g>
+   </g>
+  </Drawing>
+ </>;
+}
+
+function ShowerDrain({t}:{t:number}) {
+ const flow=ease(t/.4)*(1-ease((t-1.65)/.3)), drain=ease((t-1.25)/.45);
+ return <>
+  <Title kicker="DANS LA DOUCHE" lines={['L’eau s’évacue','sans stagner ?']} local={t}/>
+  <Drawing>
+   <g transform="translate(69 13) scale(.95)">
+    <Shower t={t} flow={flow}/>
+    <g opacity={drain}>
+     <path d="M332 669q39 18 90 13m119-27q-36 22-76 24" fill="none" stroke={C.water}
+       strokeWidth="5" strokeDasharray="12 17" strokeDashoffset={-t*85} strokeLinecap="round"/>
+     <ellipse cx="444" cy="681" rx="38" ry="17" fill="none" stroke={C.orange} strokeWidth="4"/>
+     <path d="M478 681h125v-44" fill="none" stroke={C.orange} strokeWidth="3"/>
+     <Label x={555} y={620} orange>Évacuation</Label>
+    </g>
+   </g>
+  </Drawing>
+ </>;
+}
+
 function Open({t,start,showerAt}:{t:number;start:number;showerAt:number}){
  const tap=ease((t-start)/.7),shower=ease((t-showerAt)/.65);
  return <><Title kicker="01 / DEMANDEZ À TESTER" lines={['Le robinet.','Puis la douche.']} local={t-start}/>
@@ -156,25 +193,35 @@ export function WaterIllustration({id, text, progress, caption, captionElapsed}:
   captionElapsed?: number;
 }) {
   const phase = text.toLocaleLowerCase('fr');
-  if (id === 'hook' && /douche/u.test(phase) && /filet|d[ée]bit|pression/u.test(phase)) {
+  const mentionsShower = /douche/u.test(phase);
+  const mentionsBasin = /lavabo|[ée]vier/u.test(phase);
+  const mentionsTap = /robinet/u.test(phase);
+  const mentionsFlow = /d[ée]bit/u.test(phase);
+  if (id === 'hook' && mentionsShower && /filet|d[ée]bit|pression/u.test(phase)) {
     return <Hook t={progress * 4} />;
   }
+  if (id === 'hook' && mentionsTap && mentionsFlow) return <TapHook t={progress * 4} />;
   const spokenQuestion = caption && waterQuestion(caption.toLocaleLowerCase('fr'));
   if (spokenQuestion) {
     return <WaterQuestionIllustration kind={spokenQuestion} t={captionElapsed ?? 0} />;
   }
-  const mentionsDrainage = /[ée]vacuat|stagn|[ée]coule/u.test(phase);
-  const mentionsFlow = /d[ée]bit/u.test(phase);
+  const mentionsDrainage = /[ée]vacu|stagn|[ée]coule/u.test(phase);
   const mentionsOverflow = /trop[- ]plein/u.test(phase);
-  if (mentionsOverflow && mentionsDrainage && /douche/u.test(phase) && /lavabo|[ée]vier/u.test(phase)) {
+  if (mentionsOverflow && mentionsDrainage && mentionsShower && mentionsBasin) {
     return <OverflowScene t={progress * 8} start={0} end={8.1} showerAt={4} />;
+  }
+  if (mentionsOverflow && mentionsBasin && !mentionsShower) {
+    return <OverflowScene t={progress * 4} start={0} end={4.1} basinOnly />;
+  }
+  if (mentionsDrainage && mentionsShower && !mentionsBasin && !mentionsOverflow && !mentionsTap) {
+    return <ShowerDrain t={progress * 4} />;
   }
   if (/sous (?:l[ea] |l['’])(?:lavabo|[ée]vier)|humidi|raccord/u.test(phase)) {
     return <Under t={progress * 4} start={0} end={4} />;
   }
   if (/goutt/u.test(phase) && /ferm/u.test(phase)) return <Close t={progress * 3} start={0} end={3} />;
   if (mentionsFlow && mentionsDrainage) return <Drain t={progress * 3} start={0} end={3} evacuationAt={1.5} />;
-  if (/test|essay|v[ée]rifi/u.test(phase) && /robinet/u.test(phase) && /douche/u.test(phase)) {
+  if (/test|essay|v[ée]rifi/u.test(phase) && mentionsTap && mentionsShower) {
     return <Open t={progress * 3} start={0} showerAt={1.5} />;
   }
   const question = waterQuestion(phase);
