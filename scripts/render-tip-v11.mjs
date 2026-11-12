@@ -80,7 +80,7 @@ export async function renderTipV11(spec, {
   const seconds = Number(probe.format.duration);
   if (!(seconds > 60 && seconds <= 120) || Math.abs(seconds - props.durationInFrames / 30) > .12
     || video?.width !== 1080 || video.height !== 1920 || video.r_frame_rate !== '30/1'
-    || video.codec_name !== 'h264' || audio?.codec_name !== 'aac' || !(Number(probe.format.size) <= 100 * 1024 * 1024)) {
+    || video.codec_name !== 'h264' || audio?.codec_name !== 'aac' || !(Number(probe.format.size) <= 50 * 1024 * 1024)) {
     throw new Error('V11 output does not match the vertical master contract');
   }
   await writeFile(resolve(outDir, `${plan.id}.media.json`), JSON.stringify({
