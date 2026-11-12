@@ -140,6 +140,7 @@ test('V11 consumes exactly the French advice and adds the reviewed brand narrati
   const disabled = buildTipV11Narration(spec);
   const enabled = buildTipV11Narration(spec, { assistantEnabled: true });
   assert.equal(enabled.visualTopic, 'water');
+  assert.equal(buildTipV11Narration({ ...spec, title: 'Évier en visite' }).visualTopic, 'water');
   assert.match(enabled.script, /^Salam alikoum ! Nanga def \?/u);
   assert.match(enabled.script, /acheter, vendre, louer .*gestion locative/u);
   assert.match(enabled.script, /frais d’acquisition et la rentabilité locative/u);

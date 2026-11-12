@@ -40,8 +40,8 @@ export function buildTipV11Narration(spec, { assistantEnabled = false } = {}) {
     { id: 'signature', text: `À bientôt ! Jamm Immo ! ${TIP_V11_SLOGAN}` },
   ];
   const text = checked.body.join(' ');
-  const isWater = /\b(?:eau|douche|robinets?|lavabo|évier)\b/iu.test(checked.title)
-    && /\b(?:eau|douche|robinets?|lavabo|évier)\b/iu.test(text);
+  const waterTopic = /(?:^|[^\p{L}])(?:eau|douche|robinets?|lavabos?|éviers?)(?!\p{L})/iu;
+  const isWater = waterTopic.test(checked.title) && waterTopic.test(text);
   return {
     ...checked, segments, assistantEnabled, visualTopic: isWater ? 'water' : 'general',
     script: segments.map(segment => segment.text).join(' '),
