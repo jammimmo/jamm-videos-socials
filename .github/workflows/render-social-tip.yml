@@ -87,7 +87,7 @@ jobs:
             -H 'X-Width: 1080' \
             -H 'X-Height: 1920' \
             --data-binary @"${VIDEO}")
-          cat upload-response.json
+          # The repository is public; keep draft URLs out of build logs.
           test "${CODE}" = '200'
 
       - name: Report a terminal renderer failure
@@ -102,8 +102,8 @@ jobs:
               -H "X-Error: render workflow failed; GitHub run ${GITHUB_RUN_ID}" || true
           fi
 
-      - name: Keep the rendered MP4 for audit
-        if: ${{ always() }}
+      - name: Keep a legacy render artifact for audit
+        if: ${{ always() && github.event.client_payload.contract == 'jamm-tip-render-v1' }}
         uses: actions/upload-artifact@v4
         with:
           name: social-tip-${{ github.event.client_payload.job.id }}
