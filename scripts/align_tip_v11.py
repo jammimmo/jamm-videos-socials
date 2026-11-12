@@ -5,8 +5,10 @@ from array import array
 import difflib
 import json
 import math
+from pathlib import Path
 import re
 import sys
+from tempfile import TemporaryDirectory
 import unicodedata
 import wave
 
@@ -20,6 +22,13 @@ NUMBER_WORDS = {
 }
 ASR_REPO = 'mobiuslabsgmbh/faster-whisper-large-v3-turbo'
 ASR_REVISION = '0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf'
+SIGNATURE_PREROLL_SECONDS = .10
+
+
+class SignatureEvidenceError(ValueError):
+    def __init__(self, preceding_end):
+        super().__init__('Insufficient speech evidence: signature')
+        self.preceding_end = preceding_end
 
 
 def tokens(text):
@@ -96,6 +105,7 @@ def align(segments, words, duration, audible=None):
 
     anchors = []
     phone_groups = []
+    preceding_social_end = None
     offset = 0
     for segment, group in zip(segments, groups):
         matched = [mapping[i] for i in range(offset, offset + len(group)) if i in mapping]
@@ -115,9 +125,17 @@ def align(segments, words, duration, audible=None):
                     phone_groups.append({'start': stamps[cursor][0], 'end': stamps[cursor + length - 1][1]})
                     cursor += length
         elif coverage < (.25 if identifier in ('greeting', 'signature') else .68):
+            if identifier == 'signature':
+                raise SignatureEvidenceError(preceding_social_end)
             raise ValueError(f'Insufficient speech evidence: {identifier}')
         if not matched:
             raise ValueError(f'No speech anchors: {identifier}')
+        preceding_social_end = None
+        if identifier == 'socials' and group[-2:] == ['prochains', 'conseils']:
+            previous = mapping.get(offset + len(group) - 2)
+            last = mapping.get(offset + len(group) - 1)
+            if previous is not None and last == previous + 1:
+                preceding_social_end = stamps[last][1]
         anchors.append((offset, stamps[matched[0]][0], stamps[matched[-1]][1]))
         offset += len(group)
 
@@ -153,6 +171,49 @@ def align(segments, words, duration, audible=None):
             'listenFor': ['greeting and signature in Wolof', 'voice and accent']}
 
 
+def align_with_signature_retry(segments, words, duration, sound, recognize_tail):
+    try:
+        return align(segments, words, duration, sound)
+    except SignatureEvidenceError as error:
+        boundary = error.preceding_end
+        if boundary is None or not 1.2 <= duration - boundary <= 8 or segments[-1]['id'] != 'signature':
+            raise
+        voiced_tail = sum(max(0, end - max(start, boundary + .15)) for start, end in sound)
+        if voiced_tail < .9:
+            raise
+        # Keep the original French body and exact contact evidence. A second
+        # decode is useful only if the cropped audio supplies a closing anchor.
+        tail = [word for word in recognize_tail(boundary)
+                if word['start'] >= boundary - SIGNATURE_PREROLL_SECONDS - .001 and word['end'] > boundary + .05]
+        closing = tokens(' '.join(word['word'] for word in tail))
+        if not any(closing[index:index + 2] in (['a', 'bientot'], ['jamm', 'immo'])
+                   for index in range(len(closing) - 1)):
+            raise
+        original = [word for word in words if word['end'] <= boundary + .001]
+        alignment = align(segments, original + tail, duration, sound)
+        alignment['method'] = 'french-v11-word-anchors-signature-retry'
+        return alignment
+
+
+def recognize_words(model, wav_path, beam_size, time_offset=0):
+    result, _ = model.transcribe(str(wav_path), language='fr', beam_size=beam_size,
+                                 word_timestamps=True, condition_on_previous_text=False)
+    return [{'word': word.word, 'start': word.start + time_offset, 'end': word.end + time_offset}
+            for segment in result for word in segment.words]
+
+
+def recognize_signature_tail(model, wav_path, boundary):
+    with TemporaryDirectory(prefix='tip-v11-signature-') as directory:
+        tail_path = str(Path(directory) / 'signature.wav')
+        with wave.open(wav_path, 'rb') as source, wave.open(tail_path, 'wb') as target:
+            rate = source.getframerate()
+            first_frame = max(0, math.floor((boundary - SIGNATURE_PREROLL_SECONDS) * rate))
+            source.setpos(first_frame)
+            target.setparams(source.getparams())
+            target.writeframes(source.readframes(source.getnframes() - first_frame))
+        return recognize_words(model, tail_path, beam_size=5, time_offset=first_frame / rate)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--wav', required=True)
@@ -170,16 +231,17 @@ def main():
     if args.transcript:
         with open(args.transcript, encoding='utf8') as source:
             words = json.load(source)
+        alignment = align(spec['segments'], words, duration, sound)
     else:
         from faster_whisper import WhisperModel, download_model
         model_path = download_model(ASR_REPO, revision=ASR_REVISION)
         model = WhisperModel(model_path, device='cpu', compute_type='int8',
                              local_files_only=True, cpu_threads=4)
-        result, _ = model.transcribe(args.wav, language='fr', beam_size=1,
-                                     word_timestamps=True, condition_on_previous_text=False)
-        words = [{'word': word.word, 'start': word.start, 'end': word.end}
-                 for segment in result for word in segment.words]
-    alignment = align(spec['segments'], words, duration, sound)
+        words = recognize_words(model, args.wav, beam_size=1)
+        alignment = align_with_signature_retry(spec['segments'], words, duration, sound,
+                                               lambda boundary: recognize_signature_tail(model, args.wav, boundary))
+        if alignment['method'] == 'french-v11-word-anchors-signature-retry':
+            print('V11 signature recovered by localized speech alignment; manual review still required')
     with open(args.output, 'w', encoding='utf8') as target:
         json.dump(alignment, target, ensure_ascii=False)
 
