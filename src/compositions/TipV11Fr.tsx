@@ -22,6 +22,7 @@ const navy = '#072451';
 const orange = '#FD7E00';
 const muted = '#BFD2F0';
 const edge = '#5277AD';
+const shortFeedContent = {left: 84, top: 135, scale: .8};
 const weights = [600, 700, 800];
 const progress = (value: number) => Math.min(1, Math.max(0, value));
 const smooth = (value: number) => {
@@ -46,7 +47,7 @@ function ProgressFrame({value}: {value: number}) {
 
 function Header({signature}: {signature: boolean}) {
   return (
-    <div style={{position: 'absolute', left: 64, right: 120, top: 130,
+    <div data-fit-region="header" style={{position: 'absolute', left: 64, right: 120, top: 160,
       display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
       <Img src={staticFile('tip-v11/logo.png')} style={{width: 225, height: 98, objectFit: 'contain'}} />
       {!signature && <div style={{fontSize: 34, fontWeight: 600, letterSpacing: -.5, textAlign: 'right', lineHeight: 1.3}}>
@@ -54,14 +55,6 @@ function Header({signature}: {signature: boolean}) {
       </div>}
     </div>
   );
-}
-
-function sectionHeading(text: string) {
-  const line = text.replace(/\s+/gu, ' ').trim().split(/(?<=[.!?])\s/u, 1)[0];
-  if (line.length <= 88) return line;
-  const words = line.slice(0, 87).split(' ');
-  words.pop();
-  return words.length ? `${words.join(' ')}…` : `${line.slice(0, 87)}…`;
 }
 
 /** Generic depth illustration with a house and an animated checklist. */
@@ -104,13 +97,15 @@ function Checklist({step, elapsed}: {step: number; elapsed: number}) {
   );
 }
 
-function GeneralScene({title, segment, time}: {title: string; segment: TipV11Segment; time: number}) {
+export function GeneralScene({title, segment, time}: {title: string; segment: TipV11Segment; time: number}) {
   const elapsed = Math.max(0, time - segment.start);
   const steps: Record<string, number> = {step1: 1, step2: 2, step3: 3};
   const step = steps[segment.id] ?? (segment.id === 'takeaway' ? 3 : 0);
   const kicker = segment.id === 'takeaway' ? 'À RETENIR' : steps[segment.id] ? `ÉTAPE 0${step}` : 'CONSEILS JAMM IMMO';
-  const heading = sectionHeading(segment.id === 'greeting' || segment.id === 'hook' ? title : segment.text);
-  const fontSize = heading.length <= 36 ? 79 : heading.length <= 60 ? 65 : 55;
+  const heading = segment.id === 'greeting' || segment.id === 'hook' ? title : segment.text;
+  // Body segments contain one complete sentence, up to 200 characters.
+  const fontSize = heading.length <= 36 ? 79 : heading.length <= 60 ? 65
+    : Math.max(44, Math.min(55, Math.floor(64 - heading.length * .1)));
   return (
     <>
       <div style={{position: 'absolute', left: 64, top: 316, width: 896}}>
@@ -180,17 +175,21 @@ export const TipV11Fr: React.FC<TipV11FrProps> = ({
     <AbsoluteFill style={{fontFamily: 'Poppins, sans-serif', color: cream, background: '#062B73', overflow: 'hidden'}}>
       <style>{fontCss() + '*{box-sizing:border-box}'}</style>
       <AbsoluteFill style={{background: 'radial-gradient(ellipse at 65% 35%,#0B46B6 0%,#062B73 58%,#041D4C 100%)'}} />
-      <Header signature={showSignature} />
-      {scene}
-      {caption && (
-        <div style={{position: 'absolute', left: 64, right: 120, top: 1570, display: 'flex', justifyContent: 'flex-start'}}>
-          <div data-fit-region="caption" style={{
-            fontSize: 44, lineHeight: 1.25, fontWeight: 700, whiteSpace: 'pre-line', background: navy,
-            padding: '13px 20px', borderRadius: 15, borderLeft: `5px solid ${orange}`, maxWidth: '100%',
-            overflowWrap: 'break-word',
-          }}>{caption.text.replace(/ ([!?:;])/gu, '\u00a0$1')}</div>
-        </div>
-      )}
+      {/* Keep content clear of the top tabs, right controls and bottom metadata in short-video feeds. */}
+      <AbsoluteFill style={{transform: `translate(${shortFeedContent.left}px, ${shortFeedContent.top}px) scale(${shortFeedContent.scale})`,
+        transformOrigin: 'top left'}}>
+        <Header signature={showSignature} />
+        {scene}
+        {caption && (
+          <div style={{position: 'absolute', left: 64, right: 120, top: 1570, display: 'flex', justifyContent: 'flex-start'}}>
+            <div data-fit-region="caption" style={{
+              fontSize: 49, lineHeight: 1.2, fontWeight: 700, whiteSpace: 'pre-line', background: navy,
+              padding: '13px 20px', borderRadius: 15, borderLeft: `5px solid ${orange}`, maxWidth: '100%',
+              overflowWrap: 'break-word',
+            }}>{caption.text.replace(/ ([!?:;])/gu, '\u00a0$1')}</div>
+          </div>
+        )}
+      </AbsoluteFill>
       <ProgressFrame value={progress(frame / Math.max(1, durationInFrames - 1))} />
       {audio && <Audio src={staticFile(audio)} />}
     </AbsoluteFill>
