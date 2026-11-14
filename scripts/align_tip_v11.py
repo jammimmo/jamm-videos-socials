@@ -264,6 +264,7 @@ def main():
         with open(args.transcript, encoding='utf8') as source:
             words = json.load(source)
         alignment = align(spec['segments'], words, duration, sound)
+        alignment['provenance'] = 'local-word-timings'
     else:
         from faster_whisper import WhisperModel, download_model
         model_path = download_model(ASR_REPO, revision=ASR_REVISION)
@@ -276,6 +277,7 @@ def main():
         except ValueError as error:
             report_alignment_failure(error, args.failure_code_file)
             raise
+        alignment['provenance'] = ASR_REVISION
         if alignment['method'] == 'french-v11-word-anchors-signature-retry':
             print('V11 signature recovered by localized speech alignment; manual review still required')
     with open(args.output, 'w', encoding='utf8') as target:

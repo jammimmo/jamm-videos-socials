@@ -1,9 +1,10 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { buildTipV11Narration, TIP_V11_TEMPLATE } from './tip-v11-contract.mjs';
 import { voiceCacheHash } from './voice-profile.mjs';
 import { tipV11Effects } from './tip-v11-effects.mjs';
+import { buildTipV11RenderManifest, collectTipV11StaticFiles } from './tip-v11-render-manifest.mjs';
 
 const MIN_NARRATION_SECONDS = 58.5;
 const MAX_NARRATION_SECONDS = 119;
@@ -23,13 +24,15 @@ async function getNarration(root, audioDir, plan) {
   const hashPath = resolve(audioDir, `${plan.id}.sha256`);
   const expected = voiceCacheHash(plan.script, '', TIP_V11_TEMPLATE);
   try {
-    if ((await readFile(hashPath, 'utf8')).trim() === expected && (await stat(raw)).size > 44) return raw;
+    if ((await readFile(hashPath, 'utf8')).trim() === expected && (await stat(raw)).size > 44) {
+      return { path: raw, source: 'cache' };
+    }
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
   }
   await run(process.execPath, ['scripts/generate-gemini-voiceover.mjs', '--profile', TIP_V11_TEMPLATE,
     '--id', plan.id, '--script', plan.script], root);
-  return raw;
+  return { path: raw, source: 'provider' };
 }
 
 function narrationDuration(path) {
@@ -78,10 +81,16 @@ export async function renderTipV11(spec, {
   const specPath = resolve(outDir, `${plan.id}.spec.json`);
   const alignPath = resolve(outDir, `${plan.id}.alignment.json`);
   const propsPath = resolve(outDir, `${plan.id}.props.json`);
+  const manifestPath = resolve(outDir, `${plan.id}.manifest.json`);
   const outFile = resolve(outDir, `${plan.id}.mp4`);
   const normalized = `audio/voiceovers/${plan.id}-v11.wav`;
   await Promise.all([mkdir(outDir, { recursive: true }), mkdir(audioDir, { recursive: true })]);
-  const raw = localNarration ? resolve(localNarration) : await getNarration(root, audioDir, plan);
+  await rm(manifestPath, { force: true });
+  const inventory = await collectTipV11StaticFiles(root).catch(() => null);
+  const narration = localNarration
+    ? { path: resolve(localNarration), source: 'fixture' }
+    : await getNarration(root, audioDir, plan);
+  const raw = narration.path;
   const normalizedPath = resolve(root, 'public', normalized);
   if (raw === normalizedPath) throw new Error('Narration input must differ from processed output');
   await normalizeTipV11Narration(root, raw, normalizedPath);
@@ -122,6 +131,18 @@ export async function renderTipV11(spec, {
     || video?.width !== 1080 || video.height !== 1920 || video.r_frame_rate !== '30/1'
     || video.codec_name !== 'h264' || audio?.codec_name !== 'aac' || !(Number(probe.format.size) <= 50 * 1024 * 1024)) {
     throw new Error('V11 output does not match the vertical master contract');
+  }
+  try {
+    if (!inventory || (await collectTipV11StaticFiles(root)).sha256 !== inventory.sha256) {
+      throw new Error('V11 static inputs changed during the render');
+    }
+    const manifest = await buildTipV11RenderManifest({
+      plan, sourceScriptSha256: spec.sourceScriptSha256, voiceSource: narration.source, inventory, raw,
+      normalized: normalizedPath, mix: resolve(root, 'public', mixed), alignment: alignPath, props: propsPath, mp4: outFile,
+    });
+    await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`, { flag: 'wx', mode: 0o600 });
+  } catch {
+    console.warn('V11 render manifest unavailable; editorial review required');
   }
   await writeFile(resolve(outDir, `${plan.id}.media.json`), JSON.stringify({
     duration: seconds, durationHeader: Math.ceil(seconds), width: video.width, height: video.height,

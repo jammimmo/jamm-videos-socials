@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -151,6 +152,11 @@ test('V11 consumes exactly the French advice and adds the reviewed brand narrati
   const { spec, uploadUrl } = materialize(input);
   assert.equal(spec.template, 'tip-v11-fr');
   assert.equal(spec.body.join(' '), input.content.scriptFr);
+  assert.equal(spec.sourceScriptSha256, createHash('sha256').update(input.content.scriptFr).digest('hex'));
+  const padded = `  ${input.content.scriptFr} `;
+  const paddedSpec = materialize({ ...input, content: { ...input.content, scriptFr: padded } }).spec;
+  assert.deepEqual(paddedSpec.body, spec.body);
+  assert.equal(paddedSpec.sourceScriptSha256, createHash('sha256').update(padded).digest('hex'));
   assert.equal(uploadUrl, input.delivery.uploadUrl);
   const disabled = buildTipV11Narration(spec);
   const enabled = buildTipV11Narration(spec, { assistantEnabled: true });

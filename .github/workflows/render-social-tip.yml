@@ -4,15 +4,15 @@ on:
   repository_dispatch:
     types: [render-jamm-tip]
 
-permissions:
-  contents: read
-
 concurrency:
   group: render-social-tip-${{ github.event.client_payload.job.id || github.run_id }}
   cancel-in-progress: false
 
 jobs:
   render:
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -69,25 +69,57 @@ jobs:
           export TIP_V11_ALIGNMENT_FAILURE_CODE_FILE="${RUNNER_TEMP}/tip-v11-alignment-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           npm run render:batch -- --spec-file "${TIP_SPEC_FILE}" --voice-only
 
+      - name: Measure V11 audio and captions in the rendered MP4
+        if: github.event.client_payload.contract == 'jamm-tip-render-v2'
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-fra
+          STEM="tip-${TIP_JOB_ID}"
+          python scripts/audit_tip_v11.py \
+            --video "out/batch/${STEM}.mp4" \
+            --alignment "out/batch/${STEM}.alignment.json" \
+            --render-manifest "out/batch/${STEM}.manifest.json" \
+            --render-props "out/batch/${STEM}.props.json" \
+            --raw-wav "public/audio/voiceovers/${STEM}.wav" \
+            --narration-wav "public/audio/voiceovers/${STEM}-v11.wav" \
+            --mix-wav "public/audio/voiceovers/${STEM}-v11-mix.wav" \
+            --ocr-language fra --report "out/batch/${STEM}.audit.json"
+
       - name: Stream the MP4 to the Jamm Immo Worker
         run: |
+          set +x
           VIDEO="out/batch/tip-${TIP_JOB_ID}.mp4"
           test -s "${VIDEO}"
           SHA256=$(sha256sum "${VIDEO}" | cut -d' ' -f1)
           DURATION=$(node -p "require('./out/batch/tip-${TIP_JOB_ID}.media.json').durationHeader")
-          CODE=$(curl --fail-with-body --silent --show-error \
+          REPORT="out/batch/tip-${TIP_JOB_ID}.audit.json"
+          EVIDENCE_HEADERS=()
+          OIDC_HEADER=""
+          if [ -s "${REPORT}" ] && EVIDENCE=$(node scripts/tip-v11-render-evidence.mjs "${REPORT}" "${SHA256}"); then
+            EVIDENCE_HEADERS=(-H "X-Tip-Render-Evidence: ${EVIDENCE}")
+            if ATTESTATION=$(printf '%s' "${EVIDENCE}" | node scripts/tip-v11-workflow-oidc.mjs); then
+              OIDC_HEADER="X-Tip-Workflow-OIDC: ${ATTESTATION}"
+            fi
+          fi
+          CODE=$(printf '%s\n' "${OIDC_HEADER}" | curl --fail-with-body --silent --show-error \
             --output upload-response.json --write-out '%{http_code}' \
             -X POST "${TIP_UPLOAD_URL}" \
             -H "Authorization: Bearer ${TIP_CALLBACK_TOKEN}" \
+            --header @- \
             -H 'Content-Type: video/mp4' \
             -H "X-Job-Id: ${TIP_JOB_ID}" \
             -H "X-Media-Sha256: ${SHA256}" \
             -H "X-Duration: ${DURATION}" \
             -H 'X-Width: 1080' \
             -H 'X-Height: 1920' \
+            "${EVIDENCE_HEADERS[@]}" \
             --data-binary @"${VIDEO}")
           # The repository is public; keep draft URLs out of build logs.
           test "${CODE}" = '200'
+          if [ -n "${OIDC_HEADER}" ]; then
+            unset ATTESTATION OIDC_HEADER
+            node scripts/deliver-tip-v11-report.mjs "${REPORT}" || true
+          fi
 
       - name: Report a terminal renderer failure
         if: ${{ failure() }}

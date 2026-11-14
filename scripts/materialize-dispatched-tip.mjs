@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { freshTipContract, OUTRO } from './fresh-tip-contract.mjs';
 import { makeTipV11Spec, TIP_V11_BRAND, TIP_V11_SLOGAN } from './tip-v11-contract.mjs';
+import { digestTipValue } from './tip-v11-render-manifest.mjs';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HEX64_RE = /^[a-f0-9]{64}$/;
@@ -103,7 +104,10 @@ export function materializeDispatchedTip(raw, { legacy = false } = {}) {
 
   const fr = sentencesToFiveParts(scriptFr);
   if (v11) {
-    const spec = makeTipV11Spec({ id: `tip-${jobId}`, title, body: fr });
+    const spec = {
+      ...makeTipV11Spec({ id: `tip-${jobId}`, title, body: fr }),
+      sourceScriptSha256: digestTipValue(content.scriptFr),
+    };
     return { jobId, callbackUrl, uploadUrl, callbackToken, spec };
   }
   const en = sentencesToFiveParts(scriptEn);
