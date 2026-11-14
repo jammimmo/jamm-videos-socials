@@ -1,4 +1,4 @@
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useLayoutEffect, useRef, useState} from 'react';
 import {AbsoluteFill, Audio, Img, staticFile, useCurrentFrame, useDelayRender, useVideoConfig} from 'remotion';
 import {TipV11Outro} from './TipV11Outro';
 import {ServicesScene, ToolsScene} from './TipV11Project';
@@ -22,6 +22,11 @@ const navy = '#072451';
 const orange = '#FD7E00';
 const muted = '#BFD2F0';
 const edge = '#5277AD';
+const shortFeedContent = {left: 84, top: 135, scale: .8};
+const captionTop = 1570;
+// 1570px starts at 1391px in the video. Keep a little separation from the
+// observed feed caption line at 1515px after the common 80% scale.
+const captionHeight = 146;
 const weights = [600, 700, 800];
 const progress = (value: number) => Math.min(1, Math.max(0, value));
 const smooth = (value: number) => {
@@ -46,7 +51,7 @@ function ProgressFrame({value}: {value: number}) {
 
 function Header({signature}: {signature: boolean}) {
   return (
-    <div style={{position: 'absolute', left: 64, right: 120, top: 130,
+    <div data-fit-region="header" style={{position: 'absolute', left: 64, right: 120, top: 160,
       display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
       <Img src={staticFile('tip-v11/logo.png')} style={{width: 225, height: 98, objectFit: 'contain'}} />
       {!signature && <div style={{fontSize: 34, fontWeight: 600, letterSpacing: -.5, textAlign: 'right', lineHeight: 1.3}}>
@@ -54,14 +59,6 @@ function Header({signature}: {signature: boolean}) {
       </div>}
     </div>
   );
-}
-
-function sectionHeading(text: string) {
-  const line = text.replace(/\s+/gu, ' ').trim().split(/(?<=[.!?])\s/u, 1)[0];
-  if (line.length <= 88) return line;
-  const words = line.slice(0, 87).split(' ');
-  words.pop();
-  return words.length ? `${words.join(' ')}…` : `${line.slice(0, 87)}…`;
 }
 
 /** Generic depth illustration with a house and an animated checklist. */
@@ -104,13 +101,15 @@ function Checklist({step, elapsed}: {step: number; elapsed: number}) {
   );
 }
 
-function GeneralScene({title, segment, time}: {title: string; segment: TipV11Segment; time: number}) {
+export function GeneralScene({title, segment, time}: {title: string; segment: TipV11Segment; time: number}) {
   const elapsed = Math.max(0, time - segment.start);
   const steps: Record<string, number> = {step1: 1, step2: 2, step3: 3};
   const step = steps[segment.id] ?? (segment.id === 'takeaway' ? 3 : 0);
   const kicker = segment.id === 'takeaway' ? 'À RETENIR' : steps[segment.id] ? `ÉTAPE 0${step}` : 'CONSEILS JAMM IMMO';
-  const heading = sectionHeading(segment.id === 'greeting' || segment.id === 'hook' ? title : segment.text);
-  const fontSize = heading.length <= 36 ? 79 : heading.length <= 60 ? 65 : 55;
+  const heading = segment.id === 'greeting' || segment.id === 'hook' ? title : segment.text;
+  // Body segments contain one complete sentence, up to 200 characters.
+  const fontSize = heading.length <= 36 ? 79 : heading.length <= 60 ? 65
+    : Math.max(44, Math.min(55, Math.floor(64 - heading.length * .1)));
   return (
     <>
       <div style={{position: 'absolute', left: 64, top: 316, width: 896}}>
@@ -126,6 +125,38 @@ function GeneralScene({title, segment, time}: {title: string; segment: TipV11Seg
   );
 }
 
+export function fitTipV11Caption(measure: (size: number) => number): boolean {
+  for (let size = 49; size >= 30; size--) {
+    if (measure(size) <= captionHeight) return true;
+  }
+  return false;
+}
+
+function TipCaption({text, fontsReady}: {text: string; fontsReady: boolean}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const {cancelRender} = useDelayRender();
+  useLayoutEffect(() => {
+    if (!fontsReady || !ref.current) return;
+    const element = ref.current;
+    // Character count misses wide words placed on a line of their own.
+    // Measure the actual Poppins layout before capturing the frame.
+    const fits = fitTipV11Caption(size => {
+      element.style.fontSize = `${size}px`;
+      return element.offsetHeight;
+    });
+    if (!fits) cancelRender(new Error('Le sous-titre V11 ne tient pas dans la zone lisible.'));
+  }, [cancelRender, fontsReady, text]);
+  return (
+    <div style={{position: 'absolute', left: 64, right: 120, top: captionTop, display: 'flex', justifyContent: 'flex-start'}}>
+      <div ref={ref} data-fit-region="caption" style={{
+        fontSize: 49, lineHeight: 1.2, fontWeight: 700, whiteSpace: 'pre-line', background: navy,
+        padding: '13px 20px', borderRadius: 15, borderLeft: `5px solid ${orange}`, maxWidth: '100%',
+        overflowWrap: 'anywhere',
+      }}>{text.replace(/ ([!?:;])/gu, '\u00a0$1')}</div>
+    </div>
+  );
+}
+
 export const TipV11Fr: React.FC<TipV11FrProps> = ({
   title, segments, captions, audio, assistantEnabled, phoneGroups, visualTopic,
 }) => {
@@ -133,6 +164,7 @@ export const TipV11Fr: React.FC<TipV11FrProps> = ({
   const {fps, durationInFrames} = useVideoConfig();
   const {delayRender, continueRender, cancelRender} = useDelayRender();
   const [fontHandle] = useState(() => delayRender('Load the V11 Poppins fonts'));
+  const [fontsReady, setFontsReady] = useState(false);
   useEffect(() => {
     Promise.all(weights.map(weight => document.fonts.load(`${weight} 48px Poppins`))).then(
       fonts => {
@@ -140,11 +172,14 @@ export const TipV11Fr: React.FC<TipV11FrProps> = ({
           cancelRender(new Error('The V11 Poppins fonts did not load'));
           return;
         }
-        continueRender(fontHandle);
+        setFontsReady(true);
       },
       error => cancelRender(error),
     );
-  }, [cancelRender, continueRender, fontHandle]);
+  }, [cancelRender]);
+  useLayoutEffect(() => {
+    if (fontsReady) continueRender(fontHandle);
+  }, [continueRender, fontHandle, fontsReady]);
 
   const time = frame / fps;
   const active = segments.reduce<TipV11Segment | undefined>(
@@ -180,17 +215,13 @@ export const TipV11Fr: React.FC<TipV11FrProps> = ({
     <AbsoluteFill style={{fontFamily: 'Poppins, sans-serif', color: cream, background: '#062B73', overflow: 'hidden'}}>
       <style>{fontCss() + '*{box-sizing:border-box}'}</style>
       <AbsoluteFill style={{background: 'radial-gradient(ellipse at 65% 35%,#0B46B6 0%,#062B73 58%,#041D4C 100%)'}} />
-      <Header signature={showSignature} />
-      {scene}
-      {caption && (
-        <div style={{position: 'absolute', left: 64, right: 120, top: 1570, display: 'flex', justifyContent: 'flex-start'}}>
-          <div data-fit-region="caption" style={{
-            fontSize: 44, lineHeight: 1.25, fontWeight: 700, whiteSpace: 'pre-line', background: navy,
-            padding: '13px 20px', borderRadius: 15, borderLeft: `5px solid ${orange}`, maxWidth: '100%',
-            overflowWrap: 'break-word',
-          }}>{caption.text.replace(/ ([!?:;])/gu, '\u00a0$1')}</div>
-        </div>
-      )}
+      {/* Keep content clear of the top tabs, right controls and bottom metadata in short-video feeds. */}
+      <AbsoluteFill style={{transform: `translate(${shortFeedContent.left}px, ${shortFeedContent.top}px) scale(${shortFeedContent.scale})`,
+        transformOrigin: 'top left'}}>
+        <Header signature={showSignature} />
+        {scene}
+        {caption && <TipCaption text={caption.text} fontsReady={fontsReady} />}
+      </AbsoluteFill>
       <ProgressFrame value={progress(frame / Math.max(1, durationInFrames - 1))} />
       {audio && <Audio src={staticFile(audio)} />}
     </AbsoluteFill>
