@@ -1,4 +1,4 @@
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useLayoutEffect, useRef, useState} from 'react';
 import {AbsoluteFill, Audio, Img, staticFile, useCurrentFrame, useDelayRender, useVideoConfig} from 'remotion';
 import {TipV11Outro} from './TipV11Outro';
 import {ServicesScene, ToolsScene} from './TipV11Project';
@@ -23,6 +23,10 @@ const orange = '#FD7E00';
 const muted = '#BFD2F0';
 const edge = '#5277AD';
 const shortFeedContent = {left: 84, top: 135, scale: .8};
+const captionTop = 1570;
+// 1570px starts at 1391px in the video. Keep a little separation from the
+// observed feed caption line at 1515px after the common 80% scale.
+const captionHeight = 146;
 const weights = [600, 700, 800];
 const progress = (value: number) => Math.min(1, Math.max(0, value));
 const smooth = (value: number) => {
@@ -121,6 +125,38 @@ export function GeneralScene({title, segment, time}: {title: string; segment: Ti
   );
 }
 
+export function fitTipV11Caption(measure: (size: number) => number): boolean {
+  for (let size = 49; size >= 30; size--) {
+    if (measure(size) <= captionHeight) return true;
+  }
+  return false;
+}
+
+function TipCaption({text, fontsReady}: {text: string; fontsReady: boolean}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const {cancelRender} = useDelayRender();
+  useLayoutEffect(() => {
+    if (!fontsReady || !ref.current) return;
+    const element = ref.current;
+    // Character count misses wide words placed on a line of their own.
+    // Measure the actual Poppins layout before capturing the frame.
+    const fits = fitTipV11Caption(size => {
+      element.style.fontSize = `${size}px`;
+      return element.offsetHeight;
+    });
+    if (!fits) cancelRender(new Error('Le sous-titre V11 ne tient pas dans la zone lisible.'));
+  }, [cancelRender, fontsReady, text]);
+  return (
+    <div style={{position: 'absolute', left: 64, right: 120, top: captionTop, display: 'flex', justifyContent: 'flex-start'}}>
+      <div ref={ref} data-fit-region="caption" style={{
+        fontSize: 49, lineHeight: 1.2, fontWeight: 700, whiteSpace: 'pre-line', background: navy,
+        padding: '13px 20px', borderRadius: 15, borderLeft: `5px solid ${orange}`, maxWidth: '100%',
+        overflowWrap: 'anywhere',
+      }}>{text.replace(/ ([!?:;])/gu, '\u00a0$1')}</div>
+    </div>
+  );
+}
+
 export const TipV11Fr: React.FC<TipV11FrProps> = ({
   title, segments, captions, audio, assistantEnabled, phoneGroups, visualTopic,
 }) => {
@@ -128,6 +164,7 @@ export const TipV11Fr: React.FC<TipV11FrProps> = ({
   const {fps, durationInFrames} = useVideoConfig();
   const {delayRender, continueRender, cancelRender} = useDelayRender();
   const [fontHandle] = useState(() => delayRender('Load the V11 Poppins fonts'));
+  const [fontsReady, setFontsReady] = useState(false);
   useEffect(() => {
     Promise.all(weights.map(weight => document.fonts.load(`${weight} 48px Poppins`))).then(
       fonts => {
@@ -135,11 +172,14 @@ export const TipV11Fr: React.FC<TipV11FrProps> = ({
           cancelRender(new Error('The V11 Poppins fonts did not load'));
           return;
         }
-        continueRender(fontHandle);
+        setFontsReady(true);
       },
       error => cancelRender(error),
     );
-  }, [cancelRender, continueRender, fontHandle]);
+  }, [cancelRender]);
+  useLayoutEffect(() => {
+    if (fontsReady) continueRender(fontHandle);
+  }, [continueRender, fontHandle, fontsReady]);
 
   const time = frame / fps;
   const active = segments.reduce<TipV11Segment | undefined>(
@@ -180,15 +220,7 @@ export const TipV11Fr: React.FC<TipV11FrProps> = ({
         transformOrigin: 'top left'}}>
         <Header signature={showSignature} />
         {scene}
-        {caption && (
-          <div style={{position: 'absolute', left: 64, right: 120, top: 1570, display: 'flex', justifyContent: 'flex-start'}}>
-            <div data-fit-region="caption" style={{
-              fontSize: 49, lineHeight: 1.2, fontWeight: 700, whiteSpace: 'pre-line', background: navy,
-              padding: '13px 20px', borderRadius: 15, borderLeft: `5px solid ${orange}`, maxWidth: '100%',
-              overflowWrap: 'break-word',
-            }}>{caption.text.replace(/ ([!?:;])/gu, '\u00a0$1')}</div>
-          </div>
-        )}
+        {caption && <TipCaption text={caption.text} fontsReady={fontsReady} />}
       </AbsoluteFill>
       <ProgressFrame value={progress(frame / Math.max(1, durationInFrames - 1))} />
       {audio && <Audio src={staticFile(audio)} />}
