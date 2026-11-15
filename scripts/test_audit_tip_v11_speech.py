@@ -9,7 +9,7 @@ import wave
 
 from audit_tip_v11 import audit
 from audit_tip_v11_speech import (
-    ASR_REVISION, MAX_RECOGNIZED_WORDS, RECOGNITION_TIMEOUT_SECONDS, measure_final_french_speech,
+    ASR_REVISION, MAX_RECOGNIZED_WORDS, RECOGNITION_TIMEOUT_SECONDS, compare_french_segments, measure_final_french_speech,
     recognize_final_wav, recognize_with_timeout, sha256,
 )
 
@@ -106,6 +106,38 @@ class V11FinalSpeechTest(unittest.TestCase):
                         self.assertEqual(row['reason'], 'mixed_language_boundary')
                     else:
                         self.assertEqual(row['status'], 'matched')
+
+    def test_neighboring_french_scenes_use_one_exact_partition_without_reusing_brand_words(self):
+        scenes = [
+            {'id': 'takeaway', 'text': 'Consultez Jamm Immo.', 'start': 0, 'end': 4},
+            {'id': 'services', 'text': 'Jamm Immo vous accompagne.', 'start': 4, 'end': 7},
+        ]
+        words = [
+            ('Consultez', .6, 1.2, .9), ('Jamm', 1.7, 2, .9), ('Immo', 2.1, 2.4, .9),
+            ('Jamm', 3.1, 3.55, .9), ('Immo', 3.6, 4.1, .9),
+            ('vous', 4.2, 4.4, .9), ('accompagne', 4.6, 5.2, .9),
+        ]
+        result = compare_french_segments(scenes, words, 0)
+        self.assertEqual([row['status'] for row in result], ['matched', 'matched'])
+        self.assertEqual([row['observed_token_count'] for row in result], [3, 4])
+        for row in result:
+            self.assertEqual(row['observed_sha256'], row['expected_sha256'])
+
+        for label, changed in {
+            'deleted-left-word': words[:2] + words[3:],
+            'deleted-right-word': words[:3] + words[4:],
+            'inserted-word': words[:3] + [('déjà', 2.6, 2.8, .9)] + words[3:],
+            'duplicate-word': words[:3] + [words[3]] + words[3:],
+            'reordered-phrase': words[:3] + [('Immo', 3.1, 3.55, .9), ('Jamm', 3.6, 4.1, .9)] + words[5:],
+            'substituted-name': words[:3] + [('Jam', 3.1, 3.55, .9)] + words[4:],
+            'unconfident-word': words[:3] + [('Jamm', 3.1, 3.55, .59)] + words[4:],
+            'overlapping-word': words[:3] + [('Jamm', 3.1, 3.7, .9)] + words[4:],
+            'indivisible-row': words[:2] + [('Immo Jamm', 2.1, 3.55, .9)] + words[4:],
+        }.items():
+            with self.subTest(label=label):
+                self.assertIn('inconclusive', [row['status'] for row in compare_french_segments(scenes, changed, 0)])
+        delayed = [{**scenes[0], 'end': 5}, {**scenes[1], 'start': 5}]
+        self.assertIn('inconclusive', [row['status'] for row in compare_french_segments(delayed, words, 0)])
 
     def test_mux_offset_and_model_failure_fail_closed(self):
         shifted = [(text, start + .002, end + .002, probability)

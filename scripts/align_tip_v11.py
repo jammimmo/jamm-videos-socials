@@ -28,6 +28,8 @@ SIGNATURE_PREROLL_SECONDS = .10
 PHONE_WINDOW_EVIDENCE = 'french-v11-pinned-phone-window'
 PHONE_WORDS = ['plus', *(word for group in NUMBER_WORDS.values() for word in group.split())]
 PHONE_BOUNDARY_TOLERANCE_SECONDS = .10
+SCENE_PREROLL_SECONDS = .08
+AUDIBLE_WINDOW_SECONDS = .1
 
 
 class PhoneEvidenceError(ValueError):
@@ -99,11 +101,26 @@ def audible_windows(pcm, sample_rate):
     samples.frombytes(pcm)
     if sys.byteorder != 'little':
         samples.byteswap()
-    window = sample_rate // 10
+    window = int(sample_rate * AUDIBLE_WINDOW_SECONDS)
     for index in range(0, len(samples), window):
         chunk = samples[index:index + window]
         if has_audible_narration(chunk):
             yield (index / sample_rate, min(index + window, len(samples)) / sample_rate)
+
+
+def quiet_scene_cut(sound, left_end, right_anchor):
+    # An uncertain next word anchor can land inside speech. A unique quiet
+    # gap next to the exact prior line end is better timing evidence.
+    gaps = [
+        (left[1], right[0]) for left, right in zip(sound, sound[1:])
+        if -.1 <= left[1] - left_end <= .25 and right[0] - left[1] >= .3
+        and -1.25 <= right[0] - right_anchor <= .75
+    ]
+    if len(gaps) != 1:
+        return None
+    start, end = gaps[0]
+    cut = end - SCENE_PREROLL_SECONDS - AUDIBLE_WINDOW_SECONDS
+    return cut if max(start, left_end) <= cut else None
 
 
 def empty_phone_gap(segments, groups, index, offset, mapping, source_indices, words):
@@ -198,12 +215,27 @@ def align(segments, words, duration, audible=None):
             last = mapping.get(offset + len(group) - 1)
             if previous is not None and last == previous + 1:
                 preceding_social_end = stamps[last][1]
-        anchors.append((offset, stamps[matched[0]][0], stamps[matched[-1]][1]))
+        last = mapping.get(offset + len(group) - 1)
+        penultimate = mapping.get(offset + len(group) - 2) if len(group) >= 2 else None
+        ends_with_exact_pair = last is not None and penultimate == last - 1
+        anchors.append((offset, stamps[matched[0]][0], mapping.get(offset), last, ends_with_exact_pair))
         offset += len(group)
 
     duration_in_frames = max(1801, math.ceil((duration + .6) * 30))
     end_of_video = duration_in_frames / 30
-    scene_starts = [0, *(max(0, anchor[1] - .08) for anchor in anchors[1:])]
+    scene_starts = [0]
+    for (_, _, _, left_last, exact_end), (_, right_start, right_first, _, _) in zip(anchors, anchors[1:]):
+        start = max(0, right_start - SCENE_PREROLL_SECONDS)
+        if left_last is not None:
+            left_end = stamps[left_last][1]
+            # Preroll belongs in the gap before the next line.
+            if right_first == left_last + 1 and left_end <= right_start:
+                start = max(start, left_end)
+            elif exact_end and audible is not None:
+                pause_cut = quiet_scene_cut(sound, left_end, right_start)
+                if pause_cut is not None:
+                    start = pause_cut
+        scene_starts.append(start)
     scene_ends = [*scene_starts[1:], end_of_video]
     timed_segments, captions = [], []
     for segment, anchor, start, end in zip(segments, anchors, scene_starts, scene_ends):

@@ -20,6 +20,10 @@ SAMPLE_RATE = 24_000
 EXCLUDED_SEGMENTS = ('greeting', 'signature')
 MAX_RECOGNIZED_WORDS = 500
 MIN_WORD_PROBABILITY = .6
+# The ordinary cut still owns every word outside this window. A pair can
+# recover a displaced cut of at most the 1.1 seconds observed in the MP4,
+# plus a small allowance for differences in word timestamps.
+MAX_FRENCH_BOUNDARY_SHIFT_SECONDS = 1.25
 RECOGNITION_TIMEOUT_SECONDS = 150
 
 
@@ -69,7 +73,6 @@ def recognize_with_timeout(wav_path):
 
 def words_by_segment(segments, recognized_words, lag_samples):
     observed = [[] for _ in segments]
-    low_confidence = set()
     ambiguous_boundary = set()
     offset = lag_samples / SAMPLE_RATE
     previous = 0
@@ -98,22 +101,67 @@ def words_by_segment(segments, recognized_words, lag_samples):
         if any((segments[i]['id'] in EXCLUDED_SEGMENTS) != excluded for i in overlaps):
             ambiguous_boundary.update(i for i in overlaps if segments[i]['id'] not in EXCLUDED_SEGMENTS)
         if not excluded:
-            observed[index].append(text.strip())
-            if probability < MIN_WORD_PROBABILITY:
-                low_confidence.add(index)
-    return observed, low_confidence, ambiguous_boundary
+            observed[index].append((text.strip(), start, end, probability))
+    return observed, ambiguous_boundary
+
+
+def segment_words(identity, words):
+    return normalized_words(identity, ' '.join(word[0] for word in words))
+
+
+def exact_adjacent_split(left, right, rows, original_split, expected_left, expected_right):
+    if abs(left['end'] - right['start']) > .001 or not rows:
+        return None
+    if any(word[3] < MIN_WORD_PROBABILITY for word in rows):
+        return None
+    if any(previous[2] > following[1] for previous, following in zip(rows, rows[1:])):
+        return None
+    boundary = right['start']
+    matches = []
+    for split in range(1, len(rows)):
+        if split == original_split:
+            continue
+        moved = rows[min(split, original_split):max(split, original_split)]
+        if any(word[1] < boundary - MAX_FRENCH_BOUNDARY_SHIFT_SECONDS
+               or word[2] > boundary + MAX_FRENCH_BOUNDARY_SHIFT_SECONDS for word in moved):
+            continue
+        if (segment_words(left['id'], rows[:split]) == expected_left
+            and segment_words(right['id'], rows[split:]) == expected_right):
+            matches.append(split)
+    return matches[0] if len(matches) == 1 else None
 
 
 def compare_french_segments(segments, recognized_words, lag_samples):
-    observed, low_confidence, ambiguous_boundary = words_by_segment(segments, recognized_words, lag_samples)
+    observed, ambiguous_boundary = words_by_segment(segments, recognized_words, lag_samples)
+    expected_words = [normalized_words(segment['id'], segment['text']) for segment in segments]
+    actual_words = [segment_words(segment['id'], words) for segment, words in zip(segments, observed)]
+    # Keep each ASR row in exactly one report. Two proposed changes that
+    # would share a scene are ambiguous, so neither changes the observation.
+    repairs = {}
+    for index, (left, right) in enumerate(zip(segments, segments[1:])):
+        following = index + 1
+        if (left['id'] in EXCLUDED_SEGMENTS or right['id'] in EXCLUDED_SEGMENTS
+            or index in ambiguous_boundary or following in ambiguous_boundary
+            or not expected_words[index] or not expected_words[following]
+            or actual_words[index] == expected_words[index] or actual_words[following] == expected_words[following]):
+            continue
+        rows = observed[index] + observed[following]
+        split = exact_adjacent_split(left, right, rows, len(observed[index]),
+                                     expected_words[index], expected_words[following])
+        if split is not None:
+            repairs[index] = (rows[:split], rows[split:])
+    for index, (left, right) in repairs.items():
+        if index - 1 not in repairs and index + 1 not in repairs:
+            observed[index:index + 2] = [left, right]
     results = []
     for index, segment in enumerate(segments):
         identity = segment['id']
         if identity in EXCLUDED_SEGMENTS:
             continue
-        expected = normalized_words(identity, segment['text'])
-        actual = normalized_words(identity, ' '.join(observed[index]))
-        matched = bool(expected) and actual == expected and index not in low_confidence and index not in ambiguous_boundary
+        expected = expected_words[index]
+        actual = segment_words(identity, observed[index])
+        matched = (bool(expected) and actual == expected and index not in ambiguous_boundary
+                   and all(word[3] >= MIN_WORD_PROBABILITY for word in observed[index]))
         item = {'segment': identity, 'status': 'matched' if matched else 'inconclusive',
                 'expected_token_count': len(expected), 'observed_token_count': len(actual),
                 'expected_sha256': sha256(' '.join(expected).encode()),

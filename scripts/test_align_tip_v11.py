@@ -61,6 +61,44 @@ class V11AlignmentTest(unittest.TestCase):
             alignment['phoneGroups'], alignment['phoneGroups'][1:])))
         self.assertTrue(alignment['reviewRequired'])
 
+    def test_preroll_stays_after_the_last_word_when_both_scene_anchors_agree(self):
+        words = speech(SEGMENTS)
+        index = sum(len(tokens(row['text'])) for row in SEGMENTS[:6])
+        previous, leading = words[index - 1], words[index]
+        previous['end'] = leading['start'] - .02
+        alignment = align(SEGMENTS, words, 70)
+        cut = alignment['segments'][6]['start']
+        self.assertEqual(cut, previous['end'])
+        self.assertEqual(alignment['segments'][5]['end'], cut)
+        self.assertEqual([caption['end'] for caption in alignment['captions']
+                          if caption['start'] < cut][-1], cut)
+
+        previous['word'] = 'incertain'
+        unconfirmed = align(SEGMENTS, words, 70)
+        self.assertAlmostEqual(unconfirmed['segments'][6]['start'], leading['start'] - .08)
+
+    def test_unconfirmed_next_word_uses_a_measured_pause_after_an_exact_line_end(self):
+        words = speech(SEGMENTS)
+        boundary = sum(len(tokens(row['text'])) for row in SEGMENTS[:7])
+        for word in words[boundary:]:
+            word['start'] += .42
+            word['end'] += .42
+        words[boundary]['word'] = 'Jam'
+        words[boundary + 1]['word'] = 'Imo'
+        sound = [(word['start'], word['end']) for word in words]
+        with_pause = align(SEGMENTS, words, 70, sound)
+        self.assertAlmostEqual(with_pause['segments'][7]['start'], words[boundary]['start'] - .18)
+        self.assertTrue(with_pause['reviewRequired'])
+
+        # Continuous speech, or an uncertain prior line end, cannot establish
+        # a replacement timing simply because the next start is uncertain.
+        continuous = sound[:boundary - 1] + [(sound[boundary - 1][0], sound[boundary][1])] + sound[boundary + 1:]
+        for evidence, last_word in [(continuous, words[boundary - 1]['word']), (sound, 'indécis')]:
+            with self.subTest(last_word=last_word):
+                changed = [*words[:boundary - 1], {**words[boundary - 1], 'word': last_word}, *words[boundary:]]
+                result = align(SEGMENTS, changed, 70, evidence)
+                self.assertAlmostEqual(result['segments'][7]['start'], words[boundary + 2]['start'] - .08)
+
     def test_wrong_phone_and_trailing_dead_air_fail(self):
         words = speech(SEGMENTS)
         index = next(i for i, word in enumerate(words) if word['word'] == 'neuf')
