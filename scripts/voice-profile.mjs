@@ -6,13 +6,16 @@ export const STYLE_DIRECTION = 'Read only the exact passage requested, in ONE co
 
 export const ACCENT_DIRECTION = 'Use a clearly audible, more pronounced Senegalese / West African French accent, with natural regional intonation and vowel articulation. Keep it authentic, intelligible and professional, never exaggerated. Do not flatten the accent into metropolitan French. Use a measured conversational pace rather than rushing short sentences; let each thought breathe. Preserve the same narrator and accent in every scene and the outro.';
 export const TIP_V11_VOICE_NAME = 'Algenib';
-const TIP_V11_DIRECTION = 'Speak French as one warm, lively real-estate adviser from Dakar addressing one person. Keep a light, natural Senegalese French colour and soft brief R sounds, never rolled, prolonged or exaggerated. Use a bright, audible smile, lively melodic phrasing, and brief breaths that connect the thoughts. Aim for a measured conversational pace around 140 words per minute without artificially stretching pauses. No laughter, singing or shouting. Pronounce Salam alikoum naturally. Pronounce Nanga def and Kër gu baax, xel mu dal naturally in Wolof. Clearly read each international telephone group and the website exactly as written. Read the exact passage in one continuous take, without improvising or speaking these directions.';
+// Exact direction from ROOM_TOUR_VOICE_PROFILE_V8 in Estate Flow 9b33807a.
+const TIP_V11_DIRECTION = 'Speak French with a distinctly pronounced Senegalese accent from Dakar throughout: full, clear vowels, a flowing syllable-led rhythm and naturally tapped or lightly rolled R sounds, never forced trills. You are a passionate real-estate host warmly welcoming one visitor. Let a broad, genuine smile be audible from Bonjour; sound delighted to share the visit. Use buoyant melodic rises and falls, crisp phrase openings and warm personal emphasis. Sustain lively, confident energy through the descriptions and give the final Jamm Immo and Wolof slogan an especially spirited, inviting lift. Link phrases fluidly, with natural brief breaths. Express enthusiasm through intonation, not shouting or rushing. Read only the supplied words, with no added words or laughter.';
+export const TIP_V11_VOICE_SDK_VERSION = '2.8.0';
+export const TIP_V11_VOICE_HTTP_OPTIONS = Object.freeze({ timeout: 240_000 });
 
 export function voiceCacheHash(script, context = '', profile = '') {
   if (profile === 'tip-v11-fr') {
     return createHash('sha256').update(JSON.stringify({
-      version: 1, model: PRIMARY_MODEL, voice: TIP_V11_VOICE_NAME,
-      direction: TIP_V11_DIRECTION, script, context,
+      version: 2, model: PRIMARY_MODEL, voice: TIP_V11_VOICE_NAME, sdk: TIP_V11_VOICE_SDK_VERSION,
+      prompt: voicePrompt(script, context, profile),
     })).digest('hex');
   }
   return createHash('sha256').update(JSON.stringify({
@@ -23,7 +26,8 @@ export function voiceCacheHash(script, context = '', profile = '') {
 
 export function voicePrompt(script, context = '', profile = '') {
   if (profile === 'tip-v11-fr') {
-    return `${TIP_V11_DIRECTION}\nExact passage to read, without additions:\n${script}`;
+    if (context) throw new Error('The Ngor V8 voice profile does not accept additional context');
+    return `${TIP_V11_DIRECTION}\n\n${script}`;
   }
   return `${STYLE_DIRECTION}\n${ACCENT_DIRECTION}\n${context ? `Full narration and pacing guidance for continuity only (do not read):\n${context}\n` : ''}Exact passage to read, without additions:\n${script}`;
 }

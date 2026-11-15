@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Generate a French voice-over WAV for a single JAMM IMMO short video using
-// Google Gemini TTS (Charon voice). The API key is read ONLY from
+// Google Gemini TTS. The API key is read ONLY from
 // process.env.GEMINI_API_KEY — never logged, never written to disk.
 //
 // Usage:
@@ -13,15 +13,13 @@
 //   public/audio/voiceovers/<id>.wav
 //   public/audio/voiceovers/<id>.sha256   (hash of the input script, for cache invalidation)
 
-import { GoogleGenAI } from '@google/genai';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { VOICE_NAME, TIP_V11_VOICE_NAME, TIP_V11_VOICE_HTTP_OPTIONS, PRIMARY_MODEL, voiceCacheHash, voicePrompt } from './voice-profile.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
-
-import { VOICE_NAME, TIP_V11_VOICE_NAME, PRIMARY_MODEL, voiceCacheHash, voicePrompt } from './voice-profile.mjs';
 
 // Gemini TTS returns raw little-endian 16-bit PCM mono at 24000 Hz.
 const SAMPLE_RATE = 24000;
@@ -69,9 +67,41 @@ function pcmToWav(pcm) {
   return Buffer.concat([header, pcm]);
 }
 
-async function callGemini(ai, modelName, voiceName, prompt) {
+const MAX_TIP_PCM_BYTES = 123 * SAMPLE_RATE * NUM_CHANNELS * (BITS_PER_SAMPLE / 8);
+
+function decodeTipVoice(response) {
+  const candidates = response?.candidates;
+  const audio = candidates?.[0]?.content?.parts?.filter(part => part.inlineData).map(part => part.inlineData);
+  if (candidates?.length !== 1 || audio?.length !== 1 || typeof audio[0].data !== 'string'
+    || audio[0].data.length > Math.ceil(MAX_TIP_PCM_BYTES / 3) * 4) throw new Error('One bounded Gemini take is required');
+  const [type, ...fields] = String(audio[0].mimeType || '').toLowerCase().split(';').map(value => value.trim());
+  const allowed = { rate: '24000', channels: '1', bits: '16', bitdepth: '16', 'bit-depth': '16', bit_depth: '16', codec: 'pcm' };
+  const parameters = new Set();
+  for (const field of fields) {
+    const [key, value, extra] = field.split('=');
+    if (!Object.hasOwn(allowed, key) || parameters.has(key) || extra !== undefined || value !== allowed[key]) {
+      throw new Error('Gemini take has unsupported PCM parameters');
+    }
+    parameters.add(key);
+  }
+  if (!['audio/l16', 'audio/pcm'].includes(type) || !parameters.has('rate')) {
+    throw new Error('Gemini take must declare PCM at 24000 Hz');
+  }
+  const pcm = Buffer.from(audio[0].data, 'base64');
+  if (pcm.toString('base64') !== audio[0].data || !pcm.length || pcm.length % 2 || pcm.length > MAX_TIP_PCM_BYTES) {
+    throw new Error('Gemini take contains malformed PCM');
+  }
+  return pcm;
+}
+
+export async function generateSpeechPcm({ apiKey, profile, script, context }) {
+  const exactTourV8 = profile === 'tip-v11-fr';
+  const voiceName = exactTourV8 ? TIP_V11_VOICE_NAME : VOICE_NAME;
+  const prompt = voicePrompt(script, context, profile);
+  const { GoogleGenAI } = exactTourV8 ? await import('@google/genai-ngor-v8') : await import('@google/genai');
+  const ai = new GoogleGenAI({ apiKey, ...(exactTourV8 && { httpOptions: { ...TIP_V11_VOICE_HTTP_OPTIONS } }) });
   const response = await ai.models.generateContent({
-    model: modelName,
+    model: PRIMARY_MODEL,
     contents: [{ parts: [{ text: prompt }] }],
     config: {
       responseModalities: ['AUDIO'],
@@ -82,6 +112,7 @@ async function callGemini(ai, modelName, voiceName, prompt) {
       },
     },
   });
+  if (exactTourV8) return decodeTipVoice(response);
   const part = response?.candidates?.[0]?.content?.parts?.[0];
   const inline = part?.inlineData;
   if (!inline?.data) {
@@ -107,13 +138,10 @@ async function main() {
     );
   }
 
-  const prompt = voicePrompt(script, args.context, profile);
-  const ai = new GoogleGenAI({ apiKey });
-
   let pcm;
   try {
     console.log(`▶ ${id} — calling ${PRIMARY_MODEL} (${voiceName})${title ? ` for "${title}"` : ''}`);
-    pcm = await callGemini(ai, PRIMARY_MODEL, voiceName, prompt);
+    pcm = await generateSpeechPcm({ apiKey, profile, script, context: args.context });
   } catch (primaryErr) {
     const status = primaryErr?.status;
     // Never silently switch narrator models halfway through a video.
@@ -134,7 +162,9 @@ async function main() {
   console.log(`✓ ${id} — wrote ${wavPath} (${(wav.length / 1024).toFixed(1)} KB, ~${seconds}s)`);
 }
 
-main().catch((err) => {
-  console.error('Unexpected error:', err?.message ?? err);
-  process.exit(1);
-});
+if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+  main().catch((err) => {
+    console.error('Unexpected error:', err?.message ?? err);
+    process.exit(1);
+  });
+}

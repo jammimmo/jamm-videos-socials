@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { allocateSceneFrames, assertSceneVoiceFits, pcmWavDuration, sceneVoiceSpecs, continuousSceneFrames } from './scene-voice.mjs';
-import { voiceCacheHash, voicePrompt } from './voice-profile.mjs';
+import { generateSpeechPcm } from './generate-gemini-voiceover.mjs';
+import { TIP_V11_VOICE_HTTP_OPTIONS, TIP_V11_VOICE_SDK_VERSION, voiceCacheHash, voicePrompt } from './voice-profile.mjs';
 
 function wav(seconds) {
   const size = Math.round(seconds * 48000);
@@ -36,6 +38,51 @@ test('narrator cache includes the shared profile and context, with no per-scene 
   const generator = await readFile(new URL('./generate-gemini-voiceover.mjs', import.meta.url), 'utf8');
   assert.doesNotMatch(generator, /FALLBACK_MODEL/);
   assert.match(generator, /voiceCacheHash\(script, args.context, profile\)/);
+});
+
+test('automatic advice sends one exact Ngor V8 request through the pinned SDK', async t => {
+  const profile = 'tip-v11-fr';
+  const script = 'Bonjour. Kër gu baax, xel mu dal !';
+  const prompt = voicePrompt(script, '', profile);
+  const [direction, passage] = prompt.split('\n\n');
+  assert.equal(passage, script);
+  assert.equal(createHash('sha256').update(direction).digest('hex'),
+    'f3f015c3bcf53b58162a94fd357fc612b774897de352586cfce3509afe033265');
+  assert.throws(() => voicePrompt(script, 'Consigne supplémentaire.', profile), /additional context/);
+  assert.deepEqual(TIP_V11_VOICE_HTTP_OPTIONS, { timeout: 240_000 });
+  const lock = JSON.parse(await readFile(new URL('../package-lock.json', import.meta.url), 'utf8'));
+  assert.equal(lock.packages['node_modules/@google/genai-ngor-v8'].version, TIP_V11_VOICE_SDK_VERSION);
+  assert.equal(TIP_V11_VOICE_SDK_VERSION, '2.8.0');
+  assert.equal(lock.packages['node_modules/@google/genai'].version, '1.0.0');
+
+  const part = { data: 'AQI=', mimeType: 'audio/L16;rate=24000' };
+  let providerStatus = 200;
+  const request = t.mock.method(globalThis, 'fetch', async (url, options) => {
+    assert.equal(String(url), 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-tts-preview:generateContent');
+    assert.equal(options.method, 'POST');
+    const body = JSON.parse(options.body);
+    assert.deepEqual(body.contents, [{ parts: [{ text: prompt }] }]);
+    assert.deepEqual(body.generationConfig, {
+      responseModalities: ['AUDIO'],
+      speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Algenib' } } },
+    });
+    return providerStatus === 200
+      ? Response.json({ candidates: [{ content: { parts: [{ inlineData: part }] } }] })
+      : Response.json({ error: { code: 503, status: 'UNAVAILABLE' } }, { status: providerStatus });
+  });
+  const input = { apiKey: 'fixture-key', profile, script };
+  assert.deepEqual(await generateSpeechPcm(input), Buffer.from([1, 2]));
+  assert.equal(request.mock.callCount(), 1);
+  part.mimeType = 'audio/L16;rate=16000';
+  await assert.rejects(generateSpeechPcm(input), /PCM parameters/);
+  assert.equal(request.mock.callCount(), 2);
+  part.mimeType = 'audio/L16;rate=24000';
+  part.data = 'AQI';
+  await assert.rejects(generateSpeechPcm(input), /malformed PCM/);
+  assert.equal(request.mock.callCount(), 3);
+  providerStatus = 503;
+  await assert.rejects(generateSpeechPcm(input), { status: 503 });
+  assert.equal(request.mock.callCount(), 4);
 });
 
 test('audio must fit before its caption disappears, with a 100ms tail', () => {

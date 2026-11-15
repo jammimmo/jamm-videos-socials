@@ -25,6 +25,9 @@ test('V11 preserves borderline one-minute narration and the normal tempo for the
   assert.equal(tipV11NarrationTempo(71.015), 1.03);
   assert.throws(() => tipV11NarrationTempo(58.49), /cannot fit/);
   assert.throws(() => tipV11NarrationTempo(123), /cannot fit/);
+  assert.throws(() => tipV11NarrationTempo(60, { exactTourV8: true }), /too short for the required 1\.03× tempo/);
+  assert.equal(tipV11NarrationTempo(61, { exactTourV8: true }), 1.03);
+  assert.equal(tipV11NarrationTempo(71.84, { exactTourV8: true }), 1.03);
 });
 
 function payload() {
@@ -174,7 +177,7 @@ test('V11 consumes exactly the French advice and adds the reviewed brand narrati
   assert.equal(enabled.segments.find(segment => segment.id === 'phone').caption, '+221 76 944 48 49');
   assert.equal(disabled.segments.some(segment => segment.id === 'assistant'), false);
   assert.notEqual(voiceCacheHash(enabled.script), voiceCacheHash(enabled.script, '', 'tip-v11-fr'));
-  assert.match(voicePrompt(enabled.script, '', 'tip-v11-fr'), /soft brief R sounds/u);
+  assert.equal(voicePrompt(enabled.script, '', 'tip-v11-fr').split('\n\n')[1], enabled.script);
   assert.equal(buildTipV11Narration({ ...spec, title: 'Lire un dossier locatif' }).visualTopic, 'general');
 });
 

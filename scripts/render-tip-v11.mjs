@@ -46,21 +46,22 @@ function narrationDuration(path) {
   ], { encoding: 'utf8', timeout: 20_000 }).trim());
 }
 
-export function tipV11NarrationTempo(rawSeconds) {
+export function tipV11NarrationTempo(rawSeconds, { exactTourV8 = false } = {}) {
   if (!Number.isFinite(rawSeconds) || rawSeconds < MIN_NARRATION_SECONDS
     || rawSeconds > MAX_NARRATION_SECONDS * DEFAULT_TEMPO) {
     throw new Error(`V11 raw narration cannot fit without stretching or truncation (${rawSeconds.toFixed(3)} s)`);
   }
-  // A 60-second source falls below the 58.5-second alignment gate at 1.03×.
-  // Preserve its natural timing and keep the approved cadence elsewhere.
-  return rawSeconds / DEFAULT_TEMPO >= MIN_NARRATION_SECONDS + TEMPO_HEADROOM_SECONDS
-    ? DEFAULT_TEMPO
-    : 1;
+  if (rawSeconds / DEFAULT_TEMPO >= MIN_NARRATION_SECONDS + TEMPO_HEADROOM_SECONDS) return DEFAULT_TEMPO;
+  if (exactTourV8) {
+    throw new Error(`V11 Ngor V8 take too short for the required 1.03× tempo (${rawSeconds.toFixed(3)} s)`);
+  }
+  // Imported and local sources may retain their natural timing.
+  return 1;
 }
 
-export async function normalizeTipV11Narration(root, raw, normalizedPath) {
+export async function normalizeTipV11Narration(root, raw, normalizedPath, options) {
   const rawSeconds = narrationDuration(raw);
-  const tempo = tipV11NarrationTempo(rawSeconds);
+  const tempo = tipV11NarrationTempo(rawSeconds, options);
   const normalize = 'loudnorm=I=-16:TP=-1.5:LRA=11';
   const filters = tempo === 1 ? normalize : `atempo=${tempo},${normalize}`;
   await run('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-i', raw, '-map', '0:a:0',
@@ -106,7 +107,9 @@ export async function renderTipV11(spec, {
   const raw = narration.path;
   const normalizedPath = resolve(root, 'public', normalized);
   if (raw === normalizedPath) throw new Error('Narration input must differ from processed output');
-  await normalizeTipV11Narration(root, raw, normalizedPath);
+  await normalizeTipV11Narration(root, raw, normalizedPath, {
+    exactTourV8: narration.source === 'provider' || narration.source === 'cache',
+  });
   await writeFile(specPath, JSON.stringify(plan), { mode: 0o600 });
   await run('python3', ['scripts/align_tip_v11.py', '--wav', normalizedPath,
     '--spec', specPath, '--output', alignPath,
