@@ -25,6 +25,15 @@ ASR_REVISION = '0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf'
 WORD_ALIGNMENT_METHOD = 'french-v11-word-anchors'
 SIGNATURE_RETRY_ALIGNMENT_METHOD = 'french-v11-word-anchors-signature-retry'
 SIGNATURE_PREROLL_SECONDS = .10
+PHONE_WINDOW_EVIDENCE = 'french-v11-pinned-phone-window'
+PHONE_WORDS = ['plus', *(word for group in NUMBER_WORDS.values() for word in group.split())]
+PHONE_BOUNDARY_TOLERANCE_SECONDS = .10
+
+
+class PhoneEvidenceError(ValueError):
+    def __init__(self, gap):
+        super().__init__('Exact contact pronunciation not recognized: phone')
+        self.gap = gap
 
 
 class SignatureEvidenceError(ValueError):
@@ -97,6 +106,25 @@ def audible_windows(pcm, sample_rate):
             yield (index / sample_rate, min(index + window, len(samples)) / sample_rate)
 
 
+def empty_phone_gap(segments, groups, index, offset, mapping, source_indices, words):
+    if (index == 0 or index + 1 == len(segments) or groups[index] != PHONE_WORDS
+        or segments[index - 1]['id'] != 'contact' or segments[index + 1]['id'] != 'socials'
+        or len(groups[index - 1]) < 3 or len(groups[index + 1]) < 2):
+        return None
+    right_offset = offset + len(PHONE_WORDS)
+    left = [mapping.get(i) for i in range(offset - 3, offset)]
+    right = [mapping.get(i) for i in range(right_offset, right_offset + 2)]
+    if any(value is None for value in left + right) or left + right != list(range(left[0], left[0] + 5)):
+        return None
+    before, after = source_indices[left[-1]], source_indices[right[0]]
+    if before + 1 != after:
+        return None
+    start, end = words[before]['end'], words[after]['start']
+    if not 0 < end - start <= 8:
+        return None
+    return after, start, end, groups[index - 1][-3:], groups[index + 1][:2]
+
+
 def align(segments, words, duration, audible=None):
     if not math.isfinite(duration) or not 58.5 <= duration <= 119:
         raise ValueError('V11 narration must fit the 60–120 second master')
@@ -105,6 +133,7 @@ def align(segments, words, duration, audible=None):
 
     actual = []
     stamps = []
+    source_indices = []
     previous = 0
     for index, word in enumerate(words):
         start, end = word['start'], word['end']
@@ -117,6 +146,7 @@ def align(segments, words, duration, audible=None):
         for token in recognized:
             actual.append(token)
             stamps.append((start, end))
+            source_indices.append(index)
     sound = stamps if audible is None else audible
     if not stamps or not sound or sound[0][0] > 2.5 or duration - sound[-1][1] > 2.5:
         raise ValueError('V11 narration starts or ends with excessive silence')
@@ -137,7 +167,7 @@ def align(segments, words, duration, audible=None):
     phone_groups = []
     preceding_social_end = None
     offset = 0
-    for segment, group in zip(segments, groups):
+    for index, (segment, group) in enumerate(zip(segments, groups)):
         matched = [mapping[i] for i in range(offset, offset + len(group)) if i in mapping]
         identifier = segment['id']
         coverage = len(matched) / len(group)
@@ -147,6 +177,8 @@ def align(segments, words, duration, audible=None):
             end = matched[-1] + 1 if matched else 0
             first = next((i for i in range(start, end) if actual[i:i + len(required)] == required), None)
             if first is None:
+                if identifier == 'phone':
+                    raise PhoneEvidenceError(empty_phone_gap(segments, groups, index, offset, mapping, source_indices, words))
                 raise ValueError(f'Exact contact pronunciation not recognized: {identifier}')
             if identifier == 'phone':
                 cursor = first + 1  # skip the separately spoken international prefix “plus”
@@ -232,23 +264,89 @@ def align_with_signature_retry(segments, words, duration, sound, recognize_tail)
         return alignment
 
 
+def timed_phone_window(words, start, end, contact, socials):
+    tokens_with_indices = []
+    previous_start = previous_end = start - .10
+    for index, word in enumerate(words):
+        if not isinstance(word, dict) or not isinstance(word.get('word'), str):
+            return None
+        first, last = word.get('start'), word.get('end')
+        if (type(first) not in (float, int) or type(last) not in (float, int)
+            or not math.isfinite(first) or not math.isfinite(last)
+            or not previous_start <= first < last <= end + .10 or last < previous_end):
+            return None
+        tokens_with_indices.extend((token, index) for token in tokens(word['word']))
+        previous_start, previous_end = first, last
+    observed = [token for token, _ in tokens_with_indices]
+    matches = [i for i in range(len(observed)) if observed[i:i + len(PHONE_WORDS)] == PHONE_WORDS]
+    if len(matches) != 1:
+        return None
+    first = matches[0]
+    end_match = first + len(PHONE_WORDS)
+    # The decoder can hear the ends of the surrounding sentences in the
+    # padding. Preserve the full-pass words, and reject every other intrusion.
+    before, after = observed[:first], observed[end_match:]
+    if (before and (len(before) > len(contact) or before != contact[-len(before):])
+        or after != socials[:len(after)]):
+        return None
+    first_word = tokens_with_indices[first][1]
+    last_word = tokens_with_indices[end_match - 1][1]
+    if (first and tokens_with_indices[first - 1][1] == first_word
+        or end_match < len(observed) and tokens_with_indices[end_match][1] == last_word):
+        return None
+    return words[first_word:last_word + 1]
+
+
+def voiced_overlap(sound, start, end):
+    return sum(max(0, min(end, right) - max(start, left)) for left, right in sound)
+
+
+def align_with_phone_retry(segments, words, duration, sound, recognize_tail, recognize_phone):
+    try:
+        return align_with_signature_retry(segments, words, duration, sound, recognize_tail)
+    except PhoneEvidenceError as error:
+        if error.gap is None:
+            raise
+        index, start, end, contact, socials = error.gap
+        if not sound or voiced_overlap(sound, start, end) < .9:
+            raise
+        # End at the proven next sentence, so the decoder does not have to
+        # interpret a cut-off word from that sentence as part of the number.
+        clip_start, clip_end = max(0, start - .44), end
+        focused = timed_phone_window(recognize_phone(clip_start, clip_end), clip_start, clip_end, contact, socials)
+        tolerance = PHONE_BOUNDARY_TOLERANCE_SECONDS
+        if (not focused or focused[0]['start'] < start - tolerance
+            or focused[-1]['end'] > end + tolerance
+            or any(voiced_overlap(sound, word['start'], word['end']) <= 0 for word in focused)):
+            raise
+        merged = [*words[:index], *focused, *words[index:]]
+        alignment = align_with_signature_retry(segments, merged, duration, sound, recognize_tail)
+        alignment['phoneEvidenceMethod'] = PHONE_WINDOW_EVIDENCE
+        return alignment
+
+
 def recognize_words(model, wav_path, beam_size, time_offset=0):
     result, _ = model.transcribe(str(wav_path), language='fr', beam_size=beam_size,
                                  word_timestamps=True, condition_on_previous_text=False)
-    return [{'word': word.word, 'start': word.start + time_offset, 'end': word.end + time_offset}
+    return [{'word': word.word, 'start': float(word.start) + time_offset, 'end': float(word.end) + time_offset}
             for segment in result for word in segment.words]
 
 
-def recognize_signature_tail(model, wav_path, boundary):
-    with TemporaryDirectory(prefix='tip-v11-signature-') as directory:
-        tail_path = str(Path(directory) / 'signature.wav')
-        with wave.open(wav_path, 'rb') as source, wave.open(tail_path, 'wb') as target:
+def recognize_audio_window(model, wav_path, start, end=None):
+    with TemporaryDirectory(prefix='tip-v11-window-') as directory:
+        clip = str(Path(directory) / 'excerpt.wav')
+        with wave.open(wav_path, 'rb') as source, wave.open(clip, 'wb') as target:
             rate = source.getframerate()
-            first_frame = max(0, math.floor((boundary - SIGNATURE_PREROLL_SECONDS) * rate))
+            first_frame = max(0, math.floor(start * rate))
+            final_frame = source.getnframes() if end is None else min(source.getnframes(), math.ceil(end * rate))
             source.setpos(first_frame)
             target.setparams(source.getparams())
-            target.writeframes(source.readframes(source.getnframes() - first_frame))
-        return recognize_words(model, tail_path, beam_size=5, time_offset=first_frame / rate)
+            target.writeframes(source.readframes(final_frame - first_frame))
+        return recognize_words(model, clip, beam_size=5, time_offset=first_frame / rate)
+
+
+def recognize_signature_tail(model, wav_path, boundary):
+    return recognize_audio_window(model, wav_path, boundary - SIGNATURE_PREROLL_SECONDS)
 
 
 def main():
@@ -278,12 +376,17 @@ def main():
                              local_files_only=True, cpu_threads=4)
         words = recognize_words(model, args.wav, beam_size=1)
         try:
-            alignment = align_with_signature_retry(spec['segments'], words, duration, sound,
-                                                   lambda boundary: recognize_signature_tail(model, args.wav, boundary))
+            alignment = align_with_phone_retry(
+                spec['segments'], words, duration, sound,
+                lambda boundary: recognize_signature_tail(model, args.wav, boundary),
+                lambda start, end: recognize_audio_window(model, args.wav, start, end),
+            )
         except ValueError as error:
             report_alignment_failure(error, args.failure_code_file)
             raise
         alignment['provenance'] = ASR_REVISION
+        if alignment.get('phoneEvidenceMethod') == PHONE_WINDOW_EVIDENCE:
+            print('V11 phone number recovered by localized speech alignment')
         if alignment['method'] == SIGNATURE_RETRY_ALIGNMENT_METHOD:
             print('V11 signature recovered by localized speech alignment; manual review still required')
     with open(args.output, 'w', encoding='utf8') as target:

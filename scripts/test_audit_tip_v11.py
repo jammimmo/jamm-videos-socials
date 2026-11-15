@@ -4,7 +4,7 @@ import json
 import random
 import unittest
 
-from align_tip_v11 import ASR_REVISION, align_with_signature_retry, tokens
+from align_tip_v11 import ASR_REVISION, PHONE_WINDOW_EVIDENCE, align, align_with_signature_retry, tokens
 from audit_tip_v11 import (
     CAPTION_SCENES, SAMPLE_RATE, bind_manifest, measure_audio, normalized_ocr_text, sha256, verify_alignment,
 )
@@ -88,6 +88,16 @@ class V11FinalEvidenceTest(unittest.TestCase):
         self.assertEqual(verify_alignment(json.dumps(alignment)), alignment)
 
         for changes in ({'method': 'unknown'}, {'provenance': 'local-word-timings'}, {'reviewRequired': False}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, 'alignment identity'):
+                verify_alignment(json.dumps(alignment | changes))
+
+    def test_focused_phone_marker_requires_the_pinned_decoder_and_same_review_contract(self):
+        alignment = align(SEGMENTS, speech(SEGMENTS), 70) | {
+            'provenance': ASR_REVISION, 'phoneEvidenceMethod': PHONE_WINDOW_EVIDENCE,
+        }
+        self.assertEqual(verify_alignment(json.dumps(alignment)), alignment)
+        for changes in ({'phoneEvidenceMethod': 'unknown'}, {'phoneEvidenceMethod': None},
+                        {'provenance': 'local-word-timings'}, {'reviewRequired': False}):
             with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, 'alignment identity'):
                 verify_alignment(json.dumps(alignment | changes))
 
