@@ -109,12 +109,11 @@ export async function renderTipV11(spec, {
   const normalizedPath = resolve(root, 'public', normalized);
   if (raw === normalizedPath) throw new Error('Narration input must differ from processed output');
   const failureCodePath = process.env.TIP_V11_ALIGNMENT_FAILURE_CODE_FILE;
+  const exactTourV8 = narration.source === 'provider' || narration.source === 'cache';
   try {
-    await normalizeTipV11Narration(root, raw, normalizedPath, {
-      exactTourV8: narration.source === 'provider' || narration.source === 'cache',
-    });
+    await normalizeTipV11Narration(root, raw, normalizedPath, { exactTourV8 });
   } catch (error) {
-    if (error instanceof TipNarrationDurationError && failureCodePath) {
+    if (exactTourV8 && error instanceof TipNarrationDurationError && failureCodePath) {
       await writeFile(failureCodePath, 'narration_duration_out_of_range\n', { mode: 0o600, flag: 'wx' });
     }
     throw error;

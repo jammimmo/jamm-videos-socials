@@ -51,6 +51,14 @@ test('a cached automatic Ngor take reports the measured duration failure before 
   await assert.rejects(renderTipV11(spec, { root }), /normalized narration outside 58\.5–119 s.*tempo 1\.03×/);
   assert.equal(readFileSync(failurePath, 'utf8'), 'narration_duration_out_of_range\n');
   assert.ok(!existsSync(join(root, 'out', 'batch', `${plan.id}.mp4`)));
+
+  const imported = join(root, 'imported.wav');
+  const importFailurePath = join(root, 'import-error');
+  process.env[envName] = importFailurePath;
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=350:sample_rate=24000:duration=1',
+    '-c:a', 'pcm_s16le', imported]);
+  await assert.rejects(renderTipV11(spec, { root, localNarration: imported }), /raw narration cannot fit/);
+  assert.ok(!existsSync(importFailurePath));
 });
 
 function payload() {
