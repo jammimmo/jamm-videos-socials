@@ -18,10 +18,11 @@ const V11_STATIC_FILES = [
   ...[600, 700, 800].map(weight => `public/tip-v11/fonts/Poppins-normal-${weight}-latin.woff2`),
   'scripts/align_tip_v11.py', 'scripts/generate-gemini-voiceover.mjs', 'scripts/materialize-dispatched-tip.mjs',
   'scripts/render-batch.mjs', 'scripts/render-tip-v11.mjs', 'scripts/tip-v11-contract.mjs',
-  'scripts/tip-v11-effects.mjs', 'scripts/tip-v11-render-manifest.mjs', 'scripts/voice-profile.mjs',
+  'scripts/tip-v11-caption-geometry.mjs', 'scripts/tip-v11-effects.mjs', 'scripts/tip-v11-render-manifest.mjs', 'scripts/voice-profile.mjs',
   'src/index.ts', 'src/Root.tsx',
   'src/compositions/TipV11Fr.tsx', 'src/compositions/TipV11Outro.tsx', 'src/compositions/TipV11Project.tsx',
   'src/compositions/TipV11Water.tsx', 'src/compositions/TipV11WaterQuestions.tsx',
+  'src/compositions/tip-v11-caption-geometry.ts',
 ].sort();
 
 export const digestTipValue = value => createHash('sha256').update(value).digest('hex');
@@ -46,7 +47,7 @@ export async function collectTipV11StaticFiles(root) {
 }
 
 export async function buildTipV11RenderManifest({
-  plan, sourceScriptSha256, voiceSource, inventory, raw, normalized, mix, alignment, props, mp4,
+  plan, sourceScriptSha256, voiceSource, inventory, raw, normalized, mix, alignment, props, mp4, captionGeometry,
 }) {
   if (!['provider', 'cache', 'fixture'].includes(voiceSource)
     || typeof plan.assistantEnabled !== 'boolean' || !['general', 'water'].includes(plan.visualTopic)
@@ -84,6 +85,7 @@ export async function buildTipV11RenderManifest({
     alignment_sha256: alignmentSha,
     props_sha256: propsSha,
     media_sha256: mediaSha,
+    ...(captionGeometry && { caption_geometry: captionGeometry }),
   };
 }
 

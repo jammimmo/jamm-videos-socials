@@ -1,10 +1,13 @@
 import { execFileSync, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { buildTipV11Narration, TIP_V11_TEMPLATE } from './tip-v11-contract.mjs';
 import { voiceCacheHash } from './voice-profile.mjs';
 import { tipV11Effects } from './tip-v11-effects.mjs';
 import { buildTipV11RenderManifest, collectTipV11StaticFiles } from './tip-v11-render-manifest.mjs';
+import { geometryArtifactDirectory } from '../src/compositions/tip-v11-caption-geometry.ts';
+import { summarizeCaptionGeometry } from './tip-v11-caption-geometry.mjs';
 
 const MIN_NARRATION_SECONDS = 58.5;
 const MAX_NARRATION_SECONDS = 119;
@@ -106,7 +109,10 @@ export async function renderTipV11(spec, {
   await writeFile(effectsPath, tipV11Effects(alignment.segments, alignment.durationInFrames));
   await run('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-i', normalizedPath, '-i', effectsPath,
     '-filter_complex', 'amix=inputs=2:duration=longest:normalize=0', '-c:a', 'pcm_s16le', resolve(root, 'public', mixed)], root);
+  const captionGeometryRunId = randomUUID();
+  const geometryDirectory = resolve(root, 'out/TipV11Fr', geometryArtifactDirectory(captionGeometryRunId));
   const props = {
+    captionGeometryRunId,
     title: plan.title,
     segments: alignment.segments,
     captions: alignment.captions,
@@ -117,10 +123,18 @@ export async function renderTipV11(spec, {
     phoneGroups: alignment.phoneGroups,
   };
   await writeFile(propsPath, JSON.stringify(props), { mode: 0o600 });
-  await run(resolve(root, 'node_modules/.bin/remotion'), [
-    'render', 'src/index.ts', 'TipV11Fr', outFile, `--props=${propsPath}`,
-    '--codec=h264', '--audio-codec=aac', '--image-format=jpeg', '--concurrency=3', '--log=error',
-  ], root);
+  let captionGeometry;
+  try {
+    await run(resolve(root, 'node_modules/.bin/remotion'), [
+      'render', 'src/index.ts', 'TipV11Fr', outFile, `--props=${propsPath}`,
+      '--codec=h264', '--audio-codec=aac', '--image-format=jpeg', '--concurrency=3', '--log=error',
+    ], root);
+    captionGeometry = await summarizeCaptionGeometry(props, geometryDirectory);
+  } finally {
+    await rm(geometryDirectory, { recursive: true, force: true }).catch(() => {
+      console.warn('V11 caption geometry scratch cleanup unavailable');
+    });
+  }
   const probe = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-show_entries',
     'format=duration,size:stream=codec_type,codec_name,width,height,r_frame_rate', '-of', 'json', outFile],
   { encoding: 'utf8', timeout: 20_000 }));
@@ -137,7 +151,7 @@ export async function renderTipV11(spec, {
       throw new Error('V11 static inputs changed during the render');
     }
     const manifest = await buildTipV11RenderManifest({
-      plan, sourceScriptSha256: spec.sourceScriptSha256, voiceSource: narration.source, inventory, raw,
+      plan, sourceScriptSha256: spec.sourceScriptSha256, voiceSource: narration.source, inventory, raw, captionGeometry,
       normalized: normalizedPath, mix: resolve(root, 'public', mixed), alignment: alignPath, props: propsPath, mp4: outFile,
     });
     await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`, { flag: 'wx', mode: 0o600 });

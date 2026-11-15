@@ -1,14 +1,17 @@
 import React, {useEffect, useLayoutEffect, useRef, useState} from 'react';
-import {AbsoluteFill, Audio, Img, staticFile, useCurrentFrame, useDelayRender, useVideoConfig} from 'remotion';
+import {AbsoluteFill, Artifact, Audio, Img, staticFile, useCurrentFrame, useDelayRender, useVideoConfig} from 'remotion';
 import {TipV11Outro} from './TipV11Outro';
 import {ServicesScene, ToolsScene} from './TipV11Project';
 import {WaterIllustration} from './TipV11Water';
+import {CAPTION_GEOMETRY_MASK, captionSampleFrames, geometryArtifactDirectory, mergeBounds, pixelBounds,
+  type CaptionCue, type Bounds} from './tip-v11-caption-geometry';
 
 export type TipV11Segment = {id: string; start: number; end: number; text: string};
 export type TipV11FrProps = {
   title: string;
   segments: TipV11Segment[];
-  captions: Array<{start: number; end: number; text: string}>;
+  captions: CaptionCue[];
+  captionGeometryRunId?: string;
   audio: string;
   durationInFrames: number;
   assistantEnabled: boolean;
@@ -132,8 +135,17 @@ export function fitTipV11Caption(measure: (size: number) => number): boolean {
   return false;
 }
 
-function TipCaption({text, fontsReady}: {text: string; fontsReady: boolean}) {
+function TipCaption({text, fontsReady, sample, viewport}: {
+  text: string; fontsReady: boolean; sample?: {frame: number; cue: number; run: string};
+  viewport: React.RefObject<HTMLDivElement>;
+}) {
   const ref = useRef<HTMLDivElement>(null);
+  const [measurement, setMeasurement] = useState<{
+    frame: number; cue: number; run: string; mask: string; card: Bounds; text: Bounds;
+  }>();
+  const sampleFrame = sample?.frame;
+  const sampleCue = sample?.cue;
+  const sampleRun = sample?.run;
   const {cancelRender} = useDelayRender();
   useLayoutEffect(() => {
     if (!fontsReady || !ref.current) return;
@@ -144,8 +156,21 @@ function TipCaption({text, fontsReady}: {text: string; fontsReady: boolean}) {
       element.style.fontSize = `${size}px`;
       return element.offsetHeight;
     });
-    if (!fits) cancelRender(new Error('Le sous-titre V11 ne tient pas dans la zone lisible.'));
-  }, [cancelRender, fontsReady, text]);
+    if (!fits) {
+      cancelRender(new Error('Le sous-titre V11 ne tient pas dans la zone lisible.'));
+      return;
+    }
+    const canvas = viewport.current?.getBoundingClientRect();
+    if (!canvas || sampleFrame === undefined || sampleCue === undefined || !sampleRun) return;
+    const card = pixelBounds(element.getBoundingClientRect(), canvas);
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const lines = Array.from(range.getClientRects()).filter(line => line.width > 0 && line.height > 0)
+      .map(line => pixelBounds(line, canvas));
+    if (!card || !lines.length || lines.some(line => !line)) return;
+    setMeasurement({frame: sampleFrame, cue: sampleCue, run: sampleRun, mask: CAPTION_GEOMETRY_MASK,
+      card, text: (lines as Bounds[]).reduce(mergeBounds)});
+  }, [cancelRender, fontsReady, text, sampleFrame, sampleCue, sampleRun, viewport]);
   return (
     <div style={{position: 'absolute', left: 64, right: 120, top: captionTop, display: 'flex', justifyContent: 'flex-start'}}>
       <div ref={ref} data-fit-region="caption" style={{
@@ -153,15 +178,19 @@ function TipCaption({text, fontsReady}: {text: string; fontsReady: boolean}) {
         padding: '13px 20px', borderRadius: 15, borderLeft: `5px solid ${orange}`, maxWidth: '100%',
         overflowWrap: 'anywhere',
       }}>{text.replace(/ ([!?:;])/gu, '\u00a0$1')}</div>
+      {sample && measurement?.frame === sample.frame && measurement.cue === sample.cue && measurement.run === sample.run
+        && <Artifact filename={`${geometryArtifactDirectory(sample.run)}/frame-${sample.frame}.json`}
+          content={JSON.stringify(measurement)} />}
     </div>
   );
 }
 
 export const TipV11Fr: React.FC<TipV11FrProps> = ({
-  title, segments, captions, audio, assistantEnabled, phoneGroups, visualTopic,
+  title, segments, captions, audio, assistantEnabled, phoneGroups, visualTopic, captionGeometryRunId,
 }) => {
   const frame = useCurrentFrame();
   const {fps, durationInFrames} = useVideoConfig();
+  const viewport = useRef<HTMLDivElement>(null);
   const {delayRender, continueRender, cancelRender} = useDelayRender();
   const [fontHandle] = useState(() => delayRender('Load the V11 Poppins fonts'));
   const [fontsReady, setFontsReady] = useState(false);
@@ -185,7 +214,10 @@ export const TipV11Fr: React.FC<TipV11FrProps> = ({
   const active = segments.reduce<TipV11Segment | undefined>(
     (previous, segment) => segment.start <= time ? segment : previous, segments[0],
   );
-  const caption = captions.find(cue => time >= cue.start && time < cue.end);
+  const captionIndex = captions.findIndex(cue => time >= cue.start && time < cue.end);
+  const caption = captions[captionIndex];
+  const geometrySample = captionGeometryRunId && caption && captionSampleFrames(caption, durationInFrames).includes(frame)
+    ? {frame, cue: captionIndex, run: captionGeometryRunId} : undefined;
   const outro = segments.find(segment => segment.id === (assistantEnabled ? 'assistant' : 'domain'))
     ?? segments.find(segment => segment.id === 'domain');
   const signature = segments.find(segment => segment.id === 'signature');
@@ -212,7 +244,7 @@ export const TipV11Fr: React.FC<TipV11FrProps> = ({
   }
 
   return (
-    <AbsoluteFill style={{fontFamily: 'Poppins, sans-serif', color: cream, background: '#062B73', overflow: 'hidden'}}>
+    <AbsoluteFill ref={viewport} style={{fontFamily: 'Poppins, sans-serif', color: cream, background: '#062B73', overflow: 'hidden'}}>
       <style>{fontCss() + '*{box-sizing:border-box}'}</style>
       <AbsoluteFill style={{background: 'radial-gradient(ellipse at 65% 35%,#0B46B6 0%,#062B73 58%,#041D4C 100%)'}} />
       {/* Keep content clear of the top tabs, right controls and bottom metadata in short-video feeds. */}
@@ -220,7 +252,7 @@ export const TipV11Fr: React.FC<TipV11FrProps> = ({
         transformOrigin: 'top left'}}>
         <Header signature={showSignature} />
         {scene}
-        {caption && <TipCaption text={caption.text} fontsReady={fontsReady} />}
+        {caption && <TipCaption text={caption.text} fontsReady={fontsReady} sample={geometrySample} viewport={viewport} />}
       </AbsoluteFill>
       <ProgressFrame value={progress(frame / Math.max(1, durationInFrames - 1))} />
       {audio && <Audio src={staticFile(audio)} />}

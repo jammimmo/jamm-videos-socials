@@ -98,13 +98,19 @@ test('records the actual render inputs and only hashes of the script, audio, pro
       assistantEnabled: true, visualTopic: 'water', segments: [{ id: 'assistant' }],
     };
     const sourceScriptSha256 = digestTipValue('Texte source exact.');
-    const captured = await buildTipV11RenderManifest({ plan, sourceScriptSha256, voiceSource: 'provider', inventory, ...files });
+    const captionGeometry = { contract: 'tip-v11-caption-geometry-v1', status: 'inconclusive', duration_frames: 2100, cues: [] };
+    const captured = await buildTipV11RenderManifest({
+      plan, sourceScriptSha256, voiceSource: 'provider', inventory, captionGeometry, ...files,
+    });
     assert.ok(manifestHasProductionInputs(captured));
     assert.equal(captured.source_script_sha256, sourceScriptSha256);
     assert.equal(captured.narration_text_sha256, digestTipValue(plan.script));
     assert.equal(captured.assistant_enabled, true);
     assert.equal(captured.visual_topic, 'water');
     assert.equal(captured.raw_wav_sha256, digestTipValue('private fixture raw'));
+    assert.deepEqual(captured.caption_geometry, captionGeometry);
+    const renderedReport = { ...report, ...manifestFields({ ...manifest, caption_geometry: captionGeometry }) };
+    assert.equal(renderEvidence(bytes(renderedReport), mediaSha, workflow).report_sha256, digestTipValue(bytes(renderedReport)));
     assert.equal(captured.mix_wav_sha256, digestTipValue('private fixture mix'));
     assert.equal(captured.media_sha256, digestTipValue('private fixture mp4'));
     assert.ok(!JSON.stringify(captured).includes(plan.script));
