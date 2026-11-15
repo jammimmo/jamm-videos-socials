@@ -16,6 +16,7 @@ from tempfile import TemporaryDirectory
 import unicodedata
 import wave
 
+from align_tip_v11 import ASR_REVISION, SIGNATURE_RETRY_ALIGNMENT_METHOD, WORD_ALIGNMENT_METHOD
 from audit_tip_v11_brand_cta import measure_final_brand_cta
 from audit_tip_v11_speech import measure_final_french_speech
 
@@ -163,7 +164,14 @@ def measure_audio(segments, narration, mix, final):
 
 def verify_alignment(data):
     alignment = json.loads(data)
-    if not isinstance(alignment, dict) or alignment.get('method') != 'french-v11-word-anchors':
+    if not isinstance(alignment, dict):
+        raise ValueError('Invalid V11 alignment identity')
+    method = alignment.get('method')
+    if method not in (WORD_ALIGNMENT_METHOD, SIGNATURE_RETRY_ALIGNMENT_METHOD):
+        raise ValueError('Invalid V11 alignment identity')
+    if method == SIGNATURE_RETRY_ALIGNMENT_METHOD and (
+        alignment.get('provenance') != ASR_REVISION or alignment.get('reviewRequired') is not True
+    ):
         raise ValueError('Invalid V11 alignment identity')
     duration = alignment.get('durationInFrames')
     if type(duration) is not int or not 1800 < duration <= 3600:

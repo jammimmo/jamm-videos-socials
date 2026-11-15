@@ -22,6 +22,8 @@ NUMBER_WORDS = {
 }
 ASR_REPO = 'mobiuslabsgmbh/faster-whisper-large-v3-turbo'
 ASR_REVISION = '0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf'
+WORD_ALIGNMENT_METHOD = 'french-v11-word-anchors'
+SIGNATURE_RETRY_ALIGNMENT_METHOD = 'french-v11-word-anchors-signature-retry'
 SIGNATURE_PREROLL_SECONDS = .10
 
 
@@ -190,7 +192,7 @@ def align(segments, words, duration, audible=None):
             captions.append({'text': chunk, 'start': left, 'end': right})
 
     return {'segments': timed_segments, 'captions': captions, 'durationInFrames': duration_in_frames,
-            'method': 'french-v11-word-anchors', 'reviewRequired': True,
+            'method': WORD_ALIGNMENT_METHOD, 'reviewRequired': True,
             'phoneGroups': phone_groups,
             'listenFor': ['greeting and signature in Wolof', 'voice and accent']}
 
@@ -222,7 +224,7 @@ def align_with_signature_retry(segments, words, duration, sound, recognize_tail)
         except SignatureEvidenceError as retry_error:
             retry_error.reason = 'signature_retry_insufficient'
             raise
-        alignment['method'] = 'french-v11-word-anchors-signature-retry'
+        alignment['method'] = SIGNATURE_RETRY_ALIGNMENT_METHOD
         return alignment
 
 
@@ -278,7 +280,7 @@ def main():
             report_alignment_failure(error, args.failure_code_file)
             raise
         alignment['provenance'] = ASR_REVISION
-        if alignment['method'] == 'french-v11-word-anchors-signature-retry':
+        if alignment['method'] == SIGNATURE_RETRY_ALIGNMENT_METHOD:
             print('V11 signature recovered by localized speech alignment; manual review still required')
     with open(args.output, 'w', encoding='utf8') as target:
         json.dump(alignment, target, ensure_ascii=False)

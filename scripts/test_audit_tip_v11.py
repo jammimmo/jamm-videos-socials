@@ -4,7 +4,11 @@ import json
 import random
 import unittest
 
-from audit_tip_v11 import CAPTION_SCENES, SAMPLE_RATE, bind_manifest, measure_audio, normalized_ocr_text, sha256
+from align_tip_v11 import ASR_REVISION, align_with_signature_retry, tokens
+from audit_tip_v11 import (
+    CAPTION_SCENES, SAMPLE_RATE, bind_manifest, measure_audio, normalized_ocr_text, sha256, verify_alignment,
+)
+from test_align_tip_v11 import SEGMENTS, speech
 
 
 class V11FinalEvidenceTest(unittest.TestCase):
@@ -45,6 +49,33 @@ class V11FinalEvidenceTest(unittest.TestCase):
         self.assertEqual(caption, normalized_ocr_text('caption_step1', "L'eau a verifier au lavabo"))
         self.assertNotEqual(caption, normalized_ocr_text('caption_step1', 'Eau à vérifier au lavabo'))
         self.assertNotEqual(caption, normalized_ocr_text('caption_step1', 'L’eau à fermer au lavabo.'))
+
+    def test_audits_the_timeline_from_a_successful_signature_retry(self):
+        words = speech(SEGMENTS)
+        tail_length = len(tokens(SEGMENTS[-1]['text']))
+        body, ending = words[:-tail_length], words[-tail_length:]
+        unclear_ending = [{**word, 'word': 'inaudible'} for word in ending]
+        sound = [(word['start'], word['end']) for word in words]
+        boundaries = []
+
+        def recognize_tail(boundary):
+            boundaries.append(boundary)
+            return ending
+
+        alignment = align_with_signature_retry(SEGMENTS, body + unclear_ending, 70, sound, recognize_tail)
+        alignment['provenance'] = ASR_REVISION
+        self.assertEqual(boundaries, [body[-1]['end']])
+        self.assertEqual(alignment['method'], 'french-v11-word-anchors-signature-retry')
+        self.assertTrue(alignment['reviewRequired'])
+        self.assertEqual(verify_alignment(json.dumps(alignment)), alignment)
+
+        for changes in ({'method': 'unknown'}, {'provenance': 'local-word-timings'}, {'reviewRequired': False}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, 'alignment identity'):
+                verify_alignment(json.dumps(alignment | changes))
+
+        altered_segments = [*alignment['segments'][:-1], {**alignment['segments'][-1], 'start': 0}]
+        with self.assertRaisesRegex(ValueError, 'alignment row'):
+            verify_alignment(json.dumps(alignment | {'segments': altered_segments}))
 
     def test_binds_exact_render_files_and_actual_assistant_scene(self):
         segments = [{'id': item, 'text': f'Texte {item}.'} for item in (*CAPTION_SCENES, 'assistant')]
