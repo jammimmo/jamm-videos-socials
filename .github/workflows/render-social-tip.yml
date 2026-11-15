@@ -134,6 +134,9 @@ jobs:
             if [ -f "${code_file}" ]; then
               IFS= read -r code < "${code_file}" || code=""
               case "${code}" in
+                narration_duration_out_of_range)
+                  reason="V11 narration duration out of range"
+                  ;;
                 signature_evidence_insufficient|signature_boundary_unconfirmed|signature_tail_too_quiet|signature_closing_unrecognized|signature_retry_insufficient|phone_evidence_unconfirmed|website_evidence_unconfirmed|script_evidence_unconfirmed|alignment_evidence_invalid)
                   reason="V11 speech alignment failed (${code})"
                   ;;

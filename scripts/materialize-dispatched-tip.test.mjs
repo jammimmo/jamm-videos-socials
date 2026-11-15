@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { materializeDispatchedTip as materialize } from './materialize-dispatched-tip.mjs';
-import { tipV11NarrationTempo } from './render-tip-v11.mjs';
+import { renderTipV11, tipV11NarrationTempo } from './render-tip-v11.mjs';
 import { tipV11Effects } from './tip-v11-effects.mjs';
 import { readStagedPrivateReviewedNarration, stagePrivateReviewedNarration, stageReviewedNarration, REVIEWED_NARRATION_DISPATCH } from './tip-v11-reviewed-narration.mjs';
 import { buildTipV11Narration, TIP_V11_SLOGAN } from './tip-v11-contract.mjs';
@@ -25,9 +25,32 @@ test('V11 preserves borderline one-minute narration and the normal tempo for the
   assert.equal(tipV11NarrationTempo(71.015), 1.03);
   assert.throws(() => tipV11NarrationTempo(58.49), /cannot fit/);
   assert.throws(() => tipV11NarrationTempo(123), /cannot fit/);
-  assert.throws(() => tipV11NarrationTempo(60, { exactTourV8: true }), /too short for the required 1\.03× tempo/);
+  assert.equal(tipV11NarrationTempo(60, { exactTourV8: true }), 1.03);
   assert.equal(tipV11NarrationTempo(61, { exactTourV8: true }), 1.03);
   assert.equal(tipV11NarrationTempo(71.84, { exactTourV8: true }), 1.03);
+});
+
+test('a cached automatic Ngor take reports the measured duration failure before rendering', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'tip-short-v8-'));
+  const failurePath = join(root, 'render-error');
+  const envName = 'TIP_V11_ALIGNMENT_FAILURE_CODE_FILE';
+  const oldValue = process.env[envName];
+  process.env[envName] = failurePath;
+  t.after(() => {
+    if (oldValue === undefined) delete process.env[envName];
+    else process.env[envName] = oldValue;
+    rmSync(root, { recursive: true, force: true });
+  });
+  const { spec } = materialize(v11Payload());
+  const plan = buildTipV11Narration(spec);
+  const audioDir = join(root, 'public', 'audio', 'voiceovers');
+  mkdirSync(audioDir, { recursive: true });
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=350:sample_rate=24000:duration=60',
+    '-c:a', 'pcm_s16le', join(audioDir, `${plan.id}.wav`)]);
+  writeFileSync(join(audioDir, `${plan.id}.sha256`), voiceCacheHash(plan.script, '', 'tip-v11-fr'));
+  await assert.rejects(renderTipV11(spec, { root }), /normalized narration outside 58\.5–119 s.*tempo 1\.03×/);
+  assert.equal(readFileSync(failurePath, 'utf8'), 'narration_duration_out_of_range\n');
+  assert.ok(!existsSync(join(root, 'out', 'batch', `${plan.id}.mp4`)));
 });
 
 function payload() {

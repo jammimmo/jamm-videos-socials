@@ -15,6 +15,8 @@ const MAX_NARRATION_SECONDS = 119;
 const DEFAULT_TEMPO = 1.03;
 const TEMPO_HEADROOM_SECONDS = 0.25;
 
+class TipNarrationDurationError extends Error {}
+
 function run(command, args, cwd) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, { cwd, stdio: 'inherit' });
@@ -49,14 +51,13 @@ function narrationDuration(path) {
 export function tipV11NarrationTempo(rawSeconds, { exactTourV8 = false } = {}) {
   if (!Number.isFinite(rawSeconds) || rawSeconds < MIN_NARRATION_SECONDS
     || rawSeconds > MAX_NARRATION_SECONDS * DEFAULT_TEMPO) {
-    throw new Error(`V11 raw narration cannot fit without stretching or truncation (${rawSeconds.toFixed(3)} s)`);
+    throw new TipNarrationDurationError(`V11 raw narration cannot fit without stretching or truncation (${rawSeconds.toFixed(3)} s)`);
   }
-  if (rawSeconds / DEFAULT_TEMPO >= MIN_NARRATION_SECONDS + TEMPO_HEADROOM_SECONDS) return DEFAULT_TEMPO;
-  if (exactTourV8) {
-    throw new Error(`V11 Ngor V8 take too short for the required 1.03× tempo (${rawSeconds.toFixed(3)} s)`);
-  }
-  // Imported and local sources may retain their natural timing.
-  return 1;
+  // The normalizer checks the measured duration after applying the Ngor tempo.
+  // Imported and local sources may retain natural timing near the lower bound.
+  return exactTourV8 || rawSeconds / DEFAULT_TEMPO >= MIN_NARRATION_SECONDS + TEMPO_HEADROOM_SECONDS
+    ? DEFAULT_TEMPO
+    : 1;
 }
 
 export async function normalizeTipV11Narration(root, raw, normalizedPath, options) {
@@ -69,7 +70,7 @@ export async function normalizeTipV11Narration(root, raw, normalizedPath, option
   const normalizedSeconds = narrationDuration(normalizedPath);
   if (!Number.isFinite(normalizedSeconds) || normalizedSeconds < MIN_NARRATION_SECONDS
     || normalizedSeconds > MAX_NARRATION_SECONDS) {
-    throw new Error(`V11 normalized narration outside 58.5–119 s (${normalizedSeconds.toFixed(3)} s; raw ${rawSeconds.toFixed(3)} s; tempo ${tempo}×)`);
+    throw new TipNarrationDurationError(`V11 normalized narration outside 58.5–119 s (${normalizedSeconds.toFixed(3)} s; raw ${rawSeconds.toFixed(3)} s; tempo ${tempo}×)`);
   }
   console.log(`V11 narration measured: ${rawSeconds.toFixed(3)} s raw, ${normalizedSeconds.toFixed(3)} s normalized, tempo ${tempo}×`);
   return { rawSeconds, normalizedSeconds, tempo };
@@ -107,15 +108,22 @@ export async function renderTipV11(spec, {
   const raw = narration.path;
   const normalizedPath = resolve(root, 'public', normalized);
   if (raw === normalizedPath) throw new Error('Narration input must differ from processed output');
-  await normalizeTipV11Narration(root, raw, normalizedPath, {
-    exactTourV8: narration.source === 'provider' || narration.source === 'cache',
-  });
+  const failureCodePath = process.env.TIP_V11_ALIGNMENT_FAILURE_CODE_FILE;
+  try {
+    await normalizeTipV11Narration(root, raw, normalizedPath, {
+      exactTourV8: narration.source === 'provider' || narration.source === 'cache',
+    });
+  } catch (error) {
+    if (error instanceof TipNarrationDurationError && failureCodePath) {
+      await writeFile(failureCodePath, 'narration_duration_out_of_range\n', { mode: 0o600, flag: 'wx' });
+    }
+    throw error;
+  }
   await writeFile(specPath, JSON.stringify(plan), { mode: 0o600 });
   await run('python3', ['scripts/align_tip_v11.py', '--wav', normalizedPath,
     '--spec', specPath, '--output', alignPath,
     ...(localWordTimings ? ['--transcript', resolve(localWordTimings)] : []),
-    ...(process.env.TIP_V11_ALIGNMENT_FAILURE_CODE_FILE
-      ? ['--failure-code-file', process.env.TIP_V11_ALIGNMENT_FAILURE_CODE_FILE] : [])], root);
+    ...(failureCodePath ? ['--failure-code-file', failureCodePath] : [])], root);
   const alignment = JSON.parse(await readFile(alignPath, 'utf8'));
   const effectsPath = resolve(audioDir, `${plan.id}-v11-fx.wav`);
   const mixed = `audio/voiceovers/${plan.id}-v11-mix.wav`;
