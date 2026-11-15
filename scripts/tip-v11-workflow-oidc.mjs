@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+const SHA256 = /^[a-f0-9]{64}$/;
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 
 export function tipWorkflowAudience(jobId, attemptToken, evidenceHeader) {
@@ -16,9 +17,24 @@ export function tipWorkflowAudience(jobId, attemptToken, evidenceHeader) {
 export async function requestTipWorkflowOidc(evidenceHeader, env, fetchToken = fetch) {
   const attempt = new URL(env.TIP_UPLOAD_URL).searchParams.get('attempt');
   const audience = tipWorkflowAudience(env.TIP_JOB_ID, attempt, evidenceHeader);
+  return requestGithubOidc(audience, env, fetchToken);
+}
+
+export function tipNarrationAudience(jobId, attemptToken, wavSha256) {
+  if (!UUID.test(jobId) || !UUID.test(attemptToken) || !SHA256.test(wavSha256)) {
+    throw new Error('V11 narration audience is invalid');
+  }
+  return `urn:jammimmo:tip-v11:narration:${sha256(JSON.stringify([jobId, attemptToken, wavSha256]))}`;
+}
+
+export async function requestTipNarrationOidc(jobId, attemptToken, wavSha256, env, fetchToken = fetch) {
+  return requestGithubOidc(tipNarrationAudience(jobId, attemptToken, wavSha256), env, fetchToken);
+}
+
+async function requestGithubOidc(audience, env, fetchToken) {
   const url = new URL(env.ACTIONS_ID_TOKEN_REQUEST_URL);
   const bearer = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
-  if (!bearer || url.protocol !== 'https:' || url.username || url.password || url.port
+  if (!bearer || url.protocol !== 'https:' || url.username || url.password || url.port || url.hash
     || !url.hostname.endsWith('.actions.githubusercontent.com')) {
     throw new Error('V11 GitHub OIDC unavailable');
   }
@@ -28,7 +44,7 @@ export async function requestTipWorkflowOidc(evidenceHeader, env, fetchToken = f
     redirect: 'error',
     signal: AbortSignal.timeout(5_000),
   });
-  if (!response.ok) throw new Error('V11 GitHub OIDC unavailable');
+  if (response.status !== 200) throw new Error('V11 GitHub OIDC unavailable');
   const { value } = await response.json();
   if (typeof value !== 'string' || value.length > 8192 || !/^[\w-]+\.[\w-]+\.[\w-]+$/.test(value)) {
     throw new Error('V11 GitHub OIDC response invalid');

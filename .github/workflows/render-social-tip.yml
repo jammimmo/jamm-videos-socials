@@ -76,12 +76,13 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-fra
           STEM="tip-${TIP_JOB_ID}"
+          RAW_WAV="${TIP_PRIVATE_NARRATION_FILE:-public/audio/voiceovers/${STEM}.wav}"
           python scripts/audit_tip_v11.py \
             --video "out/batch/${STEM}.mp4" \
             --alignment "out/batch/${STEM}.alignment.json" \
             --render-manifest "out/batch/${STEM}.manifest.json" \
             --render-props "out/batch/${STEM}.props.json" \
-            --raw-wav "public/audio/voiceovers/${STEM}.wav" \
+            --raw-wav "${RAW_WAV}" \
             --narration-wav "public/audio/voiceovers/${STEM}-v11.wav" \
             --mix-wav "public/audio/voiceovers/${STEM}-v11-mix.wav" \
             --ocr-language fra --measure-final-french \
@@ -143,6 +144,13 @@ jobs:
               -H "Authorization: Bearer ${TIP_CALLBACK_TOKEN}" \
               -H "X-Job-Id: ${TIP_JOB_ID}" \
               -H "X-Error: ${reason}; GitHub run ${GITHUB_RUN_ID}" || true
+          fi
+
+      - name: Remove the staged private narration
+        if: ${{ always() }}
+        run: |
+          if [ -n "${TIP_PRIVATE_NARRATION_FILE:-}" ]; then
+            rm -f -- "${TIP_PRIVATE_NARRATION_FILE}"
           fi
 
       - name: Keep a legacy render artifact for audit

@@ -8,7 +8,7 @@ import { tipV11Effects } from './tip-v11-effects.mjs';
 import { buildTipV11RenderManifest, collectTipV11StaticFiles } from './tip-v11-render-manifest.mjs';
 import { geometryArtifactDirectory } from '../src/compositions/tip-v11-caption-geometry.ts';
 import { summarizeCaptionGeometry } from './tip-v11-caption-geometry.mjs';
-import { stageReviewedNarration } from './tip-v11-reviewed-narration.mjs';
+import { readStagedPrivateReviewedNarration, stageReviewedNarration } from './tip-v11-reviewed-narration.mjs';
 
 const MIN_NARRATION_SECONDS = 58.5;
 const MAX_NARRATION_SECONDS = 119;
@@ -93,7 +93,9 @@ export async function renderTipV11(spec, {
   await rm(manifestPath, { force: true });
   const inventory = await collectTipV11StaticFiles(root).catch(() => null);
   let narration;
-  if (spec.reviewedNarration) {
+  if (spec.reviewedNarration?.source === 'private-attempt') {
+    narration = await readStagedPrivateReviewedNarration(spec.reviewedNarration, process.env);
+  } else if (spec.reviewedNarration) {
     narration = await stageReviewedNarration(root, resolve(audioDir, `${plan.id}.wav`),
       spec.reviewedNarration, process.env.GITHUB_SHA);
   } else if (localNarration) {

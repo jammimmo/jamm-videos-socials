@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,7 +9,7 @@ import test from 'node:test';
 import { materializeDispatchedTip as materialize } from './materialize-dispatched-tip.mjs';
 import { tipV11NarrationTempo } from './render-tip-v11.mjs';
 import { tipV11Effects } from './tip-v11-effects.mjs';
-import { stageReviewedNarration, REVIEWED_NARRATION_DISPATCH } from './tip-v11-reviewed-narration.mjs';
+import { readStagedPrivateReviewedNarration, stagePrivateReviewedNarration, stageReviewedNarration, REVIEWED_NARRATION_DISPATCH } from './tip-v11-reviewed-narration.mjs';
 import { buildTipV11Narration, TIP_V11_SLOGAN } from './tip-v11-contract.mjs';
 import { voiceCacheHash, voicePrompt } from './voice-profile.mjs';
 const materializeDispatchedTip = value => materialize(value, { legacy: true });
@@ -216,12 +216,178 @@ test('reviewed V11 dispatch requires the exact renderer and cannot downgrade to 
   assert.deepEqual(materialize(input, { rendererSha: pin.rendererSha }).spec.reviewedNarration, pin);
   assert.throws(() => materialize(input, { rendererSha: 'c'.repeat(40) }), /narration contract/);
   assert.throws(() => materialize(input), /narration contract/);
+  input.evidence.reviewedNarration = { ...pin, source: 'private-attempt' };
+  assert.deepEqual(materialize(input, { rendererSha: pin.rendererSha }).spec.reviewedNarration, input.evidence.reviewedNarration);
+  for (const source of [null, 'provider', 'checkout', true]) {
+    input.evidence.reviewedNarration = { ...pin, source };
+    assert.throws(() => materialize(input, { rendererSha: pin.rendererSha }), /narration contract/);
+  }
   input.evidence.reviewedNarration = { ...pin, url: 'https://example.test/forged.wav' };
   assert.throws(() => materialize(input, { rendererSha: pin.rendererSha }), /narration contract/);
   input.contract = 'jamm-tip-render-v2';
   assert.throws(() => materialize(input), /narration contract/);
   delete input.evidence.reviewedNarration;
   assert.equal(materialize(input).spec.reviewedNarration, undefined);
+});
+
+function privateFixture(bytes, scratchRoot) {
+  const payload = v11Payload();
+  payload.contract = REVIEWED_NARRATION_DISPATCH;
+  const rendererSha = 'a'.repeat(40);
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const pin = { contract: 'tip-v11-reviewed-narration-v1', rendererSha, sha256, source: 'private-attempt' };
+  payload.evidence.reviewedNarration = pin;
+  return {
+    delivery: materialize(payload, { rendererSha }), payload, pin,
+    env: { GITHUB_SHA: rendererSha, RUNNER_TEMP: scratchRoot,
+      ACTIONS_ID_TOKEN_REQUEST_URL: 'https://vstoken.actions.githubusercontent.com/oidc?api-version=2.0',
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'fixture-runner-credential' },
+  };
+}
+
+test('materialization hands the private scratch path to the renderer and preserves terminal failure reporting', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'private-reviewed-handoff-'));
+  try {
+    const pcm = tipV11Effects([], 2);
+    const { delivery, payload, pin, env } = privateFixture(pcm, root);
+    const event = join(root, 'event.json');
+    const stub = join(root, 'closed-transport.mjs');
+    const cli = fileURLToPath(new URL('./materialize-dispatched-tip.mjs', import.meta.url));
+    writeFileSync(event, JSON.stringify({ client_payload: payload }));
+    writeFileSync(stub, `
+      globalThis.fetch = async (url, options) => {
+        if (url.origin === 'https://vstoken.actions.githubusercontent.com') return Response.json({ value: 'signed.fixture.token' });
+        if (url.href !== ${JSON.stringify(`${worker}/api/tour/callback?attempt=${attempt}&action=tip-v11-narration`)}
+          || options.headers['X-Tip-Workflow-OIDC'] !== 'signed.fixture.token'
+          || options.headers['X-Tip-Narration-Sha256'] !== ${JSON.stringify(pin.sha256)}) throw new Error('unexpected fixture transport');
+        if (process.env.TEST_PRIVATE_NARRATION_DENIED === '1') return new Response(null, { status: 403 });
+        const wav = Buffer.from(${JSON.stringify(pcm.toString('base64'))}, 'base64');
+        return new Response(wav, { headers: { 'Content-Type': 'audio/wav', 'Content-Length': String(wav.length) } });
+      };
+    `);
+    const invoke = (stem, denied) => {
+      const spec = join(root, `${stem}.json`);
+      const ghEnv = join(root, `${stem}.env`);
+      const execution = spawnSync(process.execPath, ['--import', stub, cli, '--event', event, '--spec', spec, '--env', ghEnv], {
+        encoding: 'utf8', env: { ...process.env, ...env, TEST_PRIVATE_NARRATION_DENIED: denied ? '1' : '0' },
+      });
+      assert.ifError(execution.error);
+      assert.doesNotMatch(execution.stdout + execution.stderr, /signed\.fixture\.token|fixture-runner-credential/);
+      return { execution, spec, assignments: Object.fromEntries(readFileSync(ghEnv, 'utf8').trim().split('\n')
+        .map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)])) };
+    };
+    const ok = invoke('success', false);
+    assert.equal(ok.execution.status, 0, ok.execution.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(ok.spec, 'utf8')).reviewedNarration, pin);
+    assert.deepEqual(await readStagedPrivateReviewedNarration(pin, { ...env, ...ok.assignments }),
+      { path: ok.assignments.TIP_PRIVATE_NARRATION_FILE, source: 'reviewed-bundle' });
+    const refused = invoke('refused', true);
+    assert.equal(refused.execution.status, 1);
+    assert.match(refused.execution.stderr, /private narration response is invalid/);
+    assert.equal(refused.assignments.TIP_UPLOAD_URL, delivery.uploadUrl);
+    assert.equal(refused.assignments.TIP_PRIVATE_NARRATION_FILE, undefined);
+    assert.equal(existsSync(refused.spec), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('private reviewed narration binds both credentials to the pinned attempt and revalidates scratch bytes', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'private-reviewed-narration-'));
+  try {
+    const pcm = tipV11Effects([], 2);
+    const { delivery, pin, env } = privateFixture(pcm, root);
+    const calls = [];
+    const staged = await stagePrivateReviewedNarration(delivery, pin, env, async (url, options) => {
+      calls.push(url.origin);
+      if (url.hostname === 'vstoken.actions.githubusercontent.com') {
+        const digest = createHash('sha256').update(JSON.stringify([id, attempt, pin.sha256])).digest('hex');
+        assert.equal(url.searchParams.get('audience'), `urn:jammimmo:tip-v11:narration:${digest}`);
+        assert.equal(options.headers.Authorization, 'Bearer fixture-runner-credential');
+        assert.equal(options.redirect, 'error');
+        return Response.json({ value: 'signed.fixture.token' });
+      }
+      assert.equal(url.href, `${worker}/api/tour/callback?attempt=${attempt}&action=tip-v11-narration`);
+      assert.equal(options.method, 'GET');
+      assert.equal(options.redirect, 'manual');
+      assert.deepEqual(options.headers, {
+        Accept: 'audio/wav', 'Accept-Encoding': 'identity', Authorization: `Bearer ${delivery.callbackToken}`,
+        'X-Job-Id': id, 'X-Tip-Narration-Sha256': pin.sha256, 'X-Tip-Workflow-OIDC': 'signed.fixture.token',
+      });
+      const stream = new ReadableStream({ start(controller) {
+        controller.enqueue(pcm.subarray(0, 60));
+        controller.enqueue(pcm.subarray(60));
+        controller.close();
+      } });
+      return new Response(stream, { headers: { 'Content-Type': 'audio/wav', 'Content-Length': String(pcm.length) } });
+    });
+    assert.deepEqual(calls, ['https://vstoken.actions.githubusercontent.com', worker]);
+    assert.ok(staged.includes('/jamm-tip-v11-narration-'));
+    assert.equal(statSync(staged).mode & 0o777, 0o600);
+    assert.deepEqual(readFileSync(staged), pcm);
+    assert.deepEqual(await readStagedPrivateReviewedNarration(pin, { ...env, TIP_PRIVATE_NARRATION_FILE: staged }),
+      { path: staged, source: 'reviewed-bundle' });
+    await assert.rejects(stageReviewedNarration(root, join(root, 'fallback.wav'), pin, env.GITHUB_SHA), /identity mismatch/);
+    await assert.rejects(readStagedPrivateReviewedNarration(pin, env), /scratch identity/);
+    const tampered = Buffer.from(pcm);
+    tampered[tampered.length - 1] ^= 1;
+    writeFileSync(staged, tampered);
+    await assert.rejects(readStagedPrivateReviewedNarration(pin, { ...env, TIP_PRIVATE_NARRATION_FILE: staged }), /bytes or PCM/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('private reviewed narration refuses redirect, wrong integrity, oversized and incomplete streams before staging', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'private-reviewed-narration-'));
+  try {
+    const pcm = tipV11Effects([], 2);
+    const corrupt = Buffer.from(pcm);
+    corrupt[corrupt.length - 1] ^= 1;
+    const invalidPcm = Buffer.from(pcm);
+    invalidPcm.writeUInt32LE(48000, 24);
+    const responses = [
+      [pcm, () => Response.redirect('https://off-origin.invalid/wav'), /response is invalid/],
+      [pcm, () => new Response(pcm, { headers: { 'Content-Type': 'audio/wav' } }), /response is invalid/],
+      [pcm, () => new Response(pcm, { headers: { 'Content-Type': 'audio/wav', 'Content-Length': '8388609' } }), /response is invalid/],
+      [pcm, () => new Response(pcm, { headers: { 'Content-Type': 'text/html', 'Content-Length': String(pcm.length) } }), /response is invalid/],
+      [pcm, () => new Response(pcm, { headers: { 'Content-Type': 'audio/wav', 'Content-Length': String(pcm.length), 'Content-Encoding': 'gzip' } }), /response is invalid/],
+      [pcm, () => new Response(pcm.subarray(0, -1), { headers: { 'Content-Type': 'audio/wav', 'Content-Length': String(pcm.length) } }), /size mismatch/],
+      [pcm, () => new Response(pcm, { headers: { 'Content-Type': 'audio/wav', 'Content-Length': String(pcm.length - 1) } }), /size mismatch/],
+      [pcm, () => new Response(corrupt, { headers: { 'Content-Type': 'audio/wav', 'Content-Length': String(pcm.length) } }), /bytes or PCM/],
+      [invalidPcm, () => new Response(invalidPcm, { headers: { 'Content-Type': 'audio/wav', 'Content-Length': String(pcm.length) } }), /bytes or PCM/],
+    ];
+    for (const [pinned, response, expected] of responses) {
+      const { delivery, pin, env } = privateFixture(pinned, root);
+      const calls = [];
+      await assert.rejects(stagePrivateReviewedNarration(delivery, pin, env, async url => {
+        calls.push(url.origin);
+        return calls.length === 1 ? Response.json({ value: 'signed.fixture.token' }) : response();
+      }), expected);
+      assert.deepEqual(calls, ['https://vstoken.actions.githubusercontent.com', worker]);
+      assert.deepEqual(readdirSync(root), []);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('private reviewed narration sends neither credential when the callback or OIDC authority is invalid', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'private-reviewed-narration-'));
+  try {
+    const { delivery, pin, env } = privateFixture(tipV11Effects([], 2), root);
+    let calls = 0;
+    const noFetch = async () => { calls++; throw new Error('an invalid authority reached network transport'); };
+    await assert.rejects(stagePrivateReviewedNarration({ ...delivery, callbackUrl: 'https://off-origin.invalid/api/tour/callback' }, pin, env, noFetch), /delivery identity/);
+    await assert.rejects(stagePrivateReviewedNarration({ ...delivery, callbackUrl: delivery.callbackUrl + '&extra=1' }, pin, env, noFetch), /delivery identity/);
+    await assert.rejects(stagePrivateReviewedNarration(delivery, pin, { ...env,
+      ACTIONS_ID_TOKEN_REQUEST_URL: 'https://vstoken.actions.githubusercontent.com.off-origin.invalid/oidc' }, noFetch),
+    /unavailable/);
+    assert.equal(calls, 0);
+    assert.deepEqual(readdirSync(root), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('reviewed narration consumes the pinned, checkout-local PCM bytes and rejects all substitutes', async () => {

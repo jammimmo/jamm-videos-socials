@@ -1,16 +1,15 @@
 #!/usr/bin/env node
 
-import { appendFile, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { freshTipContract, OUTRO } from './fresh-tip-contract.mjs';
 import { makeTipV11Spec, TIP_V11_BRAND, TIP_V11_SLOGAN } from './tip-v11-contract.mjs';
 import { digestTipValue } from './tip-v11-render-manifest.mjs';
-import { parseReviewedNarration, REVIEWED_NARRATION_DISPATCH } from './tip-v11-reviewed-narration.mjs';
+import { parseReviewedNarration, REVIEWED_NARRATION_DISPATCH, stagePrivateReviewedNarration, TIP_DELIVERY_ORIGIN } from './tip-v11-reviewed-narration.mjs';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HEX64_RE = /^[a-f0-9]{64}$/;
-const WORKER_ORIGIN = 'https://jammimmo-estate-flow.jammimmo221admin.workers.dev';
 
 function object(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -29,7 +28,7 @@ function text(value, label, max) {
 function deliveryUrl(value, pathname, attempt) {
   const raw = text(value, pathname, 512);
   const url = new URL(raw);
-  if (url.origin !== WORKER_ORIGIN || url.pathname !== pathname || url.username || url.password || url.hash
+  if (url.origin !== TIP_DELIVERY_ORIGIN || url.pathname !== pathname || url.username || url.password || url.hash
     || url.searchParams.size !== 1 || url.searchParams.get('attempt') !== attempt) {
     throw new Error(`${pathname} is not the exact production callback URL`);
   }
@@ -176,15 +175,30 @@ async function main() {
   for (const value of [result.callbackToken, result.callbackUrl, result.uploadUrl, result.jobId]) {
     console.log(`::add-mask::${value}`);
   }
-  await writeFile(resolve(args.spec), `${JSON.stringify(result.spec)}\n`, { mode: 0o600 });
-  await appendFile(resolve(args.env), [
+  const envFile = resolve(args.env);
+  const specFile = resolve(args.spec);
+  // The failure callback can use these validated capabilities even if the
+  // trusted narration fetch or materialization fails before rendering.
+  await appendFile(envFile, [
     `TIP_JOB_ID=${result.jobId}`,
     `TIP_CALLBACK_URL=${result.callbackUrl}`,
     `TIP_UPLOAD_URL=${result.uploadUrl}`,
     `TIP_CALLBACK_TOKEN=${result.callbackToken}`,
-    `TIP_SPEC_FILE=${resolve(args.spec)}`,
+    `TIP_SPEC_FILE=${specFile}`,
     '',
   ].join('\n'));
+  const staged = result.spec.reviewedNarration?.source === 'private-attempt'
+    ? await stagePrivateReviewedNarration(result, result.spec.reviewedNarration, process.env) : null;
+  try {
+    await writeFile(specFile, `${JSON.stringify(result.spec)}\n`, { mode: 0o600 });
+    if (staged) {
+      console.log(`::add-mask::${staged}`);
+      await appendFile(envFile, `TIP_PRIVATE_NARRATION_FILE=${staged}\n`);
+    }
+  } catch (error) {
+    if (staged) await rm(staged, { force: true }).catch(() => {});
+    throw error;
+  }
   console.log('Dispatched tip payload validated');
 }
 

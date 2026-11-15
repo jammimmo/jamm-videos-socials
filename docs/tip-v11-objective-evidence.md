@@ -46,6 +46,10 @@ La fixture `scripts/fixtures/tip-v11-brand-cta-smoke.json` produit un clip silen
 
 ### Source vocale revue et épinglée
 
-Le contrat de dispatch `jamm-tip-render-v3-reviewed-narration` exige un commit exact du moteur et le SHA-256 d’un fichier `approved-narrations/v11/sha256/<sha256>.wav`. La source doit se trouver dans le checkout épinglé, avec une voix complète au format WAV PCM mono 24 kHz, 16 bits. Utiliser uniquement un enregistrement dont la diffusion dans le dépôt public est explicitement autorisée. Cette voie exige la variante V11 standard avec l’assistant désactivé.
+Le contrat de dispatch `jamm-tip-render-v3-reviewed-narration` exige un commit exact du moteur et le SHA-256 d’un WAV complet au format PCM mono 24 kHz, 16 bits. Il utilise la variante V11 standard avec l’assistant désactivé.
+
+Avec `reviewedNarration.source=private-attempt`, le moteur demande le WAV à Estate Flow pour cette tentative précise. L’appel exige le jeton de rappel et un jeton GitHub OIDC destiné à la tentative et à l’empreinte du WAV. Le fichier est borné à 8 Mio, vérifié, placé dans un dossier privé du runner et effacé après la tentative. Le WAV brut reste hors du dépôt et du dossier de médias publics.
+
+Sans champ `source`, le contrat continue à lire `approved-narrations/v11/sha256/<sha256>.wav` dans le checkout épinglé. Ce chemin est réservé à un enregistrement dont la diffusion dans le dépôt public est autorisée.
 
 Le moteur vérifie les octets avant tout traitement. Une source absente ou différente arrête cette demande. Le manifeste conserve `voice.source=reviewed-bundle`, la provenance `voice.model=reviewed-source-pcm-v1` et l’égalité entre `reviewed_narration_sha256` et `raw_wav_sha256`. Les mesures du MP4 et la décision de publication restent des étapes distinctes.
