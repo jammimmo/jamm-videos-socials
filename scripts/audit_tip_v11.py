@@ -24,6 +24,11 @@ MAX_PCM_SECONDS = 121
 MAX_LAG_SAMPLES = 1_440
 CAPTION_SCENES = ('greeting', 'hook', 'step1', 'step2', 'step3', 'takeaway')
 SEGMENT_IDS = (*CAPTION_SCENES, 'services', 'tools', 'domain', 'contact', 'phone', 'socials', 'signature')
+# Actual MP4 pixels after the short-feed composition's translate and scale.
+# Include the full caption card above the 1515px feed line with padding.
+CAPTION_WIDTH, CAPTION_HEIGHT = 746, 162
+CAPTION_CROP = f'{CAPTION_WIDTH}:{CAPTION_HEIGHT}:128:1372'
+CONTACT_CROPS = {'domain': '560:104:130:710', 'phone': '578:74:128:898', 'brand': '386:44:132:1056'}
 
 
 def sha256(content):
@@ -197,7 +202,8 @@ def normalized_ocr_text(identity, value):
 
 def high_contrast_caption(image, threshold):
     signature, shape, depth, pixels = image.split(b'\n', 3)
-    if signature != b'P5' or shape != b'930 200' or depth != b'255' or len(pixels) != 930 * 200:
+    if (signature != b'P5' or shape != f'{CAPTION_WIDTH} {CAPTION_HEIGHT}'.encode() or depth != b'255'
+            or len(pixels) != CAPTION_WIDTH * CAPTION_HEIGHT):
         raise ValueError('Unexpected OCR frame layout')
     # Rendered V11 captions use light text on a dark card. Convert the
     # captured pixels to dark-on-white without changing character geometry.
@@ -219,16 +225,16 @@ def measure_text(video, alignment, language):
         if not cues:
             raise ValueError(f'Missing V11 caption cue for {identity}')
         cue = max(cues, key=lambda item: item['end'] - item['start'])
-        checks.append((f'caption_{identity}', frame_at(cue['start'], cue['end']), '930:200:56:1548', 6, cue['text']))
+        checks.append((f'caption_{identity}', frame_at(cue['start'], cue['end']), CAPTION_CROP, 6, cue['text']))
     domain = segments['domain']
     phone = segments['phone']
     socials = segments['socials']
     signature = segments['signature']
     checks.extend([
-        ('domain', frame_at(domain['start'] + .35, domain['end']), '700:130:58:720', 7, 'jammimmo.com'),
-        ('phone', frame_at(phone['start'], phone['end']), '720:90:55:954', 7, '+221 76 944 48 49'),
-        ('brand_socials', frame_at(socials['start'] + .45, socials['end']), '480:54:60:1153', 7, 'Retrouvez Jamm Immo'),
-        ('brand_signature', frame_at(signature['start'], signature['end']), '480:54:60:1153', 7, 'Retrouvez Jamm Immo'),
+        ('domain', frame_at(domain['start'] + .35, domain['end']), CONTACT_CROPS['domain'], 7, 'jammimmo.com'),
+        ('phone', frame_at(phone['start'], phone['end']), CONTACT_CROPS['phone'], 7, '+221 76 944 48 49'),
+        ('brand_socials', frame_at(socials['start'] + .45, socials['end']), CONTACT_CROPS['brand'], 7, 'Retrouvez Jamm Immo'),
+        ('brand_signature', frame_at(signature['start'], signature['end']), CONTACT_CROPS['brand'], 7, 'Retrouvez Jamm Immo'),
     ])
     results = []
     for identity, frame, crop, psm, expected in checks:
