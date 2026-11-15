@@ -113,6 +113,19 @@ test('records the actual render inputs and only hashes of the script, audio, pro
     assert.equal(renderEvidence(bytes(renderedReport), mediaSha, workflow).report_sha256, digestTipValue(bytes(renderedReport)));
     assert.equal(captured.mix_wav_sha256, digestTipValue('private fixture mix'));
     assert.equal(captured.media_sha256, digestTipValue('private fixture mp4'));
+    const approvedRaw = digestTipValue('private fixture raw');
+    const reviewed = await buildTipV11RenderManifest({
+      plan: { ...plan, assistantEnabled: false, segments: [] }, sourceScriptSha256, voiceSource: 'reviewed-bundle',
+      reviewedNarrationSha256: approvedRaw, inventory, ...files,
+    });
+    assert.ok(manifestHasProductionInputs(reviewed));
+    assert.equal(reviewed.voice.model, 'reviewed-source-pcm-v1');
+    assert.equal(reviewed.raw_wav_sha256, reviewed.reviewed_narration_sha256);
+    assert.equal(manifestHasProductionInputs({ ...reviewed, reviewed_narration_sha256: 'f'.repeat(64) }), false);
+    await assert.rejects(buildTipV11RenderManifest({
+      plan: { ...plan, assistantEnabled: false, segments: [] }, sourceScriptSha256, voiceSource: 'reviewed-bundle',
+      reviewedNarrationSha256: 'f'.repeat(64), inventory, ...files,
+    }), /source bytes changed/);
     assert.ok(!JSON.stringify(captured).includes(plan.script));
     assert.ok(!JSON.stringify(captured).includes(temporary));
     await assert.rejects(buildTipV11RenderManifest({

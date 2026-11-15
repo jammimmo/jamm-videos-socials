@@ -4,6 +4,7 @@ import { lstat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { PRIMARY_MODEL, TIP_V11_VOICE_NAME, voicePrompt } from './voice-profile.mjs';
 import { TIP_V11_TEMPLATE } from './tip-v11-contract.mjs';
+import { REVIEWED_NARRATION_MODEL } from './tip-v11-reviewed-narration.mjs';
 
 export const TIP_V11_MANIFEST_CONTRACT = 'tip-v11-fr-render-inputs-v1';
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -18,7 +19,7 @@ const V11_STATIC_FILES = [
   ...[600, 700, 800].map(weight => `public/tip-v11/fonts/Poppins-normal-${weight}-latin.woff2`),
   'scripts/align_tip_v11.py', 'scripts/generate-gemini-voiceover.mjs', 'scripts/materialize-dispatched-tip.mjs',
   'scripts/render-batch.mjs', 'scripts/render-tip-v11.mjs', 'scripts/tip-v11-contract.mjs',
-  'scripts/tip-v11-caption-geometry.mjs', 'scripts/tip-v11-effects.mjs', 'scripts/tip-v11-render-manifest.mjs', 'scripts/voice-profile.mjs',
+  'scripts/tip-v11-caption-geometry.mjs', 'scripts/tip-v11-effects.mjs', 'scripts/tip-v11-render-manifest.mjs', 'scripts/tip-v11-reviewed-narration.mjs', 'scripts/voice-profile.mjs',
   'src/index.ts', 'src/Root.tsx',
   'src/compositions/TipV11Fr.tsx', 'src/compositions/TipV11Outro.tsx', 'src/compositions/TipV11Project.tsx',
   'src/compositions/TipV11Water.tsx', 'src/compositions/TipV11WaterQuestions.tsx',
@@ -47,12 +48,14 @@ export async function collectTipV11StaticFiles(root) {
 }
 
 export async function buildTipV11RenderManifest({
-  plan, sourceScriptSha256, voiceSource, inventory, raw, normalized, mix, alignment, props, mp4, captionGeometry,
+  plan, sourceScriptSha256, voiceSource, inventory, raw, normalized, mix, alignment, props, mp4, captionGeometry, reviewedNarrationSha256,
 }) {
-  if (!['provider', 'cache', 'fixture'].includes(voiceSource)
+  const reviewed = voiceSource === 'reviewed-bundle';
+  if (!['provider', 'cache', 'fixture', 'reviewed-bundle'].includes(voiceSource)
     || typeof plan.assistantEnabled !== 'boolean' || !['general', 'water'].includes(plan.visualTopic)
     || plan.segments.some(segment => segment.id === 'assistant') !== plan.assistantEnabled
-    || (voiceSource === 'provider' && !SHA256.test(sourceScriptSha256 ?? ''))) {
+    || ((voiceSource === 'provider' || reviewed) && !SHA256.test(sourceScriptSha256 ?? ''))
+    || (reviewed ? plan.assistantEnabled || !SHA256.test(reviewedNarrationSha256 ?? '') : reviewedNarrationSha256 !== undefined)) {
     throw new Error('V11 manifest render inputs are incomplete');
   }
   const voiceProfile = inventory.files.find(([path]) => path === 'scripts/voice-profile.mjs')?.[1];
@@ -65,6 +68,7 @@ export async function buildTipV11RenderManifest({
     digestFile(props, 64 * 1024),
     digestFile(mp4, MAX_MEDIA_BYTES),
   ]);
+  if (reviewed && rawSha !== reviewedNarrationSha256) throw new Error('V11 reviewed source bytes changed');
   return {
     contract: TIP_V11_MANIFEST_CONTRACT,
     source_script_sha256: SHA256.test(sourceScriptSha256 ?? '') ? sourceScriptSha256 : null,
@@ -74,12 +78,14 @@ export async function buildTipV11RenderManifest({
     assistant_enabled: plan.assistantEnabled,
     visual_topic: plan.visualTopic,
     voice: {
-      model: PRIMARY_MODEL, name: TIP_V11_VOICE_NAME, source: voiceSource, profile_sha256: voiceProfile,
+      model: reviewed ? REVIEWED_NARRATION_MODEL : PRIMARY_MODEL, name: TIP_V11_VOICE_NAME,
+      source: voiceSource, profile_sha256: voiceProfile,
       prompt_sha256: digestTipValue(voicePrompt(plan.script, '', TIP_V11_TEMPLATE)),
     },
     asset_manifest_sha256: inventory.sha256,
     static_files: inventory.files,
     raw_wav_sha256: rawSha,
+    ...(reviewed && { reviewed_narration_sha256: reviewedNarrationSha256 }),
     narration_wav_sha256: normalizedSha,
     mix_wav_sha256: mixSha,
     alignment_sha256: alignmentSha,
@@ -98,7 +104,11 @@ export function manifestHasProductionInputs(manifest) {
     && manifest.asset_manifest_sha256 === digestTipValue(JSON.stringify(files))
     && typeof manifest.assistant_enabled === 'boolean'
     && ['general', 'water'].includes(manifest.visual_topic)
-    && manifest.voice?.source === 'provider' && manifest.voice.model === PRIMARY_MODEL && manifest.voice.name === TIP_V11_VOICE_NAME
+    && manifest.voice?.name === TIP_V11_VOICE_NAME
+    && ((manifest.voice.source === 'provider' && manifest.voice.model === PRIMARY_MODEL
+        && manifest.reviewed_narration_sha256 === undefined)
+      || (manifest.voice.source === 'reviewed-bundle' && manifest.voice.model === REVIEWED_NARRATION_MODEL
+        && manifest.assistant_enabled === false && manifest.reviewed_narration_sha256 === manifest.raw_wav_sha256))
     && manifest.voice.profile_sha256 === files.find(([path]) => path === 'scripts/voice-profile.mjs')?.[1]
     && SHA256.test(manifest.voice.prompt_sha256)
     && [

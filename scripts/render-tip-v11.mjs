@@ -8,6 +8,7 @@ import { tipV11Effects } from './tip-v11-effects.mjs';
 import { buildTipV11RenderManifest, collectTipV11StaticFiles } from './tip-v11-render-manifest.mjs';
 import { geometryArtifactDirectory } from '../src/compositions/tip-v11-caption-geometry.ts';
 import { summarizeCaptionGeometry } from './tip-v11-caption-geometry.mjs';
+import { stageReviewedNarration } from './tip-v11-reviewed-narration.mjs';
 
 const MIN_NARRATION_SECONDS = 58.5;
 const MAX_NARRATION_SECONDS = 119;
@@ -78,6 +79,7 @@ export async function renderTipV11(spec, {
 } = {}) {
   if (!root) throw new Error('Renderer root is required');
   if (localWordTimings && !localNarration) throw new Error('Local word timings require local narration');
+  if (spec.reviewedNarration && (localNarration || assistantEnabled)) throw new Error('Reviewed V11 narration requires the approved standard scenes');
   const plan = buildTipV11Narration(spec, { assistantEnabled });
   const outDir = resolve(root, 'out/batch');
   const audioDir = resolve(root, 'public/audio/voiceovers');
@@ -90,9 +92,15 @@ export async function renderTipV11(spec, {
   await Promise.all([mkdir(outDir, { recursive: true }), mkdir(audioDir, { recursive: true })]);
   await rm(manifestPath, { force: true });
   const inventory = await collectTipV11StaticFiles(root).catch(() => null);
-  const narration = localNarration
-    ? { path: resolve(localNarration), source: 'fixture' }
-    : await getNarration(root, audioDir, plan);
+  let narration;
+  if (spec.reviewedNarration) {
+    narration = await stageReviewedNarration(root, resolve(audioDir, `${plan.id}.wav`),
+      spec.reviewedNarration, process.env.GITHUB_SHA);
+  } else if (localNarration) {
+    narration = { path: resolve(localNarration), source: 'fixture' };
+  } else {
+    narration = await getNarration(root, audioDir, plan);
+  }
   const raw = narration.path;
   const normalizedPath = resolve(root, 'public', normalized);
   if (raw === normalizedPath) throw new Error('Narration input must differ from processed output');
@@ -153,6 +161,7 @@ export async function renderTipV11(spec, {
     const manifest = await buildTipV11RenderManifest({
       plan, sourceScriptSha256: spec.sourceScriptSha256, voiceSource: narration.source, inventory, raw, captionGeometry,
       normalized: normalizedPath, mix: resolve(root, 'public', mixed), alignment: alignPath, props: propsPath, mp4: outFile,
+      reviewedNarrationSha256: spec.reviewedNarration?.sha256,
     });
     await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`, { flag: 'wx', mode: 0o600 });
   } catch {

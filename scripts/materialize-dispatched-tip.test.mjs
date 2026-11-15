@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { materializeDispatchedTip as materialize } from './materialize-dispatched-tip.mjs';
 import { tipV11NarrationTempo } from './render-tip-v11.mjs';
+import { tipV11Effects } from './tip-v11-effects.mjs';
+import { stageReviewedNarration, REVIEWED_NARRATION_DISPATCH } from './tip-v11-reviewed-narration.mjs';
 import { buildTipV11Narration, TIP_V11_SLOGAN } from './tip-v11-contract.mjs';
 import { voiceCacheHash, voicePrompt } from './voice-profile.mjs';
 const materializeDispatchedTip = value => materialize(value, { legacy: true });
@@ -203,4 +205,51 @@ test('the GitHub event file is consumed without logging the editorial payload', 
   assert.ok(stdout.includes(`::add-mask::${input.job.id}`));
   assert.equal(JSON.parse(readFileSync(specPath, 'utf8')).body.join(' '), input.content.scriptFr);
   assert.match(readFileSync(envPath, 'utf8'), new RegExp(`^TIP_JOB_ID=${input.job.id}$`, 'mu'));
+});
+
+
+test('reviewed V11 dispatch requires the exact renderer and cannot downgrade to provider mode', () => {
+  const input = v11Payload();
+  input.contract = REVIEWED_NARRATION_DISPATCH;
+  const pin = { contract: 'tip-v11-reviewed-narration-v1', rendererSha: 'a'.repeat(40), sha256: 'b'.repeat(64) };
+  input.evidence.reviewedNarration = pin;
+  assert.deepEqual(materialize(input, { rendererSha: pin.rendererSha }).spec.reviewedNarration, pin);
+  assert.throws(() => materialize(input, { rendererSha: 'c'.repeat(40) }), /narration contract/);
+  assert.throws(() => materialize(input), /narration contract/);
+  input.evidence.reviewedNarration = { ...pin, url: 'https://example.test/forged.wav' };
+  assert.throws(() => materialize(input, { rendererSha: pin.rendererSha }), /narration contract/);
+  input.contract = 'jamm-tip-render-v2';
+  assert.throws(() => materialize(input), /narration contract/);
+  delete input.evidence.reviewedNarration;
+  assert.equal(materialize(input).spec.reviewedNarration, undefined);
+});
+
+test('reviewed narration consumes the pinned, checkout-local PCM bytes and rejects all substitutes', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'approved-tip-sha-'));
+  try {
+    const directory = join(root, 'approved-narrations/v11/sha256');
+    mkdirSync(directory, { recursive: true });
+    const pcm = tipV11Effects([], 2);
+    const sha256 = createHash('sha256').update(pcm).digest('hex');
+    const rendererSha = 'a'.repeat(40);
+    const pin = { contract: 'tip-v11-reviewed-narration-v1', rendererSha, sha256 };
+    const output = join(root, 'per-job.wav');
+    const source = join(directory, `${sha256}.wav`);
+    await assert.rejects(stageReviewedNarration(root, output, pin, rendererSha), /file unavailable/);
+    writeFileSync(source, pcm);
+    assert.deepEqual(await stageReviewedNarration(root, output, pin, rendererSha), { path: output, source: 'reviewed-bundle' });
+    assert.deepEqual(readFileSync(output), pcm);
+    writeFileSync(source, Buffer.concat([pcm, Buffer.from('mutated')]));
+    await assert.rejects(stageReviewedNarration(root, output, pin, rendererSha), /bytes or PCM format mismatch/);
+    const invalid = Buffer.from(pcm);
+    invalid.writeUInt32LE(48000, 24);
+    const invalidSha = createHash('sha256').update(invalid).digest('hex');
+    writeFileSync(join(directory, `${invalidSha}.wav`), invalid);
+    await assert.rejects(stageReviewedNarration(root, output, { ...pin, sha256: invalidSha }, rendererSha), /PCM format/);
+    rmSync(source);
+    symlinkSync(output, source);
+    await assert.rejects(stageReviewedNarration(root, output, pin, rendererSha), /file unavailable/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

@@ -43,3 +43,9 @@ Avec `--brand-logo public/tip-v11/logo.png`, l’audit lit dans le MP4 exact les
 Le champ `final_brand_cta_visibility` indique les images et les rectangles mesurés dans le masque `tip-v11-observed-short-feed-brand-20261114-v1`. Une mesure absente, des coordonnées hors masque ou une différence donnent `inconclusive`. Ce champ couvre les pixels de marque et de contact à ces instants sur l’habillage de référence. Les droits, le fonctionnement des coordonnées, la confidentialité, le wolof et l’accent relèvent de la politique éditoriale.
 
 La fixture `scripts/fixtures/tip-v11-brand-cta-smoke.json` produit un clip silencieux et fictif de 168 images. Avec le navigateur Remotion déjà installé, elle permet de tester le vérificateur sur un MP4 H.264 1080 × 1920 sans appel à la synthèse vocale. Les huit mesures ont concordé avec Tesseract `eng` en local. Une version réencodée, avec une partie du logo masquée à l’introduction et les derniers chiffres remplacés sur l’image du numéro, a rendu ces deux mesures inconcluantes et les six autres concordantes. Le workflow utilise le modèle `fra`.
+
+### Source vocale revue et épinglée
+
+Le contrat de dispatch `jamm-tip-render-v3-reviewed-narration` exige un commit exact du moteur et le SHA-256 d’un fichier `approved-narrations/v11/sha256/<sha256>.wav`. La source doit se trouver dans le checkout épinglé, avec une voix complète au format WAV PCM mono 24 kHz, 16 bits. Utiliser uniquement un enregistrement dont la diffusion dans le dépôt public est explicitement autorisée. Cette voie exige la variante V11 standard avec l’assistant désactivé.
+
+Le moteur vérifie les octets avant tout traitement. Une source absente ou différente arrête cette demande. Le manifeste conserve `voice.source=reviewed-bundle`, la provenance `voice.model=reviewed-source-pcm-v1` et l’égalité entre `reviewed_narration_sha256` et `raw_wav_sha256`. Les mesures du MP4 et la décision de publication restent des étapes distinctes.
