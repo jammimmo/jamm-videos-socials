@@ -5,6 +5,7 @@ from array import array
 import base64
 import hashlib
 import io
+from itertools import zip_longest
 import json
 import math
 import os
@@ -35,6 +36,11 @@ SEGMENT_IDS = (*CAPTION_SCENES, 'services', 'tools', 'domain', 'contact', 'phone
 CAPTION_WIDTH, CAPTION_HEIGHT = 746, 162
 CAPTION_CROP = f'{CAPTION_WIDTH}:{CAPTION_HEIGHT}:128:1372'
 CONTACT_CROPS = {'domain': '560:104:130:710', 'phone': '578:74:128:898', 'brand': '386:44:132:1056'}
+AUDIO_PRESERVATION_CONTRACT = 'tip-v11-final-audio-preservation-v1'
+AUDIO_PRESERVATION_WINDOW = SAMPLE_RATE // 50
+AUDIO_PRESERVATION_HOP = SAMPLE_RATE // 100
+AUDIO_PRESERVATION_FLOOR = 20
+AUDIO_PRESERVATION_RMS_RATIO = .18
 
 
 def sha256(content):
@@ -97,12 +103,16 @@ def pcm(data):
     return samples
 
 
-def read_wave(path):
-    data = limited_read(path, MAX_PCM_SECONDS * SAMPLE_RATE * 2 + 4096)
+def wave_pcm(data):
     with wave.open(io.BytesIO(data), 'rb') as source:
         if (source.getnchannels(), source.getsampwidth(), source.getframerate()) != (1, 2, SAMPLE_RATE):
             raise ValueError('V11 WAV must be 24 kHz mono PCM16')
-        return pcm(source.readframes(source.getnframes())), sha256(data)
+        return pcm(source.readframes(source.getnframes()))
+
+
+def read_wave(path):
+    data = limited_read(path, MAX_PCM_SECONDS * SAMPLE_RATE * 2 + 4096)
+    return wave_pcm(data), sha256(data)
 
 
 def similarity(reference, final, start, end, lag, stride=8):
@@ -179,6 +189,83 @@ def measure_audio(segments, narration, mix, final):
     return {
         'passed': abs(len(final) - len(mix)) <= SAMPLE_RATE // 8 and all(result['passed'] for result in results),
         'sample_rate': SAMPLE_RATE, 'lag_samples': lag, 'segments': results,
+    }
+
+
+def render_audit_effects(alignment):
+    module_url = Path(__file__).with_name('tip-v11-effects.mjs').resolve().as_uri()
+    cue_inputs = {
+        'segments': [{'id': row['id'], 'start': row['start']} for row in alignment['segments']],
+        'durationInFrames': alignment['durationInFrames'],
+    }
+    return command('node', '--input-type=module', '-e', """
+import { readFileSync } from 'node:fs';
+const { tipV11Effects } = await import(process.argv[1]);
+const { segments, durationInFrames } = JSON.parse(readFileSync(0, 'utf8'));
+process.stdout.write(tipV11Effects(segments, durationInFrames));
+""", module_url, data=json.dumps(cue_inputs).encode())
+
+
+def measure_audio_preservation(alignment, narration, mix, decoded_pcm, lag, effects=render_audit_effects):
+    """Check which samples survived the mux. Only a lexical test can verify the spoken words."""
+    result = {
+        'contract': AUDIO_PRESERVATION_CONTRACT, 'status': 'inconclusive', 'sample_rate': SAMPLE_RATE,
+        'window_samples': AUDIO_PRESERVATION_WINDOW, 'hop_samples': AUDIO_PRESERVATION_HOP,
+        'absolute_rms_floor_pcm16': AUDIO_PRESERVATION_FLOOR,
+        'relative_rms_limit_ppm': round(AUDIO_PRESERVATION_RMS_RATIO * 1_000_000),
+        'decoded_pcm_sha256': sha256(decoded_pcm), 'lag_samples': lag, 'speech_recognition_evaluated': False,
+    }
+    if len(decoded_pcm) % 2:
+        return {**result, 'reason': 'incomplete_aligned_samples'}
+    final = pcm(decoded_pcm)
+    if (type(lag) is not int or not 0 <= lag <= MAX_LAG_SAMPLES
+        or not AUDIO_PRESERVATION_WINDOW <= len(mix) <= MAX_PCM_SECONDS * SAMPLE_RATE
+        or not 0 < len(narration) <= len(mix)
+        or not lag + len(mix) <= len(final) <= lag + len(mix) + SAMPLE_RATE // 8):
+        return {**result, 'reason': 'incomplete_aligned_samples'}
+
+    try:
+        effects_wav = effects(alignment)
+        accents = wave_pcm(effects_wav)
+    except (OSError, EOFError, ValueError, wave.Error, subprocess.SubprocessError):
+        return {**result, 'reason': 'canonical_mix_unavailable'}
+    if len(accents) != len(mix) or any(
+        sample != voice + accent for sample, (voice, accent)
+        in zip(mix, zip_longest(narration, accents, fillvalue=0))
+    ):
+        return {**result, 'reason': 'canonical_mix_differs'}
+    result['effects_wav_sha256'] = sha256(effects_wav)
+
+    end = lag + len(mix)
+    if any(abs(sample) > AUDIO_PRESERVATION_FLOOR for edge in (final[:lag], final[end:]) for sample in edge):
+        return {**result, 'reason': 'unexpected_padding_audio'}
+    aligned = final[lag:end]
+    power = sum(sample * sample for sample in mix)
+    gain = sum(reference * observed for reference, observed in zip(mix, aligned)) / power if power else 0
+    result['gain_ppm'] = round(gain * 1_000_000)
+    if not .65 <= gain <= 1.15:
+        return {**result, 'reason': 'gain_outside_range'}
+
+    window = AUDIO_PRESERVATION_WINDOW
+    last = len(mix) - window
+    offsets = list(range(0, last + 1, AUDIO_PRESERVATION_HOP))
+    if offsets[-1] != last:
+        offsets.append(last)
+    worst = 0.0
+    failed = 0
+    for offset in offsets:
+        expected = [sample * gain for sample in mix[offset:offset + window]]
+        reference_rms = math.sqrt(sum(sample * sample for sample in expected) / window)
+        residual = math.sqrt(sum((observed - reference) ** 2 for reference, observed
+                                 in zip(expected, aligned[offset:offset + window])) / window)
+        ratio = residual / max(AUDIO_PRESERVATION_FLOOR, AUDIO_PRESERVATION_RMS_RATIO * reference_rms)
+        worst = max(worst, ratio)
+        failed += ratio > 1
+    return {
+        **result, 'status': 'inconclusive' if failed else 'matched',
+        'windows_checked': len(offsets), 'windows_over_limit': failed,
+        'worst_residual_to_limit_ppm': math.ceil(worst * 1_000_000),
+        **({'reason': 'local_sample_residual_over_limit'} if failed else {}),
     }
 
 
@@ -344,7 +431,9 @@ def audit(args):
         decoded_pcm = command('ffmpeg', '-v', 'error', '-protocol_whitelist', 'file,pipe', '-f', 'mov',
                             '-i', video, '-map', '0:a:0',
                             '-t', str(MAX_PCM_SECONDS), '-ac', '1', '-ar', str(SAMPLE_RATE), '-f', 's16le', '-')
-        audio = measure_audio(alignment['segments'], narration, mix, pcm(decoded_pcm))
+        decoded = pcm(decoded_pcm)
+        audio = measure_audio(alignment['segments'], narration, mix, decoded)
+        preservation = measure_audio_preservation(alignment, narration, mix, decoded_pcm, audio.get('lag_samples'))
         text = measure_text(video, alignment, args.ocr_language)
         speech = {'final_french_speech': measure_final_french_speech(
             alignment['segments'], decoded_pcm, audio, folder,
@@ -358,10 +447,10 @@ def audit(args):
         'media_sha256': media_sha, 'media_bytes': media_bytes,
         'alignment_sha256': sha256(alignment_data), 'narration_wav_sha256': narration_sha, 'mix_wav_sha256': mix_sha,
         'alignment_provenance': alignment.get('provenance'),
-        'media_shape': shape, 'audio_waveform': audio, 'sampled_frame_ocr': text,
+        'media_shape': shape, 'audio_waveform': audio, 'audio_preservation': preservation, 'sampled_frame_ocr': text,
         'status': 'matched' if audio['passed'] and text['passed'] else 'needs_review',
         'editorial_approval': False,
-        'scope': 'Waveform, sampled OCR and optional French speech evidence. No rights, privacy, or accent assessment.',
+        'scope': 'Waveform, export sample preservation, sampled OCR and optional French speech evidence. No rights, privacy, or accent assessment.',
         **bound,
         **speech,
         **visibility,

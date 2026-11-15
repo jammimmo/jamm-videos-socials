@@ -1,12 +1,15 @@
 import array
 import base64
+import io
 import json
 import random
 import unittest
+import wave
 
 from align_tip_v11 import ASR_REVISION, PHONE_WINDOW_EVIDENCE, align, align_with_signature_retry, tokens
 from audit_tip_v11 import (
-    CAPTION_SCENES, SAMPLE_RATE, bind_manifest, measure_audio, normalized_ocr_text, sha256, verify_alignment,
+    AUDIO_PRESERVATION_WINDOW, CAPTION_SCENES, SAMPLE_RATE, bind_manifest, measure_audio,
+    measure_audio_preservation, normalized_ocr_text, sha256, verify_alignment,
 )
 from test_align_tip_v11 import SEGMENTS, speech
 
@@ -54,6 +57,50 @@ class V11FinalEvidenceTest(unittest.TestCase):
         self.assertFalse(result['passed'])
         self.assertTrue(result['segments'][0]['passed'])
         self.assertFalse(result['segments'][1]['passed'])
+
+    def preservation(self, decoded, mix=None):
+        buffer = io.BytesIO()
+        with wave.open(buffer, 'wb') as effects:
+            effects.setparams((1, 2, SAMPLE_RATE, 0, 'NONE', 'not compressed'))
+            effects.writeframes(bytes(2 * len(self.voice)))
+        return measure_audio_preservation(
+            {}, self.voice, self.voice if mix is None else mix, decoded.tobytes(), 48,
+            effects=lambda _: buffer.getvalue(),
+        )
+
+    def test_preservation_rejects_quiet_local_mute_and_substitution_missed_by_waveform(self):
+        window = AUDIO_PRESERVATION_WINDOW
+        start = SAMPLE_RATE * 5 // 2
+        self.voice[start:start + window] = array.array('h', (round(sample / 26)
+                                                               for sample in self.voice[start:start + window]))
+        self.final[start + 48:start + 48 + window] = array.array('h', (round(sample * .707)
+                                                                        for sample in self.voice[start:start + window]))
+        clean = self.preservation(self.final)
+        self.assertEqual(clean['status'], 'matched')
+        self.assertEqual(clean['windows_over_limit'], 0)
+        self.assertEqual(clean['decoded_pcm_sha256'], sha256(self.final.tobytes()))
+        for replacement in (array.array('h', [0]) * window, self.final[1090:1090 + window]):
+            with self.subTest(first_sample=replacement[0]):
+                altered = self.final[:]
+                altered[start + 48:start + 48 + window] = replacement
+                self.assertTrue(measure_audio(self.segments, self.voice, self.voice, altered)['passed'])
+                proof = self.preservation(altered)
+                self.assertEqual(proof['status'], 'inconclusive')
+                self.assertEqual(proof['reason'], 'local_sample_residual_over_limit')
+                self.assertGreater(proof['windows_over_limit'], 0)
+
+    def test_preservation_rejects_matching_but_modified_mix_and_changed_padding(self):
+        tampered_mix = self.voice[:]
+        tampered_mix[1234] = 0 if tampered_mix[1234] else 1
+        tampered_final = self.final[:]
+        tampered_final[1234 + 48] = round(tampered_mix[1234] * .707)
+        self.assertEqual(self.preservation(tampered_final, tampered_mix)['reason'], 'canonical_mix_differs')
+
+        ended_early = self.final[:-1]
+        self.assertEqual(self.preservation(ended_early)['reason'], 'incomplete_aligned_samples')
+        for shifted in (array.array('h', [200]) + self.final[1:], self.final + array.array('h', [200])):
+            with self.subTest(final_samples=len(shifted)):
+                self.assertEqual(self.preservation(shifted)['reason'], 'unexpected_padding_audio')
 
     def test_contact_ocr_preserves_meaningful_punctuation_and_digits(self):
         phone = normalized_ocr_text('phone', '+221 76 944 48 49')
