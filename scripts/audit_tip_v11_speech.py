@@ -11,7 +11,7 @@ import sys
 import unicodedata
 import wave
 
-from align_tip_v11 import ASR_REPO, ASR_REVISION, NUMBER_WORDS
+from align_tip_v11 import ASR_REPO, ASR_REVISION, NUMBER_WORDS, PHONE_WORDS, audible_windows, voiced_overlap
 
 
 CONTRACT = 'tip-v11-fr-final-speech-v1'
@@ -25,6 +25,9 @@ MIN_WORD_PROBABILITY = .6
 # plus a small allowance for differences in word timestamps.
 MAX_FRENCH_BOUNDARY_SHIFT_SECONDS = 1.25
 RECOGNITION_TIMEOUT_SECONDS = 150
+PHONE_WINDOW_TIMEOUT_SECONDS = 45
+MAX_PHONE_EDGE_SHIFT_SECONDS = .75
+MIN_PHONE_WORD_AUDIBLE_SECONDS = .05
 
 
 def sha256(value):
@@ -61,12 +64,12 @@ def recognize_final_wav(wav_path):
             yield word.word, float(word.start), float(word.end), float(word.probability)
 
 
-def recognize_with_timeout(wav_path):
+def recognize_with_timeout(wav_path, timeout=RECOGNITION_TIMEOUT_SECONDS):
     # The child receives only the extracted audio path. Its transcript crosses
     # a captured pipe in memory and is never saved to the report or logged.
     completed = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), str(wav_path)],
-        capture_output=True, check=True, timeout=RECOGNITION_TIMEOUT_SECONDS,
+        capture_output=True, check=True, timeout=timeout,
     )
     return json.loads(completed.stdout)
 
@@ -85,7 +88,9 @@ def words_by_segment(segments, recognized_words, lag_samples):
         if not previous <= start < end <= segments[-1]['end'] + abs(offset) + .12 or not 0 <= probability <= 1:
             raise ValueError('unexpected speech timestamps or confidence')
         previous = start
-        if not normalized_words('', text):
+        text = text.strip()
+        spoken_plus = text == '+'
+        if not spoken_plus and not normalized_words('', text):
             continue
         start, end = start - offset, end - offset
         middle = (start + end) / 2
@@ -100,8 +105,8 @@ def words_by_segment(segments, recognized_words, lag_samples):
         overlaps = [i for i, part in enumerate(segments) if part['start'] < end and start < part['end']]
         if any((segments[i]['id'] in EXCLUDED_SEGMENTS) != excluded for i in overlaps):
             ambiguous_boundary.update(i for i in overlaps if segments[i]['id'] not in EXCLUDED_SEGMENTS)
-        if not excluded:
-            observed[index].append((text.strip(), start, end, probability))
+        if not excluded and (not spoken_plus or segment['id'] == 'phone'):
+            observed[index].append((text, start, end, probability))
     return observed, ambiguous_boundary
 
 
@@ -112,7 +117,7 @@ def segment_words(identity, words):
 def exact_adjacent_split(left, right, rows, original_split, expected_left, expected_right):
     if abs(left['end'] - right['start']) > .001 or not rows:
         return None
-    if any(word[3] < MIN_WORD_PROBABILITY for word in rows):
+    if any(word[0] == '+' or word[3] < MIN_WORD_PROBABILITY for word in rows):
         return None
     if any(previous[2] > following[1] for previous, following in zip(rows, rows[1:])):
         return None
@@ -131,7 +136,40 @@ def exact_adjacent_split(left, right, rows, original_split, expected_left, expec
     return matches[0] if len(matches) == 1 else None
 
 
-def compare_french_segments(segments, recognized_words, lag_samples):
+def anchored_phone_range(segments, expected_words, observed, index):
+    if (not 0 < index < len(segments) - 1
+        or [part['id'] for part in segments[index - 1:index + 2]] != ['contact', 'phone', 'socials']
+        or expected_words[index] != PHONE_WORDS):
+        return None
+    left = observed[index - 1]
+    right_start = expected_words[index + 1][:2]
+    if (not left or segment_words('contact', left) != expected_words[index - 1]
+        or any(word[3] < MIN_WORD_PROBABILITY for word in left) or len(right_start) != 2):
+        return None
+    rows = observed[index] + observed[index + 1]
+    start = left[-1][2]
+    phone = segments[index]
+    if abs(start - phone['start']) > MAX_PHONE_EDGE_SHIFT_SECONDS:
+        return None
+    windows = []
+    for pivot in range(1, len(rows)):
+        end = rows[pivot][1]
+        if not 4 <= end - start <= 8 or abs(end - phone['end']) > MAX_PHONE_EDGE_SHIFT_SECONDS:
+            continue
+        anchor = rows[pivot:pivot + 2]
+        if (segment_words('socials', anchor)[:2] != right_start
+            or any(word[3] < MIN_WORD_PROBABILITY for word in anchor)
+            or segment_words('phone', rows[:pivot]) != PHONE_WORDS):
+            continue
+        # No ASR word may be trimmed out or assigned twice in the retry.
+        timed = [left[-1], *rows[:pivot + len(anchor)]]
+        if any(before[2] > after[1] for before, after in zip(timed, timed[1:])):
+            continue
+        windows.append((start, end))
+    return windows[0] if len(windows) == 1 else None
+
+
+def compare_french_segments(segments, recognized_words, lag_samples, verify_phone=None):
     observed, ambiguous_boundary = words_by_segment(segments, recognized_words, lag_samples)
     expected_words = [normalized_words(segment['id'], segment['text']) for segment in segments]
     actual_words = [segment_words(segment['id'], words) for segment, words in zip(segments, observed)]
@@ -160,19 +198,58 @@ def compare_french_segments(segments, recognized_words, lag_samples):
             continue
         expected = expected_words[index]
         actual = segment_words(identity, observed[index])
+        # A standalone sign can be numeric formatting. It needs the focused
+        # phone check and acoustic evidence before it can count as speech.
         matched = (bool(expected) and actual == expected and index not in ambiguous_boundary
-                   and all(word[3] >= MIN_WORD_PROBABILITY for word in observed[index]))
+                   and all(word[0] != '+' and word[3] >= MIN_WORD_PROBABILITY for word in observed[index]))
         item = {'segment': identity, 'status': 'matched' if matched else 'inconclusive',
                 'expected_token_count': len(expected), 'observed_token_count': len(actual),
                 'expected_sha256': sha256(' '.join(expected).encode()),
                 'observed_sha256': sha256(' '.join(actual).encode())}
         if index in ambiguous_boundary:
             item['reason'] = 'mixed_language_boundary'
+        elif not matched and identity == 'phone' and verify_phone:
+            window = anchored_phone_range(segments, expected_words, observed, index)
+            measurement = verify_phone(*window) if window else None
+            if measurement:
+                item.update(status='matched', observed_sha256=item['expected_sha256'],
+                            observed_token_count=len(expected), measurement=measurement)
         results.append(item)
     return results
 
 
-def measure_final_french_speech(segments, decoded_pcm, waveform, directory, recognize=recognize_with_timeout):
+def recognize_final_phone(wav_path):
+    return recognize_with_timeout(wav_path, PHONE_WINDOW_TIMEOUT_SECONDS)
+
+
+def verify_phone_samples(decoded_pcm, lag_samples, directory, start, end, recognize):
+    first, last = (round(point * SAMPLE_RATE) + lag_samples for point in (start, end))
+    if not 0 <= first < last <= len(decoded_pcm) // 2:
+        return None
+    clip = decoded_pcm[first * 2:last * 2]
+    sound = list(audible_windows(clip, SAMPLE_RATE))
+    if not sound:
+        return None
+    path = Path(directory) / 'decoded-final-phone.wav'
+    try:
+        with wave.open(str(path), 'wb') as output:
+            output.setparams((1, 2, SAMPLE_RATE, 0, 'NONE', 'not compressed'))
+            output.writeframes(clip)
+        duration = (last - first) / SAMPLE_RATE
+        [observed], _ = words_by_segment([{'id': 'phone', 'start': 0, 'end': duration}], recognize(path), 0)
+        if (segment_words('phone', observed) != PHONE_WORDS
+            or any(word[2] > duration or word[3] < MIN_WORD_PROBABILITY for word in observed)
+            or any(voiced_overlap(sound, word[1], word[2]) < MIN_PHONE_WORD_AUDIBLE_SECONDS for word in observed)
+            or any(left[2] > right[1] for left, right in zip(observed, observed[1:]))):
+            return None
+    except Exception:
+        return None
+    return {'method': 'phone_exact_neighbor_window', 'start_sample': first, 'end_sample': last,
+            'pcm_sha256': sha256(clip)}
+
+
+def measure_final_french_speech(segments, decoded_pcm, waveform, directory, recognize=recognize_with_timeout,
+                                recognize_phone=recognize_final_phone):
     result = {'contract': CONTRACT, 'source': SOURCE, 'status': 'inconclusive',
               'model_revision': ASR_REVISION, 'decoded_pcm_sha256': sha256(decoded_pcm),
               'excluded_segments': list(EXCLUDED_SEGMENTS), 'accent_evaluated': False, 'segments': []}
@@ -183,7 +260,11 @@ def measure_final_french_speech(segments, decoded_pcm, waveform, directory, reco
         with wave.open(str(wav_path), 'wb') as output:
             output.setparams((1, 2, SAMPLE_RATE, 0, 'NONE', 'not compressed'))
             output.writeframes(decoded_pcm)
-        results = compare_french_segments(segments, recognize(wav_path), waveform['lag_samples'])
+        lag_samples = waveform['lag_samples']
+        results = compare_french_segments(
+            segments, recognize(wav_path), lag_samples,
+            lambda start, end: verify_phone_samples(decoded_pcm, lag_samples, directory, start, end, recognize_phone),
+        )
     except ValueError:
         return {**result, 'reason': 'recognition_or_timing_inconclusive'}
     except Exception:

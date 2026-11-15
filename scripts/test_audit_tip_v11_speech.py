@@ -139,6 +139,81 @@ class V11FinalSpeechTest(unittest.TestCase):
         delayed = [{**scenes[0], 'end': 5}, {**scenes[1], 'start': 5}]
         self.assertIn('inconclusive', [row['status'] for row in compare_french_segments(delayed, words, 0)])
 
+    def test_final_phone_recovers_only_the_exact_pcm_between_confirmed_neighbors(self):
+        scenes = [
+            {'id': 'contact', 'text': 'Au même numéro.', 'start': 0, 'end': 2.5},
+            {**self.segments[3], 'start': 2.5, 'end': 8.2},
+            {'id': 'socials', 'text': 'Suivez aussi Jamm Immo.', 'start': 8.2, 'end': 10},
+        ]
+        full = [
+            ('Au', .2, .4, .9), ('même', .4, .8, .9), ('numéro', .9, 2.35, .9),
+            ('Plus', 2.35, 2.9, .23), ('221', 2.9, 3.9, .9), ('76', 3.9, 4.9, .9),
+            ('944', 4.9, 6, .9), ('48', 6, 6.9, .9), ('49', 6.9, 7.95, .9),
+            ('Suivez', 7.95, 8.4, .9), ('aussi', 8.4, 8.9, .9),
+            ('Jamm', 8.9, 9.2, .9), ('Immo', 9.2, 9.6, .9),
+        ]
+        focused = [
+            ('+', .1, .5, .72), ('221', .55, 1.4, .9), ('76', 1.4, 2.4, .9),
+            ('944', 2.4, 3.4, .9), ('48', 3.4, 4.4, .9), ('49', 4.4, 5.2, .9),
+        ]
+        pcm = bytes(range(256)) * 2000
+        lag = 1024
+        first, last = round(2.35 * 24_000) + lag, round(7.95 * 24_000) + lag
+        with TemporaryDirectory() as folder:
+            def verify_scene(path):
+                with wave.open(str(path), 'rb') as audio:
+                    self.assertEqual(audio.readframes(audio.getnframes()), pcm[first * 2:last * 2])
+                return focused
+
+            def audit_words(words, scene_reader, audio_pcm=pcm):
+                shifted = [(text, start + lag / 24_000, end + lag / 24_000, probability)
+                           for text, start, end, probability in words]
+                return measure_final_french_speech(scenes, audio_pcm, {'passed': True, 'lag_samples': lag}, folder,
+                                                   lambda unused: shifted, scene_reader)
+
+            reader = Mock(side_effect=verify_scene)
+            result = audit_words(full, reader)
+            reader.assert_called_once()
+            self.assertEqual(result['status'], 'inconclusive', 'recovery cannot mark the neighboring scene matched')
+            self.assertEqual(result['segments'][1]['status'], 'matched')
+            self.assertEqual(result['segments'][1]['measurement'], {
+                'method': 'phone_exact_neighbor_window', 'start_sample': first, 'end_sample': last,
+                'pcm_sha256': sha256(pcm[first * 2:last * 2]),
+            })
+
+            for changed in (
+                full[:4] + [('sept', 2.99, 3.6, .9)] + full[5:],
+                full[:2] + [('numéro', .9, 2.35, .59)] + full[3:],
+                full[:9] + [('Écoutez', 7.95, 8.4, .99)] + full[10:],
+                full[:8] + [('49', 6.9, 8, .99)] + full[9:],
+            ):
+                forbidden = Mock()
+                report = audit_words(changed, forbidden)
+                forbidden.assert_not_called()
+                self.assertEqual(report['segments'][1]['status'], 'inconclusive')
+
+            for changed in (focused[1:], focused[:1] + [('221', .55, 1.4, .59)] + focused[2:],
+                            focused[:1] + [('221', .45, 1.4, .9)] + focused[2:],
+                            focused + [('suivez', 5.2, 5.4, .9)]):
+                with self.subTest(changed=changed):
+                    rejected = audit_words(full, lambda unused: changed)
+                    self.assertEqual(rejected['segments'][1]['status'], 'inconclusive')
+
+            silent_guess = Mock(return_value=focused)
+            self.assertEqual(audit_words(full, silent_guess, bytes(len(pcm)))['segments'][1]['status'], 'inconclusive')
+            silent_guess.assert_not_called()
+            prefix_end = first + round(.55 * 24_000)
+            missing_plus = pcm[:first * 2] + bytes((prefix_end - first) * 2) + pcm[prefix_end * 2:]
+            self.assertEqual(audit_words(full, lambda unused: focused, missing_plus)['segments'][1]['status'],
+                             'inconclusive')
+
+    def test_standalone_plus_requires_focused_evidence(self):
+        bare_symbol = self.recognized[:7] + [('+', 7.2, 7.3, .96), ('221', 7.3, 7.5, .96)] + self.recognized[8:]
+        report = self.measure(bare_symbol)
+        self.assertEqual(report['segments'][2]['status'], 'inconclusive')
+        expected_count = report['segments'][2]['expected_token_count']
+        self.assertEqual(report['segments'][2]['observed_token_count'], expected_count)
+
     def test_mux_offset_and_model_failure_fail_closed(self):
         shifted = [(text, start + .002, end + .002, probability)
                    for text, start, end, probability in self.recognized]
