@@ -182,7 +182,7 @@ const reportEnv = {
 test('delivers the exact report to the already-bound callback without reserializing or forwarding redirects', async () => {
   const stored = await deliverTipV11Report(reportBytes, reportEnv, async (url, options) => {
     assert.equal(url.href, `${reportEnv.TIP_CALLBACK_URL}&action=tip-v11-report`);
-    assert.equal(options.redirect, 'error');
+    assert.equal(options.redirect, 'manual');
     assert.equal(options.method, 'POST');
     assert.equal(options.headers['X-Job-Id'], jobId);
     assert.equal(options.headers['Content-Type'], 'application/json');
@@ -193,11 +193,14 @@ test('delivers the exact report to the already-bound callback without reserializ
   assert.equal(stored, true);
 });
 
-test('the optional callback never retries an old Worker, nor sends a token to another host', async () => {
+test('the optional callback never retries explicit refusals or sends a token to another host', async () => {
   for (const refusal of [
     async () => Response.json({ error: 'status invalide' }, { status: 400 }),
+    async () => new Response(null, { status: 401 }),
+    async () => new Response(null, { status: 409 }),
+    async () => new Response(null, { status: 422 }),
     async () => Response.json({ ok: true }),
-    async () => { throw new Error('unavailable'); },
+    async () => Response.redirect('https://example.test/report', 307),
   ]) {
     let calls = 0;
     const stored = await deliverTipV11Report(reportBytes, reportEnv, async (...args) => {
@@ -214,4 +217,42 @@ test('the optional callback never retries an old Worker, nor sends a token to an
   }, neverFetch), false);
   assert.equal(await deliverTipV11Report(Buffer.alloc(128 * 1024 + 1), reportEnv, neverFetch), false);
   assert.equal(requested, false);
+});
+
+test('replays only exact report bytes to the original target after transport failure and throttling', async () => {
+  const attempts = [];
+  const stored = await deliverTipV11Report(reportBytes, reportEnv, async (url, options) => {
+    attempts.push({ href: url.href, ...options });
+    if (attempts.length === 1) throw new TypeError('connection reset');
+    if (attempts.length === 2) return new Response(null, { status: 429 });
+    return new Response(null, { status: 204 });
+  });
+  assert.equal(stored, true);
+  assert.equal(attempts.length, 3);
+  for (const { href, body, headers, method, redirect } of attempts) {
+    assert.equal(href, `${reportEnv.TIP_CALLBACK_URL}&action=tip-v11-report`);
+    assert.strictEqual(body, reportBytes);
+    assert.equal(headers.Authorization, `Bearer ${reportEnv.TIP_CALLBACK_TOKEN}`);
+    assert.equal(method, 'POST');
+    assert.equal(redirect, 'manual');
+  }
+  assert.equal(new Set(attempts.map(attempt => attempt.signal)).size, 3);
+});
+
+test('caps transient server failures and stops immediately at a refusal after an outage', async () => {
+  let calls = 0;
+  const unavailable = await deliverTipV11Report(reportBytes, reportEnv, async () => {
+    calls++;
+    return new Response(null, { status: 503 });
+  });
+  assert.equal(unavailable, false);
+  assert.equal(calls, 3);
+
+  calls = 0;
+  const rejected = await deliverTipV11Report(reportBytes, reportEnv, async () => {
+    calls++;
+    return new Response(null, { status: calls === 1 ? 502 : 422 });
+  });
+  assert.equal(rejected, false);
+  assert.equal(calls, 2);
 });
