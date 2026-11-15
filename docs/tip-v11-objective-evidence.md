@@ -35,3 +35,11 @@ Un audit sans manifeste reste utilisable localement. Le workflow ne joint pas de
 ```sh
 python3 -m unittest discover -s scripts -p 'test_audit_tip_v11*.py'
 ```
+
+### Visibilité de la marque et des coordonnées
+
+Avec `--brand-logo public/tip-v11/logo.png`, l’audit lit dans le MP4 exact les images sélectionnées à l’introduction et dans les passages de fin. Les passages animés sont échantillonnés après leur transition. Cette mesure s’applique à la recette dont l’écran de fin affiche « Contactez Jamm Immo ». Les logos sont comparés aux couleurs opaques du fichier officiel épinglé. Pour le titre d’appel, le domaine, le numéro, la mention WhatsApp et le nom Jamm Immo, Tesseract mesure les rectangles du texte reconnu et vérifie les mots attendus. Le numéro conserve le signe `+`, chaque chiffre et leur ordre.
+
+Le champ `final_brand_cta_visibility` indique les images et les rectangles mesurés dans le masque `tip-v11-observed-short-feed-brand-20261114-v1`. Une mesure absente, des coordonnées hors masque ou une différence donnent `inconclusive`. Ce champ couvre les pixels de marque et de contact à ces instants sur l’habillage de référence. Les droits, le fonctionnement des coordonnées, la confidentialité, le wolof et l’accent relèvent de la politique éditoriale.
+
+La fixture `scripts/fixtures/tip-v11-brand-cta-smoke.json` produit un clip silencieux et fictif de 168 images. Avec le navigateur Remotion déjà installé, elle permet de tester le vérificateur sur un MP4 H.264 1080 × 1920 sans appel à la synthèse vocale. Les huit mesures ont concordé avec Tesseract `eng` en local. Une version réencodée, avec une partie du logo masquée à l’introduction et les derniers chiffres remplacés sur l’image du numéro, a rendu ces deux mesures inconcluantes et les six autres concordantes. Le workflow utilise le modèle `fra`.

@@ -16,6 +16,7 @@ from tempfile import TemporaryDirectory
 import unicodedata
 import wave
 
+from audit_tip_v11_brand_cta import measure_final_brand_cta
 from audit_tip_v11_speech import measure_final_french_speech
 
 
@@ -319,6 +320,9 @@ def audit(args):
         speech = {'final_french_speech': measure_final_french_speech(
             alignment['segments'], decoded_pcm, audio, folder,
         )} if args.measure_final_french else {}
+        visibility = {'final_brand_cta_visibility': measure_final_brand_cta(
+            video, alignment, args.brand_logo, args.ocr_language,
+        )} if getattr(args, 'brand_logo', None) else {}
     return {
         'contract': 'tip-v11-fr-objective-media-evidence-v1',
         'passed': audio['passed'] and text['passed'],
@@ -331,6 +335,7 @@ def audit(args):
         'scope': 'Waveform, sampled OCR and optional French speech evidence. No rights, privacy, or accent assessment.',
         **bound,
         **speech,
+        **visibility,
     }
 
 
@@ -345,6 +350,7 @@ def main():
     parser.add_argument('--raw-wav', type=Path)
     parser.add_argument('--ocr-language', default='eng')
     parser.add_argument('--measure-final-french', action='store_true')
+    parser.add_argument('--brand-logo', type=Path, help='Audit visible brand and CTA in the final MP4 with the pinned logo')
     parser.add_argument('--report', type=Path, required=True)
     args = parser.parse_args()
     if any((args.render_manifest, args.render_props, args.raw_wav)) and not all((args.render_manifest, args.render_props, args.raw_wav)):
