@@ -9,7 +9,6 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
 const MAX_RECEIPT_BYTES = 4096;
 const UPLOAD_TIMEOUT_MS = 60_000;
-const TEMPORARY_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 const RETRY_DELAYS_MS = [250, 1000];
 const MAX_RETRY_DELAY_MS = 10_000;
 
@@ -99,7 +98,8 @@ export async function deliverTipVideo({ video, digest, duration }, env, {
       if (response.redirected) return 'rejected';
       if (response.status === 200) return await confirmsAttachment(response, jobId) ? 'attached' : 'rejected';
       await response.body?.cancel().catch(() => {});
-      if (!TEMPORARY_STATUSES.has(response.status)) return 'rejected';
+      const status = response.status;
+      if (status !== 408 && status !== 429 && (status < 500 || status > 599)) return 'rejected';
     } catch {
       // Losing the reply may mean attachment succeeded. Only this exact
       // attempt and unchanged video/attestation can be sent again.

@@ -65,6 +65,12 @@ test('transient status handling is bounded, honors backoff and never counts a mi
   assert.deepEqual(delays, [5000, 1000]);
   assert.equal(queue.length, 0);
 
+  const edgeReplies = [new Response(null, { status: 522 }), new Response(null, { status: 524 }), Response.json(attached)];
+  assert.equal(await deliverTipVideo(input, env, {
+    request: async () => edgeReplies.shift(), sleep: async () => {},
+  }), 'attached');
+  assert.equal(edgeReplies.length, 0);
+
   let count = 0;
   assert.equal(await deliverTipVideo(input, env, {
     request: async () => { count++; return new Response(null, { status: 502 }); }, sleep: async () => {},
