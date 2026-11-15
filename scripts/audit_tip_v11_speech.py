@@ -70,6 +70,7 @@ def recognize_with_timeout(wav_path):
 def words_by_segment(segments, recognized_words, lag_samples):
     observed = [[] for _ in segments]
     low_confidence = set()
+    ambiguous_boundary = set()
     offset = lag_samples / SAMPLE_RATE
     previous = 0
     index = 0
@@ -89,23 +90,22 @@ def words_by_segment(segments, recognized_words, lag_samples):
             index += 1
         segment = segments[index]
         excluded = segment['id'] in EXCLUDED_SEGMENTS
-        # Scene boundaries are approximate. Do not silently hide a French word
-        # that straddles an unverified greeting or sign-off.
-        in_other_scope = any(
-            part['start'] < end and start < part['end'] and (part['id'] in EXCLUDED_SEGMENTS) != excluded
-            for part in segments
-        )
-        if not segment['start'] <= middle < segment['end'] or in_other_scope:
+        if not segment['start'] <= middle < segment['end']:
             raise ValueError('recognized word ambiguous at a scene boundary')
+        # A word spanning verified and excluded speech blocks acceptance.
+        # Keep the measurements for French scenes that the word did not touch.
+        overlaps = [i for i, part in enumerate(segments) if part['start'] < end and start < part['end']]
+        if any((segments[i]['id'] in EXCLUDED_SEGMENTS) != excluded for i in overlaps):
+            ambiguous_boundary.update(i for i in overlaps if segments[i]['id'] not in EXCLUDED_SEGMENTS)
         if not excluded:
             observed[index].append(text.strip())
             if probability < MIN_WORD_PROBABILITY:
                 low_confidence.add(index)
-    return observed, low_confidence
+    return observed, low_confidence, ambiguous_boundary
 
 
 def compare_french_segments(segments, recognized_words, lag_samples):
-    observed, low_confidence = words_by_segment(segments, recognized_words, lag_samples)
+    observed, low_confidence, ambiguous_boundary = words_by_segment(segments, recognized_words, lag_samples)
     results = []
     for index, segment in enumerate(segments):
         identity = segment['id']
@@ -113,11 +113,14 @@ def compare_french_segments(segments, recognized_words, lag_samples):
             continue
         expected = normalized_words(identity, segment['text'])
         actual = normalized_words(identity, ' '.join(observed[index]))
-        matched = bool(expected) and actual == expected and index not in low_confidence
-        results.append({'segment': identity, 'status': 'matched' if matched else 'inconclusive',
-                        'expected_token_count': len(expected), 'observed_token_count': len(actual),
-                        'expected_sha256': sha256(' '.join(expected).encode()),
-                        'observed_sha256': sha256(' '.join(actual).encode())})
+        matched = bool(expected) and actual == expected and index not in low_confidence and index not in ambiguous_boundary
+        item = {'segment': identity, 'status': 'matched' if matched else 'inconclusive',
+                'expected_token_count': len(expected), 'observed_token_count': len(actual),
+                'expected_sha256': sha256(' '.join(expected).encode()),
+                'observed_sha256': sha256(' '.join(actual).encode())}
+        if index in ambiguous_boundary:
+            item['reason'] = 'mixed_language_boundary'
+        results.append(item)
     return results
 
 
@@ -139,6 +142,8 @@ def measure_final_french_speech(segments, decoded_pcm, waveform, directory, reco
         # Model/cache/inference failure must preserve the prior audit, without
         # including provider diagnostics, spoken text or local paths in it.
         return {**result, 'reason': 'recognizer_unavailable'}
+    if any(item.get('reason') == 'mixed_language_boundary' for item in results):
+        return {**result, 'reason': 'recognition_or_timing_inconclusive', 'segments': results}
     if not results or any(item['status'] != 'matched' for item in results):
         return {**result, 'reason': 'ordered_words_unconfirmed', 'segments': results}
     return {**result, 'status': 'matched', 'segments': results}

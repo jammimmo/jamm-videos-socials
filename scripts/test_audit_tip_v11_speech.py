@@ -81,12 +81,31 @@ class V11FinalSpeechTest(unittest.TestCase):
         self.assertEqual(self.measure([])['status'], 'inconclusive')
 
     def test_missing_timing_or_ambiguous_mixed_language_boundary_is_inconclusive(self):
-        for bad_word in [('mot', 1.8, 2.1, .93), ('mot', float('nan'), 2.1, .93), ('mot', 2.1, 2.3, 2.)]:
+        for bad_word in [('mot', 1.8, 2.1, .93), ('mot', float('nan'), 2.1, .93),
+                         ('mot', 2.1, 2.3, 2.), ('mot', 2.1, 2.1, .93)]:
             with self.subTest(bad_word=bad_word):
                 result = self.measure(self.recognized[:1] + [bad_word] + self.recognized[1:])
                 self.assertEqual(result['reason'], 'recognition_or_timing_inconclusive')
         repeated = [('bonjour', .2, .3, .9)] * (MAX_RECOGNIZED_WORDS + 1)
         self.assertEqual(self.measure(repeated)['reason'], 'recognition_or_timing_inconclusive')
+
+    def test_mixed_language_timing_reports_other_french_scenes_without_accepting_exact_but_ambiguous_words(self):
+        for index, end, affected in [(0, 2.06, 'hook'), (11, 11.12, 'phone')]:
+            with self.subTest(affected=affected):
+                recognized = self.recognized.copy()
+                text, start, _, probability = recognized[index]
+                recognized[index] = text, start, end, probability
+                result = self.measure(recognized)
+                self.assertEqual(result['status'], 'inconclusive')
+                self.assertEqual(result['reason'], 'recognition_or_timing_inconclusive')
+                self.assertEqual([row['segment'] for row in result['segments']], ['hook', 'domain', 'phone'])
+                for row in result['segments']:
+                    self.assertEqual(row['observed_sha256'], row['expected_sha256'])
+                    if row['segment'] == affected:
+                        self.assertEqual(row['status'], 'inconclusive')
+                        self.assertEqual(row['reason'], 'mixed_language_boundary')
+                    else:
+                        self.assertEqual(row['status'], 'matched')
 
     def test_mux_offset_and_model_failure_fail_closed(self):
         shifted = [(text, start + .002, end + .002, probability)
