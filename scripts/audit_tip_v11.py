@@ -16,7 +16,7 @@ from tempfile import TemporaryDirectory
 import unicodedata
 import wave
 
-from align_tip_v11 import ASR_REVISION, SIGNATURE_RETRY_ALIGNMENT_METHOD, WORD_ALIGNMENT_METHOD
+from align_tip_v11 import ASR_REVISION, SIGNATURE_RETRY_ALIGNMENT_METHOD, WORD_ALIGNMENT_METHOD, has_audible_narration
 from audit_tip_v11_brand_cta import measure_final_brand_cta
 from audit_tip_v11_speech import measure_final_french_speech
 
@@ -130,6 +130,23 @@ def find_lag(reference, final):
                key=lambda lag: similarity(reference, final, start, end, lag)[0])
 
 
+def signature_tail_matches(narration, final, start, end, lag):
+    # A quiet ending can fall below the mixed-audio floor of the 250 ms checks.
+    # Measure the last audible narration window using the alignment grid and
+    # the same lag as the rest of the render. This scene has no sound effect.
+    window_size = SAMPLE_RATE // 10
+    voice_end = min(end, len(narration))
+    first_window = start - start % window_size
+    for offset in reversed(range(first_window, voice_end, window_size)):
+        left, right = max(start, offset), min(offset + window_size, voice_end)
+        if has_audible_narration(narration[left:right]):
+            if left + lag < 0 or right + lag > len(final):
+                return False
+            score, gain, _ = similarity(narration, final, left, right, lag)
+            return score >= .94 and .65 <= gain <= 1.20
+    return False
+
+
 def measure_audio(segments, narration, mix, final):
     lag = find_lag(mix, final)
     window_size = SAMPLE_RATE // 4
@@ -148,6 +165,7 @@ def measure_audio(segments, narration, mix, final):
         passed = (
             voice_score >= .96 and .65 <= voice_gain <= 1.15 and bool(audible)
             and all(score >= .94 and .65 <= gain <= 1.20 for score, gain in audible)
+            and (segment['id'] != 'signature' or signature_tail_matches(narration, final, start, end, lag))
         )
         results.append({
             'segment': segment['id'], 'passed': passed,

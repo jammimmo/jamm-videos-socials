@@ -81,6 +81,10 @@ def caption_lines(text):
     return chunks
 
 
+def has_audible_narration(samples):
+    return bool(samples) and sum(sample * sample for sample in samples) > len(samples) * 135 ** 2
+
+
 def audible_windows(pcm, sample_rate):
     samples = array('h')
     samples.frombytes(pcm)
@@ -89,7 +93,7 @@ def audible_windows(pcm, sample_rate):
     window = sample_rate // 10
     for index in range(0, len(samples), window):
         chunk = samples[index:index + window]
-        if chunk and sum(sample * sample for sample in chunk) > len(chunk) * 135 ** 2:
+        if has_audible_narration(chunk):
             yield (index / sample_rate, min(index + window, len(samples)) / sample_rate)
 
 

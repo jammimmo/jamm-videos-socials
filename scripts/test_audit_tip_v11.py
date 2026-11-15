@@ -37,6 +37,24 @@ class V11FinalEvidenceTest(unittest.TestCase):
         self.assertTrue(result['segments'][0]['passed'])
         self.assertFalse(result['segments'][1]['passed'])
 
+    def test_rejects_a_muted_quiet_signature_tail(self):
+        tail_start, tail_end = 36 * SAMPLE_RATE // 10, 37 * SAMPLE_RATE // 10
+        silence_start = SAMPLE_RATE * 7 // 2
+        tail = array.array('h', (round(sample / 8) for sample in self.voice[tail_start:tail_end]))
+        self.voice[silence_start:] = array.array('h', [0]) * (len(self.voice) - silence_start)
+        self.voice[tail_start:tail_end] = tail
+        lag = 48
+        final = array.array('h', [0]) * lag
+        final.extend(round(sample * .707) for sample in self.voice)
+        segments = [self.segments[0], {**self.segments[1], 'id': 'signature'}]
+        self.assertTrue(measure_audio(segments, self.voice, self.voice, final)['passed'])
+
+        final[tail_start + lag:tail_end + lag] = array.array('h', [0]) * len(tail)
+        result = measure_audio(segments, self.voice, self.voice, final)
+        self.assertFalse(result['passed'])
+        self.assertTrue(result['segments'][0]['passed'])
+        self.assertFalse(result['segments'][1]['passed'])
+
     def test_contact_ocr_preserves_meaningful_punctuation_and_digits(self):
         phone = normalized_ocr_text('phone', '+221 76 944 48 49')
         self.assertNotEqual(phone, normalized_ocr_text('phone', '221 76 944 48 49'))
