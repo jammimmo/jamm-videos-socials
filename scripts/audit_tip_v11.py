@@ -16,6 +16,8 @@ from tempfile import TemporaryDirectory
 import unicodedata
 import wave
 
+from audit_tip_v11_speech import measure_final_french_speech
+
 
 SAMPLE_RATE = 24_000
 FPS = 30
@@ -309,11 +311,14 @@ def audit(args):
                 alignment_data, alignment, media_sha, sha256(limited_read(args.raw_wav, 8 * 1024 * 1024)),
                 narration_sha, mix_sha, args.mix_wav.name,
             )
-        final = pcm(command('ffmpeg', '-v', 'error', '-protocol_whitelist', 'file,pipe', '-f', 'mov',
+        decoded_pcm = command('ffmpeg', '-v', 'error', '-protocol_whitelist', 'file,pipe', '-f', 'mov',
                             '-i', video, '-map', '0:a:0',
-                            '-t', str(MAX_PCM_SECONDS), '-ac', '1', '-ar', str(SAMPLE_RATE), '-f', 's16le', '-'))
-        audio = measure_audio(alignment['segments'], narration, mix, final)
+                            '-t', str(MAX_PCM_SECONDS), '-ac', '1', '-ar', str(SAMPLE_RATE), '-f', 's16le', '-')
+        audio = measure_audio(alignment['segments'], narration, mix, pcm(decoded_pcm))
         text = measure_text(video, alignment, args.ocr_language)
+        speech = {'final_french_speech': measure_final_french_speech(
+            alignment['segments'], decoded_pcm, audio, folder,
+        )} if args.measure_final_french else {}
     return {
         'contract': 'tip-v11-fr-objective-media-evidence-v1',
         'passed': audio['passed'] and text['passed'],
@@ -323,8 +328,9 @@ def audit(args):
         'media_shape': shape, 'audio_waveform': audio, 'sampled_frame_ocr': text,
         'status': 'matched' if audio['passed'] and text['passed'] else 'needs_review',
         'editorial_approval': False,
-        'scope': 'Waveform comparison and sampled OCR only. No rights, privacy, content, or accent assessment.',
+        'scope': 'Waveform, sampled OCR and optional French speech evidence. No rights, privacy, or accent assessment.',
         **bound,
+        **speech,
     }
 
 
@@ -338,6 +344,7 @@ def main():
     parser.add_argument('--render-props', type=Path)
     parser.add_argument('--raw-wav', type=Path)
     parser.add_argument('--ocr-language', default='eng')
+    parser.add_argument('--measure-final-french', action='store_true')
     parser.add_argument('--report', type=Path, required=True)
     args = parser.parse_args()
     if any((args.render_manifest, args.render_props, args.raw_wav)) and not all((args.render_manifest, args.render_props, args.raw_wav)):

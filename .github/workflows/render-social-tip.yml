@@ -69,7 +69,8 @@ jobs:
           export TIP_V11_ALIGNMENT_FAILURE_CODE_FILE="${RUNNER_TEMP}/tip-v11-alignment-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           npm run render:batch -- --spec-file "${TIP_SPEC_FILE}" --voice-only
 
-      - name: Measure V11 audio and captions in the rendered MP4
+      - name: Measure V11 audio, French speech and captions in the rendered MP4
+        timeout-minutes: 6
         if: github.event.client_payload.contract == 'jamm-tip-render-v2'
         continue-on-error: true
         run: |
@@ -83,7 +84,7 @@ jobs:
             --raw-wav "public/audio/voiceovers/${STEM}.wav" \
             --narration-wav "public/audio/voiceovers/${STEM}-v11.wav" \
             --mix-wav "public/audio/voiceovers/${STEM}-v11-mix.wav" \
-            --ocr-language fra --report "out/batch/${STEM}.audit.json"
+            --ocr-language fra --measure-final-french --report "out/batch/${STEM}.audit.json"
 
       - name: Stream the MP4 to the Jamm Immo Worker
         run: |

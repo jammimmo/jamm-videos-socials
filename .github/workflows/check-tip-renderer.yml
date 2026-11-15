@@ -23,3 +23,4 @@ jobs:
       - run: npm run lint
       - run: npm run test:dispatch
       - run: python -m unittest discover -s scripts -p 'test_*align*.py'
+      - run: python -m unittest discover -s scripts -p 'test_audit_tip_v11*.py'
