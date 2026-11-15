@@ -174,9 +174,10 @@ def text_check(frame, label, language):
     left, top, right, bottom = bounds
     pixels = crop(frame, bounds)
     kind = 'P6'
-    if label == 'phone':
-        # The active phone group changes colour. Fixed luminance and a crop
-        # above its underline preserve every digit without changing geometry.
+    if label in ('domain', 'phone'):
+        # Use the same luminance mapping for the two-tone URL and highlighted
+        # phone digits. This keeps the URL divider from reading as punctuation
+        # without changing the crop or the OCR box coordinates.
         pixels = bytes((77 * red + 150 * green + 29 * blue) >> 8
                        for red, green, blue in zip(pixels[::3], pixels[1::3], pixels[2::3]))
         kind = 'P5'

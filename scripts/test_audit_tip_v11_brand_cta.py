@@ -7,7 +7,7 @@ from unittest.mock import patch
 from audit_tip_v11 import audit
 from audit_tip_v11_brand_cta import (
     CONTRACT, FRAME_PLAN, HEIGHT, MASK, OCR_TARGETS, WIDTH, check_tsv, decode_frames, logo_check, measure_final_brand_cta,
-    sample_plan,
+    sample_plan, text_check,
 )
 
 
@@ -47,6 +47,28 @@ class BrandCtaEvidenceTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'outside input crop'):
             check_tsv('phone', bounds, expected, tsv([(-1, 12, 35, 38, 98., '+221')]))
         self.assertFalse(check_tsv('phone', (0, 898, 110, 972), expected, tsv(recognized))[0])
+
+    def test_domain_uses_luminance_and_keeps_exact_punctuation_confidence_and_geometry(self):
+        bounds, psm, _ = OCR_TARGETS['domain']
+        left, top, right, bottom = bounds
+        count = (right - left) * (bottom - top)
+        rgb = bytes((255, 240, 220, 255, 180, 107)) * (count // 2)
+        with patch('audit_tip_v11_brand_cta.crop', return_value=rgb) as take_crop, \
+             patch('audit_tip_v11_brand_cta.run') as run_ocr:
+            run_ocr.return_value = tsv([(3, 14, 517, 66, 83.65, 'jammimmo.com')])
+            passed, box, metric = text_check(None, 'domain', 'fra')
+            self.assertTrue(passed)
+            self.assertEqual(box, (left + 3, top + 14, left + 520, top + 80))
+            self.assertEqual(metric['expected_sha256'], metric['observed_sha256'])
+            self.assertEqual(metric['min_confidence_milli'], 83650)
+            take_crop.assert_called_once_with(None, bounds)
+            self.assertEqual(run_ocr.call_args.args, ('tesseract', ['stdin', 'stdout', '-l', 'fra', '--psm', str(psm), 'tsv']))
+            header = f'P5\n{right - left} {bottom - top}\n255\n'.encode()
+            self.assertEqual(run_ocr.call_args.kwargs['data'], header + bytes((242, 194)) * (count // 2))
+            for observed, confidence in [('jammimmo.com.', 98.), ('jammimmo.net', 98.), ('jammimmo.com', 59.9)]:
+                with self.subTest(observed=observed, confidence=confidence):
+                    run_ocr.return_value = tsv([(3, 14, 517, 66, confidence, observed)])
+                    self.assertFalse(text_check(None, 'domain', 'fra')[0])
 
     def test_color_pattern_reveals_a_partially_covered_logo(self):
         pixels = bytearray(WIDTH * HEIGHT * 3)
