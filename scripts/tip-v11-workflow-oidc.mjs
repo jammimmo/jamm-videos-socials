@@ -55,7 +55,7 @@ async function requestGithubOidc(audience, env, fetchToken) {
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   try {
     const token = await requestTipWorkflowOidc(readFileSync(0, 'utf8'), process.env);
-    // This command's output is captured by the workflow into curl's stdin.
+    // The workflow captures this output for the attempt-bound upload.
     process.stdout.write(token);
   } catch {
     process.stderr.write('V11 workflow attestation unavailable; editorial review required\n');

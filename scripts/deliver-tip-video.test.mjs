@@ -1,0 +1,104 @@
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { createServer } from 'node:http';
+import test from 'node:test';
+import { deliverTipVideo } from './deliver-tip-video.mjs';
+
+const jobId = '00000000-0000-4000-8000-000000000011';
+const attempt = '00000000-0000-4000-8000-000000000022';
+const url = 'https://jammimmo-estate-flow.jammimmo221admin.workers.dev/api/tour/upload?attempt=' + attempt;
+const token = 'a'.repeat(64);
+const env = { TIP_JOB_ID: jobId, TIP_CALLBACK_TOKEN: token, TIP_UPLOAD_URL: url,
+  TIP_RENDER_EVIDENCE: '{"fixture":true}', TIP_WORKFLOW_ATTESTATION: 'signed.example.token' };
+const media = Buffer.from('exact private video bytes');
+const digest = createHash('sha256').update(media).digest('hex');
+const input = { video: media, digest, duration: 70 };
+const attached = { ok: true, jobId, status: 'succeeded', attached: true };
+
+test('lost reply after attachment resends the same attempt, bytes and signed headers', async t => {
+  const seen = [];
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    seen.push({ body: Buffer.concat(chunks), headers: request.headers, url: request.url });
+    if (seen.length === 1) {
+      // The receiver accepted the first body, but the client cannot observe its receipt.
+      response.destroy();
+    } else {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(attached));
+    }
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const local = `http://127.0.0.1:${server.address().port}`;
+  const delays = [];
+  const result = await deliverTipVideo(input, env, {
+    request: (target, options) => {
+      assert.equal(target.href, url);
+      assert.equal(options.redirect, 'manual');
+      return fetch(local + target.pathname + target.search, options);
+    },
+    sleep: async delay => { delays.push(delay); },
+  });
+  assert.equal(result, 'attached');
+  assert.deepEqual(delays, [250]);
+  assert.equal(seen.length, 2);
+  for (const request of seen) {
+    assert.deepEqual(request.body, media);
+    assert.equal(request.url, '/api/tour/upload?attempt=' + attempt);
+    assert.equal(request.headers.authorization, 'Bearer ' + token);
+    assert.equal(request.headers['x-media-sha256'], digest);
+    assert.equal(request.headers['x-tip-render-evidence'], env.TIP_RENDER_EVIDENCE);
+    assert.equal(request.headers['x-tip-workflow-oidc'], env.TIP_WORKFLOW_ATTESTATION);
+    assert.equal(request.headers['content-length'], String(media.length));
+  }
+});
+
+test('transient status handling is bounded, honors backoff and never counts a missing receipt as attachment', async () => {
+  const delays = [];
+  const queue = [new Response(null, { status: 503, headers: { 'Retry-After': '5' } }),
+    new Response(null, { status: 429 }), Response.json(attached)];
+  assert.equal(await deliverTipVideo(input, env, {
+    request: async () => queue.shift(),
+    sleep: async value => { delays.push(value); },
+  }), 'attached');
+  assert.deepEqual(delays, [5000, 1000]);
+  assert.equal(queue.length, 0);
+
+  let count = 0;
+  assert.equal(await deliverTipVideo(input, env, {
+    request: async () => { count++; return new Response(null, { status: 502 }); }, sleep: async () => {},
+  }), 'temporarily_unavailable');
+  assert.equal(count, 3);
+
+  count = 0;
+  assert.equal(await deliverTipVideo(input, env, {
+    request: async () => { count++; return new Response(null, { status: 429, headers: { 'Retry-After': '60' } }); },
+    sleep: async () => assert.fail('do not ignore a backoff outside the workflow budget'),
+  }), 'temporarily_unavailable');
+  assert.equal(count, 1);
+
+  const badReceipts = [Response.json({ ...attached, jobId: attempt }), Response.json({ ...attached, attached: false }),
+    new Response('x'.repeat(4097))];
+  for (const receipt of badReceipts) {
+    assert.equal(await deliverTipVideo(input, env, {
+      request: async () => receipt, sleep: async () => assert.fail('an invalid receipt is an explicit refusal'),
+    }), 'rejected');
+  }
+});
+
+test('stale claims, bad permissions, redirects and drifted local bytes are terminal refusals', async () => {
+  for (const status of [307, 400, 401, 409, 422]) {
+    let calls = 0;
+    assert.equal(await deliverTipVideo(input, env, {
+      request: async () => { calls++; return new Response(null, { status }); },
+      sleep: async () => assert.fail('never replay an explicit refusal'),
+    }), 'rejected');
+    assert.equal(calls, 1);
+  }
+  const forbidden = async () => assert.fail('invalid source or destination must not send a body');
+  assert.equal(await deliverTipVideo({ ...input, digest: 'b'.repeat(64) }, env, { request: forbidden }), 'rejected');
+  assert.equal(await deliverTipVideo(input, { ...env, TIP_UPLOAD_URL: url + '&status=failed' }, { request: forbidden }), 'rejected');
+  assert.equal(await deliverTipVideo(input, { ...env, TIP_UPLOAD_URL: url.replace('workers.dev', 'workers.dev.example') },
+    { request: forbidden }), 'rejected');
+});

@@ -96,31 +96,26 @@ jobs:
           SHA256=$(sha256sum "${VIDEO}" | cut -d' ' -f1)
           DURATION=$(node -p "require('./out/batch/tip-${TIP_JOB_ID}.media.json').durationHeader")
           REPORT="out/batch/tip-${TIP_JOB_ID}.audit.json"
-          EVIDENCE_HEADERS=()
-          OIDC_HEADER=""
-          if [ -s "${REPORT}" ] && EVIDENCE=$(node scripts/tip-v11-render-evidence.mjs "${REPORT}" "${SHA256}"); then
-            EVIDENCE_HEADERS=(-H "X-Tip-Render-Evidence: ${EVIDENCE}")
-            if ATTESTATION=$(printf '%s' "${EVIDENCE}" | node scripts/tip-v11-workflow-oidc.mjs); then
-              OIDC_HEADER="X-Tip-Workflow-OIDC: ${ATTESTATION}"
-            fi
+          EVIDENCE=""
+          ATTESTATION=""
+          if [ -s "${REPORT}" ]; then
+            EVIDENCE=$(node scripts/tip-v11-render-evidence.mjs "${REPORT}" "${SHA256}") || EVIDENCE=""
           fi
-          CODE=$(printf '%s\n' "${OIDC_HEADER}" | curl --fail-with-body --silent --show-error \
-            --output upload-response.json --write-out '%{http_code}' \
-            -X POST "${TIP_UPLOAD_URL}" \
-            -H "Authorization: Bearer ${TIP_CALLBACK_TOKEN}" \
-            --header @- \
-            -H 'Content-Type: video/mp4' \
-            -H "X-Job-Id: ${TIP_JOB_ID}" \
-            -H "X-Media-Sha256: ${SHA256}" \
-            -H "X-Duration: ${DURATION}" \
-            -H 'X-Width: 1080' \
-            -H 'X-Height: 1920' \
-            "${EVIDENCE_HEADERS[@]}" \
-            --data-binary @"${VIDEO}")
-          # The repository is public; keep draft URLs out of build logs.
-          test "${CODE}" = '200'
-          if [ -n "${OIDC_HEADER}" ]; then
-            unset ATTESTATION OIDC_HEADER
+          if [ -n "${EVIDENCE}" ]; then
+            ATTESTATION=$(printf '%s' "${EVIDENCE}" | node scripts/tip-v11-workflow-oidc.mjs) || ATTESTATION=""
+          fi
+          if TIP_RENDER_EVIDENCE="${EVIDENCE}" TIP_WORKFLOW_ATTESTATION="${ATTESTATION}" \
+            node scripts/deliver-tip-video.mjs "${VIDEO}" "${SHA256}" "${DURATION}"; then
+            :
+          else
+            delivery_status=$?
+            if [ "${delivery_status}" -eq 75 ]; then
+              printf '%s\n' 'pending' > "${RUNNER_TEMP}/tip-delivery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            fi
+            exit "${delivery_status}"
+          fi
+          if [ -n "${ATTESTATION}" ]; then
+            unset ATTESTATION
             node scripts/deliver-tip-v11-report.mjs "${REPORT}" || true
           fi
 
@@ -128,6 +123,10 @@ jobs:
         if: ${{ failure() }}
         continue-on-error: true
         run: |
+          if [ -f "${RUNNER_TEMP}/tip-delivery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]; then
+            echo 'Tip delivery remains subject to existing attempt recovery.'
+            exit 0
+          fi
           if [ -n "${TIP_UPLOAD_URL:-}" ] && [ -n "${TIP_CALLBACK_TOKEN:-}" ] && [ -n "${TIP_JOB_ID:-}" ]; then
             reason="render workflow failed"
             code_file="${RUNNER_TEMP}/tip-v11-alignment-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
