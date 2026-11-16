@@ -28,7 +28,7 @@ export function parseReviewedNarration(value, actualRendererSha) {
     ...(privateAttempt && { source: 'private-attempt' }) };
 }
 
-function isReviewedPcm(wav) {
+export function isReviewedPcm(wav) {
   if (wav.length < 44 || wav.toString('ascii', 0, 4) !== 'RIFF'
     || wav.readUInt32LE(4) !== wav.length - 8 || wav.toString('ascii', 8, 12) !== 'WAVE') return false;
   let validFormat = false;

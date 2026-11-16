@@ -50,16 +50,18 @@ class SignatureEvidenceError(ValueError):
         return {'reason': self.reason, 'matched_words': self.matched_words, 'expected_words': self.expected_words}
 
 
-def report_alignment_failure(error, code_path=None):
+def alignment_failure_diagnostics(error):
     if isinstance(error, SignatureEvidenceError):
-        diagnostics = error.diagnostics()
-    else:
-        reason = {
-            'Exact contact pronunciation not recognized: phone': 'phone_evidence_unconfirmed',
-            'Exact contact pronunciation not recognized: domain': 'website_evidence_unconfirmed',
-            'French speech differs substantially from the approved script': 'script_evidence_unconfirmed',
-        }.get(str(error), 'alignment_evidence_invalid')
-        diagnostics = {'reason': reason}
+        return error.diagnostics()
+    return {'reason': {
+        'Exact contact pronunciation not recognized: phone': 'phone_evidence_unconfirmed',
+        'Exact contact pronunciation not recognized: domain': 'website_evidence_unconfirmed',
+        'French speech differs substantially from the approved script': 'script_evidence_unconfirmed',
+    }.get(str(error), 'alignment_evidence_invalid')}
+
+
+def report_alignment_failure(error, code_path=None):
+    diagnostics = alignment_failure_diagnostics(error)
     print('V11 alignment: ' + json.dumps(diagnostics), file=sys.stderr)
     if code_path:
         try:

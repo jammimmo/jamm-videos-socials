@@ -599,6 +599,20 @@ def verify_services_samples(decoded_pcm, lag_samples, directory, segment, expect
     }
 
 
+def french_speech_outcome(segments, results):
+    if any(item.get('reason') == 'mixed_language_boundary' for item in results):
+        return {'status': 'inconclusive', 'reason': 'recognition_or_timing_inconclusive', 'segments': results}
+    if not results or any(item['status'] != 'matched' for item in results):
+        return {'status': 'inconclusive', 'reason': 'ordered_words_unconfirmed', 'segments': results}
+    total_words = sum(item['expected_token_count'] for item in results)
+    total_edits = sum(speech_edits(
+        normalized_words(segment['id'], segment['text']), item['observed_words'],
+    ) for segment, item in zip((segment for segment in segments if segment['id'] not in EXCLUDED_SEGMENTS), results))
+    if not total_words or total_edits * 100 > total_words * (100 - MIN_GLOBAL_ACCURACY_PERCENT):
+        return {'status': 'inconclusive', 'reason': 'ordered_words_unconfirmed', 'segments': results}
+    return {'status': 'matched', 'segments': results}
+
+
 def measure_final_french_speech(segments, decoded_pcm, waveform, directory, recognize=recognize_with_timeout,
                                 recognize_phone=recognize_final_window, *, narration=None, preservation=None,
                                 recognize_hook=recognize_final_window, recognize_services=recognize_final_window):
@@ -639,17 +653,7 @@ def measure_final_french_speech(segments, decoded_pcm, waveform, directory, reco
         # Model/cache/inference failure must preserve the prior audit, without
         # including provider diagnostics, spoken text or local paths in it.
         return {**result, 'reason': 'recognizer_unavailable'}
-    if any(item.get('reason') == 'mixed_language_boundary' for item in results):
-        return {**result, 'reason': 'recognition_or_timing_inconclusive', 'segments': results}
-    if not results or any(item['status'] != 'matched' for item in results):
-        return {**result, 'reason': 'ordered_words_unconfirmed', 'segments': results}
-    total_words = sum(item['expected_token_count'] for item in results)
-    total_edits = sum(speech_edits(
-        normalized_words(segment['id'], segment['text']), item['observed_words'],
-    ) for segment, item in zip((segment for segment in segments if segment['id'] not in EXCLUDED_SEGMENTS), results))
-    if not total_words or total_edits * 100 > total_words * (100 - MIN_GLOBAL_ACCURACY_PERCENT):
-        return {**result, 'reason': 'ordered_words_unconfirmed', 'segments': results}
-    return {**result, 'status': 'matched', 'segments': results}
+    return {**result, **french_speech_outcome(segments, results)}
 
 
 if __name__ == '__main__':
