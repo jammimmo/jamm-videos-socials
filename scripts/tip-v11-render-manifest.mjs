@@ -14,7 +14,7 @@ const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
 // load the logo, these fonts and the per-job mix. The lockfile pins Remotion
 // and the other package dependencies of that bundle.
 const V11_STATIC_FILES = [
-  'package-lock.json', 'remotion.config.ts',
+  'package-lock.json', 'remotion.config.ts', 'remotion.tip-v11.config.ts',
   'public/tip-v11/logo.png', 'public/tip-v11/fonts/Poppins-OFL.txt',
   ...[600, 700, 800].map(weight => `public/tip-v11/fonts/Poppins-normal-${weight}-latin.woff2`),
   'scripts/align_tip_v11.py', 'scripts/generate-gemini-voiceover.mjs', 'scripts/materialize-dispatched-tip.mjs',

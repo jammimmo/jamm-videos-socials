@@ -147,7 +147,8 @@ export async function renderTipV11(spec, {
   try {
     await run(resolve(root, 'node_modules/.bin/remotion'), [
       'render', 'src/index.ts', 'TipV11Fr', outFile, `--props=${propsPath}`,
-      '--codec=h264', '--audio-codec=aac', '--image-format=jpeg', '--concurrency=3', '--log=error',
+      '--config=remotion.tip-v11.config.ts', '--codec=h264', '--audio-codec=aac',
+      '--image-format=jpeg', '--concurrency=3', '--log=error',
     ], root);
     captionGeometry = await summarizeCaptionGeometry(props, geometryDirectory);
   } finally {

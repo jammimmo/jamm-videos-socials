@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   copyFile, cp, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile,
@@ -92,6 +93,7 @@ async function prepareScratchRoot(scratch) {
     copyFile(join(repository, 'package.json'), join(root, 'package.json')),
     copyFile(join(repository, 'package-lock.json'), join(root, 'package-lock.json')),
     copyFile(join(repository, 'remotion.config.ts'), join(root, 'remotion.config.ts')),
+    copyFile(join(repository, 'remotion.tip-v11.config.ts'), join(root, 'remotion.tip-v11.config.ts')),
     copyFile(join(repository, 'tsconfig.json'), join(root, 'tsconfig.json')),
     symlink(join(repository, 'node_modules'), join(root, 'node_modules'), 'dir'),
   ]);
@@ -142,11 +144,53 @@ async function main() {
     assert.equal(props.assistantEnabled, false);
     assert.ok(videoStat.size > 0 && videoStat.size <= 50 * 1024 * 1024);
 
+    const probe = spawnSync('ffprobe', [
+      '-v', 'trace', '-show_packets', '-show_entries',
+      'stream=codec_type,codec_name,sample_rate,channels,bit_rate,start_time,pix_fmt,field_order,nal_length_size:packet=codec_type,size,pos,flags',
+      '-of', 'json', video,
+    ], { encoding: 'utf8', timeout: 20_000, maxBuffer: 4 * 1024 * 1024 });
+    assert.equal(probe.status, 0);
+    const { streams, packets } = JSON.parse(probe.stdout);
+    const videoStream = streams.find(stream => stream.codec_type === 'video');
+    const audio = streams.find(stream => stream.codec_type === 'audio');
+    assert.equal(videoStream.field_order, 'progressive');
+    assert.match(videoStream.pix_fmt, /^yuvj?420p$/u);
+    assert.equal(Number(videoStream.start_time), 0);
+    assert.equal(audio.codec_name, 'aac');
+    assert.equal(audio.sample_rate, '48000');
+    assert.ok([1, 2].includes(audio.channels));
+    assert.ok(Number(audio.bit_rate) > 0 && Number(audio.bit_rate) <= 132_000);
+    assert.equal(Number(audio.start_time), 0);
+    const moov = probe.stderr.indexOf("type:'moov' parent:'root'");
+    const mdat = probe.stderr.indexOf("type:'mdat' parent:'root'");
+    assert.ok(moov >= 0 && mdat > moov, 'MP4 metadata must precede media data');
+    assert.doesNotMatch(probe.stderr, /type:'elst'/u);
+    const keyframes = packets.filter(packet => packet.codec_type === 'video' && packet.flags.includes('K'));
+    assert.ok(keyframes.length > 1, 'Expected several H.264 GOP boundaries');
+    assert.equal(Number(videoStream.nal_length_size), 4);
+    const videoBytes = await readFile(video);
+    for (const packet of keyframes) {
+      let cursor = Number(packet.pos);
+      const end = cursor + Number(packet.size);
+      assert.ok(end <= videoBytes.length);
+      let hasIdr = false;
+      while (cursor + 4 < end) {
+        const length = videoBytes.readUInt32BE(cursor);
+        cursor += 4;
+        assert.ok(length > 0 && cursor + length <= end);
+        hasIdr ||= (videoBytes[cursor] & 0x1f) === 5;
+        cursor += length;
+      }
+      assert.equal(cursor, end);
+      assert.ok(hasIdr, 'Each video keyframe must start a closed GOP');
+    }
+
     receipt = {
       status: 'passed', scope: 'non-publishable-offline-remotion-smoke',
       renderer: 'TipV11Fr', voiceSource: manifest.voice.source,
       alignment: alignment.provenance, captionGeometry: manifest.caption_geometry.status,
       duration: media.duration, width: media.width, height: media.height,
+      audioBitrate: Number(audio.bit_rate), closedGopKeyframes: keyframes.length,
       mediaSha256: manifest.media_sha256, retainedArtifact: false,
     };
   } finally {

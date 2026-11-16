@@ -1,0 +1,20 @@
+import './remotion.config';
+import { Config } from '@remotion/cli/config';
+
+Config.setAudioBitrate('128k');
+
+Config.overrideFfmpegCommand(({ type, args }) => {
+  // Remotion may encode before stitching or combine both operations.
+  const outputArgs = args.includes('libx264')
+    ? [...args.slice(0, -1), '-x264-params', 'open-gop=0', args[args.length - 1]]
+    : args;
+  if (type !== 'stitcher') return outputArgs;
+  const flags = args.indexOf('-movflags');
+  if (flags < 0 || args[flags + 1] !== 'faststart') {
+    throw new Error('V11 MP4 muxer did not provide its expected faststart flags');
+  }
+  return [
+    ...outputArgs.slice(0, flags + 1), 'faststart+negative_cts_offsets',
+    '-use_editlist', '0', ...outputArgs.slice(flags + 2),
+  ];
+});
