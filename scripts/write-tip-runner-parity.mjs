@@ -20,7 +20,9 @@ const version = (command, option = '--version') => {
 
 const fixtureLine = (await readFile(fixtureLog, 'utf8')).trim().split('\n').at(-1);
 const fixture = JSON.parse(fixtureLine);
-if (fixture.status !== 'passed' || fixture.scope !== 'non-publishable-offline-remotion-smoke' || fixture.retainedArtifact !== false) {
+const sha256 = /^[a-f0-9]{64}$/u;
+if (fixture.status !== 'passed' || fixture.scope !== 'non-publishable-offline-remotion-smoke' || fixture.retainedArtifact !== false
+  || ![fixture.decodedVideoSha256, fixture.decodedAudioSha256].every(value => typeof value === 'string' && sha256.test(value))) {
   throw new Error('Expected a completed synthetic renderer fixture');
 }
 const browser = await ensureBrowser({
@@ -29,7 +31,7 @@ const browser = await ensureBrowser({
 if (browser.type !== 'local-puppeteer-browser') throw new Error('Expected Remotion’s bundled Chromium');
 
 const receipt = {
-  schema: 'jamm-tip-runner-parity-v1',
+  schema: 'jamm-tip-runner-parity-v2',
   sourceSha,
   lockSha256: await digest(join(root, 'package-lock.json')),
   toolchain: {

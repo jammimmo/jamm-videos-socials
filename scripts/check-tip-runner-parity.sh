@@ -78,6 +78,7 @@ fi
 "${clean[@]}" npm ci --no-audit --no-fund
 "${clean[@]}" npm run lint
 "${clean[@]}" npm run test:dispatch
+"${clean[@]}" node --test scripts/tip-decoded-media-fingerprint.test.mjs
 "${clean[@]}" python -m unittest discover -s scripts -p 'test_*align*.py'
 "${clean[@]}" python -m unittest discover -s scripts -p 'test_audit_tip_v11*.py'
 git diff --exit-code HEAD --quiet --
