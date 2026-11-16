@@ -34,7 +34,7 @@ function retryDelay(response, fallback, now) {
   return Math.max(fallback, milliseconds);
 }
 
-async function confirmsAttachment(response, jobId) {
+async function confirmsDelivery(response, matchesReceipt) {
   const reader = response.body?.getReader();
   if (!reader) return false;
   const chunks = [];
@@ -55,28 +55,60 @@ async function confirmsAttachment(response, jobId) {
   }
   try {
     const result = JSON.parse(Buffer.concat(chunks, length).toString('utf8'));
-    return result?.ok === true && result.jobId === jobId && result.status === 'succeeded' && result.attached === true;
+    return matchesReceipt(result);
   } catch {
     return false;
   }
 }
 
-export async function deliverTipVideo({ video, digest, duration }, env, {
-  request = fetch, sleep = wait, now = Date.now,
-} = {}) {
+export function readTipDeliveryTarget(env) {
   const jobId = env.TIP_JOB_ID ?? '';
   const token = env.TIP_CALLBACK_TOKEN ?? '';
-  if (!Buffer.isBuffer(video) || video.length === 0 || video.length > MAX_VIDEO_BYTES
-    || !SHA256.test(digest) || createHash('sha256').update(video).digest('hex') !== digest
-    || !Number.isSafeInteger(duration) || duration < 1 || !UUID.test(jobId) || !SHA256.test(token)) return 'rejected';
+  if (!UUID.test(jobId) || !SHA256.test(token)) return null;
   let url;
   try {
     url = new URL(env.TIP_UPLOAD_URL);
   } catch {
-    return 'rejected';
+    return null;
   }
   if (url.origin !== TIP_DELIVERY_ORIGIN || url.pathname !== '/api/tour/upload' || url.username || url.password || url.hash
-    || url.searchParams.size !== 1 || !UUID.test(url.searchParams.get('attempt') ?? '')) return 'rejected';
+    || url.searchParams.size !== 1 || !UUID.test(url.searchParams.get('attempt') ?? '')) return null;
+  return { jobId, token, url };
+}
+
+export async function postTipDelivery(url, { headers, body, timeout }, matchesReceipt, {
+  request = fetch, sleep = wait, now = Date.now,
+} = {}) {
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    let response;
+    try {
+      response = await request(url, {
+        method: 'POST', headers, body, redirect: 'manual', signal: AbortSignal.timeout(timeout),
+      });
+      if (response.redirected) return 'rejected';
+      if (response.status === 200) return await confirmsDelivery(response, matchesReceipt) ? 'confirmed' : 'rejected';
+      await response.body?.cancel().catch(() => {});
+      const status = response.status;
+      if (status !== 408 && status !== 429 && (status < 500 || status > 599)) return 'rejected';
+    } catch {
+      // The Worker may already have recorded this request. Reuse the same
+      // attempt and payload to recover its receipt.
+    }
+    if (attempt === RETRY_DELAYS_MS.length) break;
+    const delay = retryDelay(response, RETRY_DELAYS_MS[attempt], now);
+    if (delay === null) break;
+    await sleep(delay);
+  }
+  return 'temporarily_unavailable';
+}
+
+export async function deliverTipVideo({ video, digest, duration }, env, transport) {
+  if (!Buffer.isBuffer(video) || video.length === 0 || video.length > MAX_VIDEO_BYTES
+    || !SHA256.test(digest) || createHash('sha256').update(video).digest('hex') !== digest
+    || !Number.isSafeInteger(duration) || duration < 1) return 'rejected';
+  const target = readTipDeliveryTarget(env);
+  if (!target) return 'rejected';
+  const { jobId, token, url } = target;
 
   const evidence = env.TIP_RENDER_EVIDENCE ?? '';
   const attestation = env.TIP_WORKFLOW_ATTESTATION ?? '';
@@ -89,27 +121,10 @@ export async function deliverTipVideo({ video, digest, duration }, env, {
     ...(evidence && { 'X-Tip-Render-Evidence': evidence }),
     ...(attestation && { 'X-Tip-Workflow-OIDC': attestation }),
   };
-  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
-    let response;
-    try {
-      response = await request(url, {
-        method: 'POST', headers, body: video, redirect: 'manual', signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
-      });
-      if (response.redirected) return 'rejected';
-      if (response.status === 200) return await confirmsAttachment(response, jobId) ? 'attached' : 'rejected';
-      await response.body?.cancel().catch(() => {});
-      const status = response.status;
-      if (status !== 408 && status !== 429 && (status < 500 || status > 599)) return 'rejected';
-    } catch {
-      // Losing the reply may mean attachment succeeded. Only this exact
-      // attempt and unchanged video/attestation can be sent again.
-    }
-    if (attempt === RETRY_DELAYS_MS.length) break;
-    const delay = retryDelay(response, RETRY_DELAYS_MS[attempt], now);
-    if (delay === null) break;
-    await sleep(delay);
-  }
-  return 'temporarily_unavailable';
+  const result = await postTipDelivery(url, { headers, body: video, timeout: UPLOAD_TIMEOUT_MS },
+    receipt => receipt?.ok === true && receipt.jobId === jobId && receipt.status === 'succeeded' && receipt.attached === true,
+    transport);
+  return result === 'confirmed' ? 'attached' : result;
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {

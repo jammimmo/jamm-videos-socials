@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import test from 'node:test';
 import { deliverTipVideo } from './deliver-tip-video.mjs';
+import { deliverTipFailure } from './deliver-tip-failure.mjs';
 
 const jobId = '00000000-0000-4000-8000-000000000011';
 const attempt = '00000000-0000-4000-8000-000000000022';
@@ -107,4 +108,77 @@ test('stale claims, bad permissions, redirects and drifted local bytes are termi
   assert.equal(await deliverTipVideo(input, { ...env, TIP_UPLOAD_URL: url + '&status=failed' }, { request: forbidden }), 'rejected');
   assert.equal(await deliverTipVideo(input, { ...env, TIP_UPLOAD_URL: url.replace('workers.dev', 'workers.dev.example') },
     { request: forbidden }), 'rejected');
+});
+
+const failure = 'V11 speech alignment failed (signature_retry_insufficient); GitHub run 123';
+const failed = { ok: true, jobId, status: 'failed' };
+
+test('terminal failure retries the unchanged signed callback after transport loss and temporary refusal', async () => {
+  const requests = [];
+  const delays = [];
+  const result = await deliverTipFailure(failure, env, {
+    request: async (target, options) => {
+      requests.push({ url: target.href, options });
+      if (requests.length === 1) throw new TypeError('fixture connection lost');
+      if (requests.length === 2) return new Response(null, { status: 503, headers: { 'Retry-After': '5' } });
+      return Response.json(failed);
+    },
+    sleep: async delay => { delays.push(delay); },
+  });
+  assert.equal(result, 'recorded');
+  assert.deepEqual(delays, [250, 5000]);
+  assert.equal(requests.length, 3);
+  for (const { url: target, options } of requests) {
+    assert.equal(target, url + '&status=failed');
+    assert.equal(options.method, 'POST');
+    assert.equal(options.redirect, 'manual');
+    assert.ok(options.signal instanceof AbortSignal);
+    assert.equal(options.body, undefined);
+    assert.deepEqual(options.headers, { Authorization: 'Bearer ' + token, 'X-Job-Id': jobId, 'X-Error': failure });
+  }
+});
+
+test('terminal failure bounds retries and honors bounded Retry-After dates', async () => {
+  const now = Date.parse('2026-11-16T00:00:00Z');
+  const replies = [new Response(null, { status: 408 }), new Response(null, { status: 429, headers: {
+    'Retry-After': new Date(now + 4000).toUTCString(),
+  } }), new Response(null, { status: 524 })];
+  const delays = [];
+  const result = await deliverTipFailure(failure, env, {
+    request: async () => replies.shift(), sleep: async delay => { delays.push(delay); }, now: () => now,
+  });
+  assert.equal(result, 'temporarily_unavailable');
+  assert.equal(replies.length, 0);
+  assert.deepEqual(delays, [250, 4000]);
+
+  let calls = 0;
+  assert.equal(await deliverTipFailure(failure, env, {
+    request: async () => { calls++; return new Response(null, { status: 503, headers: { 'Retry-After': '11' } }); },
+    sleep: async () => assert.fail('do not ignore a backoff outside the workflow budget'),
+  }), 'temporarily_unavailable');
+  assert.equal(calls, 1);
+});
+
+test('terminal failure stops on refusal, redirect or a response unrelated to the exact job', async () => {
+  const replies = [new Response(null, { status: 403 }), new Response(null, { status: 409 }),
+    new Response(null, { status: 302, headers: { Location: 'https://other.test/' } }),
+    Response.json({ ...failed, jobId: attempt }), Response.json({ ...failed, status: 'succeeded' }),
+    new Response('x'.repeat(4097))];
+  for (const reply of replies) {
+    let calls = 0;
+    assert.equal(await deliverTipFailure(failure, env, {
+      request: async () => { calls++; return reply; }, sleep: async () => assert.fail('do not replay an explicit refusal'),
+    }), 'rejected');
+    assert.equal(calls, 1);
+  }
+});
+
+test('terminal failure validates the callback scope before sending credentials', async () => {
+  const request = async () => assert.fail('invalid callback must not send credentials');
+  for (const TIP_UPLOAD_URL of [url + '&status=failed', url.replace('workers.dev', 'workers.dev.other.test'),
+    url.replace('/api/tour/upload', '/api/tour/callback'), url.replace(attempt, 'invalid'), url + '#fragment']) {
+    assert.equal(await deliverTipFailure(failure, { ...env, TIP_UPLOAD_URL }, { request }), 'rejected');
+  }
+  assert.equal(await deliverTipFailure(failure, { ...env, TIP_CALLBACK_TOKEN: 'invalid' }, { request }), 'rejected');
+  assert.equal(await deliverTipFailure('failure\r\nforged header', env, { request }), 'rejected');
 });
