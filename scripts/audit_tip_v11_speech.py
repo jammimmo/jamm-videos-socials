@@ -39,6 +39,12 @@ HOOK_QUIET_WINDOW = SAMPLE_RATE // 100
 HOOK_QUIET_MIN_SIDE = SAMPLE_RATE // 10
 HOOK_QUIET_MIN_TOTAL = SAMPLE_RATE * 3 // 10
 FIXED_BRAND_WORD_INDEX = {'services': 0, 'socials': 2}
+FIXED_DOMAIN_WORDS = ('retrouvez', 'nous', 'sur', 'notre', 'site', 'jamm', 'immo', 'point', 'com')
+FIXED_DOMAIN_JAMIMO_WORDS = ('retrouvez', 'nous', 'sur', 'notre', 'site', 'jamimo', 'com')
+FIXED_SOCIALS_WORDS = ('suivez', 'aussi', 'jamm', 'immo', 'sur', 'nos', 'reseaux', 'sociaux',
+                       'pour', 'retrouver', 'nos', 'prochains', 'conseils')
+FIXED_SOCIALS_BOUNDARY_WORDS = ('aussi', 'jam', 'imo', 'sur', 'nos', 'reseaux', 'sociaux',
+                                'pour', 'retrouver', 'nos', 'prochains', 'conseils')
 PROTECTED_SPEECH_WORDS = frozenset('''
 zero un une deux trois quatre cinq six sept huit neuf dix onze douze treize quatorze quinze seize
 vingt trente quarante cinquante soixante septante huitante octante nonante cent cents mille millier
@@ -104,7 +110,7 @@ def bounded_observed_words(words):
     return words
 
 
-def observed_words_with_uncertainty(identity, expected, raw_actual, actual, rows):
+def observed_words_with_uncertainty(identity, expected, raw_actual, actual, rows, alias_kind=None):
     """Replace only safely mapped, ordinary low-confidence ASR tokens with null."""
     token_rows = [normalized_words(identity, row[0]) for row in rows]
     flattened = [word for words in token_rows for word in words]
@@ -117,11 +123,20 @@ def observed_words_with_uncertainty(identity, expected, raw_actual, actual, rows
         return None, True
     reported = [None if row[3] < MIN_WORD_PROBABILITY else word
                 for words, row in zip(token_rows, rows) for word in words]
-    alias = fixed_brand_alias_index(identity, expected, raw_actual)
     if actual != raw_actual:
-        if alias is None or reported[alias:alias + 2] != ['jam', 'imo']:
-            return None, True
-        reported[alias:alias + 2] = ['jamm', 'immo']
+        if alias_kind == 'fixed_domain_jamimo':
+            if reported[5] not in ('jamimo', None):
+                return None, True
+            reported[5:6] = ['jamm', 'immo']
+        elif alias_kind == 'fixed_socials_boundary':
+            if reported[1:3] != ['jam', 'imo']:
+                return None, True
+            reported[1:3] = ['jamm', 'immo']
+        else:
+            alias = fixed_brand_alias_index(identity, expected, raw_actual)
+            if alias is None or reported[alias:alias + 2] != ['jam', 'imo']:
+                return None, True
+            reported[alias:alias + 2] = ['jamm', 'immo']
     return reported, False
 
 
@@ -152,7 +167,8 @@ def recognize_with_timeout(wav_path, timeout=RECOGNITION_TIMEOUT_SECONDS):
     return json.loads(completed.stdout)
 
 
-def words_by_segment(segments, recognized_words, lag_samples, *, opening_hook=None, hook_crossings=None):
+def words_by_segment(segments, recognized_words, lag_samples, *, opening_hook=None, hook_crossings=None,
+                     boundary_crossings=None):
     observed = [[] for _ in segments]
     ambiguous_boundary = set()
     offset = lag_samples / SAMPLE_RATE
@@ -185,7 +201,12 @@ def words_by_segment(segments, recognized_words, lag_samples, *, opening_hook=No
         # Keep the measurements for French scenes that the word did not touch.
         overlaps = [i for i, part in enumerate(segments) if part['start'] < end and start < part['end']]
         if any((segments[i]['id'] in EXCLUDED_SEGMENTS) != excluded for i in overlaps):
-            ambiguous_boundary.update(i for i in overlaps if segments[i]['id'] not in EXCLUDED_SEGMENTS)
+            affected = [i for i in overlaps if segments[i]['id'] not in EXCLUDED_SEGMENTS]
+            ambiguous_boundary.update(affected)
+            if boundary_crossings is not None:
+                overlap_ids = tuple(segments[i]['id'] for i in overlaps)
+                for affected_index in affected:
+                    boundary_crossings.setdefault(affected_index, []).append((row, overlap_ids))
         if not excluded and (not spoken_plus or segment['id'] == 'phone'):
             observed[index].append(row)
     return observed, ambiguous_boundary
@@ -214,6 +235,64 @@ def canonical_fixed_brand_words(identity, expected, actual, rows):
         or first[2] > second[1] or min(first[3], second[3]) < MIN_WORD_PROBABILITY):
         return actual
     return actual[:index] + ['jamm', 'immo'] + actual[index + 2:]
+
+
+def exact_row_token_index(identity, rows, expected_tokens):
+    """Locate an exact sequence of one-token, non-overlapping ASR rows."""
+    token_rows = [normalized_words(identity, row[0]) for row in rows]
+    matches = []
+    width = len(expected_tokens)
+    for index in range(len(rows) - width + 1):
+        if token_rows[index:index + width] != [[token] for token in expected_tokens]:
+            continue
+        selected = rows[index:index + width]
+        if any(left[2] > right[1] for left, right in zip(selected, selected[1:])):
+            continue
+        matches.append(index)
+    return matches[0] if len(matches) == 1 else None
+
+
+def fixed_domain_alias(expected, raw_actual, rows):
+    """Expand only the archived fixed-domain Jamimo row, never the absent point."""
+    if tuple(expected) != FIXED_DOMAIN_WORDS or tuple(raw_actual) != FIXED_DOMAIN_JAMIMO_WORDS:
+        return None
+    index = exact_row_token_index('domain', rows, ('jamimo', 'com'))
+    if index is None:
+        return None
+    brand, domain = rows[index:index + 2]
+    if min(brand[3], domain[3]) < MIN_WORD_PROBABILITY:
+        return None
+    return [*FIXED_DOMAIN_WORDS[:-2], 'com'], index
+
+
+def safe_socials_signature_boundary(segments, index, crossings, in_scene_rows):
+    if (segments[index]['id'] != 'socials' or index + 1 >= len(segments)
+        or segments[index + 1]['id'] != 'signature'
+        or abs(segments[index]['end'] - segments[index + 1]['start']) > .001
+        or len(crossings) != 1):
+        return None
+    row, overlap_ids = crossings[0]
+    tokens = normalized_words('', row[0])
+    boundary = segments[index]['end']
+    if (overlap_ids != ('socials', 'signature') or row in in_scene_rows or len(tokens) != 1 or row[0] == '+'
+        or row[3] < MIN_WORD_PROBABILITY or protected_speech(tokens)
+        or not row[1] < boundary < row[2]):
+        return None
+    return row
+
+
+def fixed_socials_boundary_alias(expected, raw_actual, rows, crossing):
+    """Keep the fixed CTA words once, with only the absent Suivez scored."""
+    if (crossing is None or tuple(expected) != FIXED_SOCIALS_WORDS
+        or tuple(raw_actual) != FIXED_SOCIALS_BOUNDARY_WORDS):
+        return None
+    index = exact_row_token_index('socials', rows, ('jam', 'imo'))
+    if index is None:
+        return None
+    first, second = rows[index:index + 2]
+    if min(first[3], second[3]) < MIN_WORD_PROBABILITY:
+        return None
+    return ['aussi', 'jamm', 'immo', *FIXED_SOCIALS_WORDS[4:]], index
 
 
 def exact_adjacent_split(left, right, rows, original_split, expected_left, expected_right):
@@ -278,8 +357,10 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
         and segments[0]['end'] == segments[1]['start'] and segments[1]['end'] == segments[2]['start']):
         opening_hook = segments[1]
     hook_crossings = []
+    boundary_crossings = {}
     observed, ambiguous_boundary = words_by_segment(
         segments, recognized_words, lag_samples, opening_hook=opening_hook, hook_crossings=hook_crossings,
+        boundary_crossings=boundary_crossings,
     )
     expected_words = [normalized_words(segment['id'], segment['text']) for segment in segments]
     actual_words = [segment_words(segment['id'], words) for segment, words in zip(segments, observed)]
@@ -308,11 +389,27 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
             continue
         expected = expected_words[index]
         raw_actual = segment_words(identity, observed[index])
-        actual = raw_actual if index in ambiguous_boundary else canonical_fixed_brand_words(
-            identity, expected, raw_actual, observed[index],
-        )
+        alias_kind = None
+        alias_index = None
+        crossing = safe_socials_signature_boundary(
+            segments, index, boundary_crossings.get(index, []), observed[index],
+        ) if index in ambiguous_boundary else None
+        socials_alias = fixed_socials_boundary_alias(expected, raw_actual, observed[index], crossing)
+        domain_alias = fixed_domain_alias(expected, raw_actual, observed[index]) if index not in ambiguous_boundary else None
+        if socials_alias:
+            actual, alias_index = socials_alias
+            alias_kind = 'fixed_socials_boundary'
+        elif domain_alias:
+            actual, alias_index = domain_alias
+            alias_kind = 'fixed_domain_jamimo'
+        elif index in ambiguous_boundary:
+            actual = raw_actual
+        else:
+            actual = canonical_fixed_brand_words(identity, expected, raw_actual, observed[index])
+            if actual != raw_actual:
+                alias_kind = 'fixed_jamm_immo'
         uncertain_actual, unsafe_uncertainty = observed_words_with_uncertainty(
-            identity, expected, raw_actual, actual, observed[index],
+            identity, expected, raw_actual, actual, observed[index], alias_kind,
         )
         reported = bounded_observed_words(uncertain_actual) if uncertain_actual is not None else None
         # A standalone sign can be numeric formatting. It needs the focused
@@ -324,19 +421,38 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
                   and edits * 100 <= len(expected) * (100 - MIN_SEGMENT_ACCURACY_PERCENT)
                   and protected_speech(reported) == protected_speech(expected)
                   and all(word[0] != '+' for word in observed[index]))
-        matched = scored and index not in ambiguous_boundary
+        matched = scored and (index not in ambiguous_boundary or alias_kind == 'fixed_socials_boundary')
         item = {'segment': identity, 'status': 'matched' if matched else 'inconclusive',
                 'expected_token_count': len(expected), 'observed_token_count': len(actual),
                 'expected_sha256': sha256(' '.join(expected).encode()),
                 'observed_words': reported or []}
         if reported is not None and all(word is not None for word in reported):
             item['observed_sha256'] = sha256(' '.join(reported).encode())
-        if matched and actual != raw_actual:
-            item['measurement'] = {
-                'method': 'fixed_jamm_immo_phonetic_spelling',
-                'raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
-            }
-        if index in ambiguous_boundary:
+        if matched and alias_kind:
+            if alias_kind == 'fixed_domain_jamimo':
+                item['measurement'] = {
+                    'method': 'fixed_domain_jamimo_phonetic_spelling',
+                    'raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
+                    'brand_probability_milli': round(observed[index][alias_index][3] * 1000),
+                    'visible_domain_required': True,
+                }
+            elif alias_kind == 'fixed_socials_boundary':
+                crossing_tokens = normalized_words('', crossing[0])
+                item['measurement'] = {
+                    'method': 'fixed_socials_signature_boundary',
+                    'raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
+                    'crossing_word_sha256': sha256(' '.join(crossing_tokens).encode()),
+                    'crossing_probability_milli': round(crossing[3] * 1000),
+                    'brand_min_probability_milli': round(min(
+                        observed[index][alias_index][3], observed[index][alias_index + 1][3],
+                    ) * 1000),
+                }
+            else:
+                item['measurement'] = {
+                    'method': 'fixed_jamm_immo_phonetic_spelling',
+                    'raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
+                }
+        if index in ambiguous_boundary and alias_kind != 'fixed_socials_boundary':
             item['reason'] = 'mixed_language_boundary'
             rows = observed[index]
             if (segment is opening_hook and exact and hook_crossings == rows[:1]

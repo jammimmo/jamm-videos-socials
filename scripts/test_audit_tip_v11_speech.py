@@ -203,6 +203,27 @@ class V11FinalSpeechTest(unittest.TestCase):
         self.assertEqual(report['segments'][0]['observed_words'], [word.lower() for word in heard_domain])
         self.assertNotIn('website', json.dumps(report), 'the separate exact screen receipt remains authoritative')
 
+        jamimo = [*domain[:5], ('Jamimo', .791), 'com']
+        report = self.measure_scenes(scenes, [jamimo, support])
+        self.assertEqual(report['status'], 'matched')
+        domain_row = report['segments'][0]
+        self.assertEqual(domain_row['observed_words'], [
+            'retrouvez', 'nous', 'sur', 'notre', 'site', 'jamm', 'immo', 'com',
+        ])
+        self.assertNotIn('point', domain_row['observed_words'])
+        self.assertEqual(domain_row['measurement']['method'], 'fixed_domain_jamimo_phonetic_spelling')
+        self.assertTrue(domain_row['measurement']['visible_domain_required'])
+
+        for held_domain in (
+            [*domain[:5], ('Jamimo', .599), 'com'],
+            ['Consultez', *domain[1:5], ('Jamimo', .9), 'com'],
+            [*domain[:5], ('Jamimmo', .9), 'com'],
+            [*domain[:5], ('Jamimo', .9), 'fr'],
+        ):
+            with self.subTest(held_domain=held_domain):
+                held = self.measure_scenes(scenes, [held_domain, support])
+                self.assertEqual(held['segments'][0]['status'], 'inconclusive')
+
     def test_v2_bounds_private_observed_words_fail_closed(self):
         segment = {'id': 'hook', 'text': 'conseil utile.', 'start': 0, 'end': 3}
         too_many = [(f'mot{index}', index / 100, index / 100 + .005, .9) for index in range(129)]
@@ -240,6 +261,69 @@ class V11FinalSpeechTest(unittest.TestCase):
                         self.assertEqual(row['reason'], 'mixed_language_boundary')
                     else:
                         self.assertEqual(row['status'], 'matched')
+
+    def test_fixed_socials_counts_missing_suivez_once_only_for_one_safe_signature_crossing(self):
+        scenes = [
+            {'id': 'socials',
+             'text': 'Suivez aussi Jamm Immo sur nos réseaux sociaux pour retrouver nos prochains conseils.',
+             'start': 0, 'end': 4},
+            {'id': 'signature', 'text': 'Jamm Immo ! Kër gu baax, xel mu dal !', 'start': 4, 'end': 6},
+        ]
+        spoken = 'aussi Jam Imo sur nos réseaux sociaux pour retrouver nos prochains conseils'.split()
+
+        def rows(*, crossing=('Keur', 3.9, 4.3, .91), brand_probability=.82, overlap_brand=False,
+                 drop=None, replace=None):
+            values = spoken.copy()
+            if drop is not None:
+                values.pop(drop)
+            if replace is not None:
+                values[replace[0]] = replace[1]
+            result = []
+            for index, word in enumerate(values):
+                start = .2 + index * .27
+                end = start + .18
+                probability = brand_probability if word in ('Jam', 'Imo') else .96
+                result.append((word, start, end, probability))
+            if overlap_brand:
+                word, start, _, probability = result[2]
+                result[2] = word, result[1][2] - .02, result[1][2] + .2, probability
+            if crossing is not None:
+                result.append(crossing)
+            return result
+
+        [row] = compare_french_segments(scenes, rows(), 0)
+        self.assertEqual(row['status'], 'matched')
+        self.assertEqual(row['observed_words'], [
+            'aussi', 'jamm', 'immo', 'sur', 'nos', 'reseaux', 'sociaux',
+            'pour', 'retrouver', 'nos', 'prochains', 'conseils',
+        ])
+        self.assertEqual(row['measurement']['method'], 'fixed_socials_signature_boundary')
+        self.assertEqual(row['expected_token_count'] - len(row['observed_words']), 1)
+        self.assertNotIn('keur', row['observed_words'])
+
+        held = [
+            rows(crossing=('non', 3.9, 4.3, .91)),
+            rows(crossing=('Keur', 3.9, 4.3, .59)),
+            rows(brand_probability=.59),
+            rows(overlap_brand=True),
+            rows(drop=5),
+            rows(replace=(3, 'avec')),
+            [*rows(), ('mot', 3.95, 4.5, .95)],
+        ]
+        for recognized in held:
+            with self.subTest(recognized=recognized):
+                [rejected] = compare_french_segments(scenes, recognized, 0)
+                self.assertEqual(rejected['status'], 'inconclusive')
+                self.assertEqual(rejected.get('reason'), 'mixed_language_boundary')
+
+        [without_crossing] = compare_french_segments(scenes, rows(crossing=None), 0)
+        self.assertEqual(without_crossing['status'], 'inconclusive')
+        self.assertNotIn('measurement', without_crossing)
+
+        variable = [{**scenes[0], 'id': 'hook'}, scenes[1]]
+        [rejected] = compare_french_segments(variable, rows(), 0)
+        self.assertEqual(rejected['status'], 'inconclusive')
+        self.assertEqual(rejected['reason'], 'mixed_language_boundary')
 
     def test_fixed_brand_spelling_requires_exact_separate_words_and_keeps_original_digest(self):
         services = {'id': 'services', 'text': 'Jamm Immo vous accompagne.', 'start': 0, 'end': 2}
