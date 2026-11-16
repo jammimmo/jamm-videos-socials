@@ -1,14 +1,21 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { buildTipV11Narration, TIP_V11_TEMPLATE } from './tip-v11-contract.mjs';
 import { voiceCacheHash } from './voice-profile.mjs';
 import { tipV11Effects } from './tip-v11-effects.mjs';
+import { buildTipV11RenderManifest, collectTipV11StaticFiles } from './tip-v11-render-manifest.mjs';
+import { geometryArtifactDirectory } from '../src/compositions/tip-v11-caption-geometry.ts';
+import { summarizeCaptionGeometry } from './tip-v11-caption-geometry.mjs';
+import { readStagedPrivateReviewedNarration, stageReviewedNarration } from './tip-v11-reviewed-narration.mjs';
 
 const MIN_NARRATION_SECONDS = 58.5;
 const MAX_NARRATION_SECONDS = 119;
 const DEFAULT_TEMPO = 1.03;
 const TEMPO_HEADROOM_SECONDS = 0.25;
+
+class TipNarrationDurationError extends Error {}
 
 function run(command, args, cwd) {
   return new Promise((resolvePromise, reject) => {
@@ -23,13 +30,15 @@ async function getNarration(root, audioDir, plan) {
   const hashPath = resolve(audioDir, `${plan.id}.sha256`);
   const expected = voiceCacheHash(plan.script, '', TIP_V11_TEMPLATE);
   try {
-    if ((await readFile(hashPath, 'utf8')).trim() === expected && (await stat(raw)).size > 44) return raw;
+    if ((await readFile(hashPath, 'utf8')).trim() === expected && (await stat(raw)).size > 44) {
+      return { path: raw, source: 'cache' };
+    }
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
   }
   await run(process.execPath, ['scripts/generate-gemini-voiceover.mjs', '--profile', TIP_V11_TEMPLATE,
     '--id', plan.id, '--script', plan.script], root);
-  return raw;
+  return { path: raw, source: 'provider' };
 }
 
 function narrationDuration(path) {
@@ -39,21 +48,21 @@ function narrationDuration(path) {
   ], { encoding: 'utf8', timeout: 20_000 }).trim());
 }
 
-export function tipV11NarrationTempo(rawSeconds) {
+export function tipV11NarrationTempo(rawSeconds, { exactTourV8 = false } = {}) {
   if (!Number.isFinite(rawSeconds) || rawSeconds < MIN_NARRATION_SECONDS
     || rawSeconds > MAX_NARRATION_SECONDS * DEFAULT_TEMPO) {
-    throw new Error(`V11 raw narration cannot fit without stretching or truncation (${rawSeconds.toFixed(3)} s)`);
+    throw new TipNarrationDurationError(`V11 raw narration cannot fit without stretching or truncation (${rawSeconds.toFixed(3)} s)`);
   }
-  // A 60-second source falls below the 58.5-second alignment gate at 1.03×.
-  // Preserve its natural timing and keep the approved cadence elsewhere.
-  return rawSeconds / DEFAULT_TEMPO >= MIN_NARRATION_SECONDS + TEMPO_HEADROOM_SECONDS
+  // The normalizer checks the measured duration after applying the Ngor tempo.
+  // Imported and local sources may retain natural timing near the lower bound.
+  return exactTourV8 || rawSeconds / DEFAULT_TEMPO >= MIN_NARRATION_SECONDS + TEMPO_HEADROOM_SECONDS
     ? DEFAULT_TEMPO
     : 1;
 }
 
-export async function normalizeTipV11Narration(root, raw, normalizedPath) {
+export async function normalizeTipV11Narration(root, raw, normalizedPath, options) {
   const rawSeconds = narrationDuration(raw);
-  const tempo = tipV11NarrationTempo(rawSeconds);
+  const tempo = tipV11NarrationTempo(rawSeconds, options);
   const normalize = 'loudnorm=I=-16:TP=-1.5:LRA=11';
   const filters = tempo === 1 ? normalize : `atempo=${tempo},${normalize}`;
   await run('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-i', raw, '-map', '0:a:0',
@@ -61,7 +70,7 @@ export async function normalizeTipV11Narration(root, raw, normalizedPath) {
   const normalizedSeconds = narrationDuration(normalizedPath);
   if (!Number.isFinite(normalizedSeconds) || normalizedSeconds < MIN_NARRATION_SECONDS
     || normalizedSeconds > MAX_NARRATION_SECONDS) {
-    throw new Error(`V11 normalized narration outside 58.5–119 s (${normalizedSeconds.toFixed(3)} s; raw ${rawSeconds.toFixed(3)} s; tempo ${tempo}×)`);
+    throw new TipNarrationDurationError(`V11 normalized narration outside 58.5–119 s (${normalizedSeconds.toFixed(3)} s; raw ${rawSeconds.toFixed(3)} s; tempo ${tempo}×)`);
   }
   console.log(`V11 narration measured: ${rawSeconds.toFixed(3)} s raw, ${normalizedSeconds.toFixed(3)} s normalized, tempo ${tempo}×`);
   return { rawSeconds, normalizedSeconds, tempo };
@@ -72,32 +81,58 @@ export async function renderTipV11(spec, {
 } = {}) {
   if (!root) throw new Error('Renderer root is required');
   if (localWordTimings && !localNarration) throw new Error('Local word timings require local narration');
+  if (spec.reviewedNarration && (localNarration || assistantEnabled)) throw new Error('Reviewed V11 narration requires the approved standard scenes');
   const plan = buildTipV11Narration(spec, { assistantEnabled });
   const outDir = resolve(root, 'out/batch');
   const audioDir = resolve(root, 'public/audio/voiceovers');
   const specPath = resolve(outDir, `${plan.id}.spec.json`);
   const alignPath = resolve(outDir, `${plan.id}.alignment.json`);
   const propsPath = resolve(outDir, `${plan.id}.props.json`);
+  const manifestPath = resolve(outDir, `${plan.id}.manifest.json`);
   const outFile = resolve(outDir, `${plan.id}.mp4`);
   const normalized = `audio/voiceovers/${plan.id}-v11.wav`;
   await Promise.all([mkdir(outDir, { recursive: true }), mkdir(audioDir, { recursive: true })]);
-  const raw = localNarration ? resolve(localNarration) : await getNarration(root, audioDir, plan);
+  await rm(manifestPath, { force: true });
+  const inventory = await collectTipV11StaticFiles(root).catch(() => null);
+  let narration;
+  if (spec.reviewedNarration?.source === 'private-attempt') {
+    narration = await readStagedPrivateReviewedNarration(spec.reviewedNarration, process.env);
+  } else if (spec.reviewedNarration) {
+    narration = await stageReviewedNarration(root, resolve(audioDir, `${plan.id}.wav`),
+      spec.reviewedNarration, process.env.GITHUB_SHA);
+  } else if (localNarration) {
+    narration = { path: resolve(localNarration), source: 'fixture' };
+  } else {
+    narration = await getNarration(root, audioDir, plan);
+  }
+  const raw = narration.path;
   const normalizedPath = resolve(root, 'public', normalized);
   if (raw === normalizedPath) throw new Error('Narration input must differ from processed output');
-  await normalizeTipV11Narration(root, raw, normalizedPath);
+  const failureCodePath = process.env.TIP_V11_ALIGNMENT_FAILURE_CODE_FILE;
+  const exactTourV8 = narration.source === 'provider' || narration.source === 'cache';
+  try {
+    await normalizeTipV11Narration(root, raw, normalizedPath, { exactTourV8 });
+  } catch (error) {
+    if (exactTourV8 && error instanceof TipNarrationDurationError && failureCodePath) {
+      await writeFile(failureCodePath, 'narration_duration_out_of_range\n', { mode: 0o600, flag: 'wx' });
+    }
+    throw error;
+  }
   await writeFile(specPath, JSON.stringify(plan), { mode: 0o600 });
   await run('python3', ['scripts/align_tip_v11.py', '--wav', normalizedPath,
     '--spec', specPath, '--output', alignPath,
     ...(localWordTimings ? ['--transcript', resolve(localWordTimings)] : []),
-    ...(process.env.TIP_V11_ALIGNMENT_FAILURE_CODE_FILE
-      ? ['--failure-code-file', process.env.TIP_V11_ALIGNMENT_FAILURE_CODE_FILE] : [])], root);
+    ...(failureCodePath ? ['--failure-code-file', failureCodePath] : [])], root);
   const alignment = JSON.parse(await readFile(alignPath, 'utf8'));
   const effectsPath = resolve(audioDir, `${plan.id}-v11-fx.wav`);
   const mixed = `audio/voiceovers/${plan.id}-v11-mix.wav`;
   await writeFile(effectsPath, tipV11Effects(alignment.segments, alignment.durationInFrames));
   await run('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-i', normalizedPath, '-i', effectsPath,
     '-filter_complex', 'amix=inputs=2:duration=longest:normalize=0', '-c:a', 'pcm_s16le', resolve(root, 'public', mixed)], root);
+  const captionGeometryRunId = randomUUID();
+  const geometryDirectory = resolve(root, 'out/TipV11Fr', geometryArtifactDirectory(captionGeometryRunId));
   const props = {
+    captionGeometryRunId,
     title: plan.title,
     segments: alignment.segments,
     captions: alignment.captions,
@@ -108,10 +143,19 @@ export async function renderTipV11(spec, {
     phoneGroups: alignment.phoneGroups,
   };
   await writeFile(propsPath, JSON.stringify(props), { mode: 0o600 });
-  await run(resolve(root, 'node_modules/.bin/remotion'), [
-    'render', 'src/index.ts', 'TipV11Fr', outFile, `--props=${propsPath}`,
-    '--codec=h264', '--audio-codec=aac', '--image-format=jpeg', '--concurrency=3', '--log=error',
-  ], root);
+  let captionGeometry;
+  try {
+    await run(resolve(root, 'node_modules/.bin/remotion'), [
+      'render', 'src/index.ts', 'TipV11Fr', outFile, `--props=${propsPath}`,
+      '--config=remotion.tip-v11.config.ts', '--codec=h264', '--audio-codec=aac',
+      '--image-format=jpeg', '--concurrency=3', '--log=error',
+    ], root);
+    captionGeometry = await summarizeCaptionGeometry(props, geometryDirectory);
+  } finally {
+    await rm(geometryDirectory, { recursive: true, force: true }).catch(() => {
+      console.warn('V11 caption geometry scratch cleanup unavailable');
+    });
+  }
   const probe = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-show_entries',
     'format=duration,size:stream=codec_type,codec_name,width,height,r_frame_rate', '-of', 'json', outFile],
   { encoding: 'utf8', timeout: 20_000 }));
@@ -122,6 +166,19 @@ export async function renderTipV11(spec, {
     || video?.width !== 1080 || video.height !== 1920 || video.r_frame_rate !== '30/1'
     || video.codec_name !== 'h264' || audio?.codec_name !== 'aac' || !(Number(probe.format.size) <= 50 * 1024 * 1024)) {
     throw new Error('V11 output does not match the vertical master contract');
+  }
+  try {
+    if (!inventory || (await collectTipV11StaticFiles(root)).sha256 !== inventory.sha256) {
+      throw new Error('V11 static inputs changed during the render');
+    }
+    const manifest = await buildTipV11RenderManifest({
+      plan, sourceScriptSha256: spec.sourceScriptSha256, voiceSource: narration.source, inventory, raw, captionGeometry,
+      normalized: normalizedPath, mix: resolve(root, 'public', mixed), alignment: alignPath, props: propsPath, mp4: outFile,
+      reviewedNarrationSha256: spec.reviewedNarration?.sha256,
+    });
+    await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`, { flag: 'wx', mode: 0o600 });
+  } catch {
+    console.warn('V11 render manifest unavailable; editorial review required');
   }
   await writeFile(resolve(outDir, `${plan.id}.media.json`), JSON.stringify({
     duration: seconds, durationHeader: Math.ceil(seconds), width: video.width, height: video.height,

@@ -19,7 +19,42 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Install FFmpeg for narration runtime tests
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: npm ci
       - run: npm run lint
       - run: npm run test:dispatch
       - run: python -m unittest discover -s scripts -p 'test_*align*.py'
+      - run: python -m unittest discover -s scripts -p 'test_audit_tip_v11*.py'
+
+  offline-render-smoke:
+    name: Offline Remotion smoke
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.20.0
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install local media tools
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: npm ci
+      - name: Install Remotion Chromium before isolating the renderer
+        run: npx remotion browser ensure
+      - name: Render and audit the non-publishable fixture without outbound network
+        shell: bash
+        run: |
+          sudo unshare --net -- bash -ceu '
+            ip link set lo up
+            exec runuser -u "$1" -- env \
+              -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u GEMINI_API_KEY \
+              -u TIP_CALLBACK_TOKEN -u TIP_CALLBACK_URL -u TIP_UPLOAD_URL \
+              "HOME=$2" "PATH=$3" "OFFLINE_SMOKE_NETWORK_ISOLATED=1" \
+              npm run test:offline-render
+          ' _ "$(id -un)" "$HOME" "$PATH"

@@ -2,10 +2,14 @@ from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
-from align_tip_v11 import SignatureEvidenceError, align, align_with_signature_retry, report_alignment_failure, tokens
+from align_tip_v11 import (
+    PHONE_WINDOW_EVIDENCE, PhoneEvidenceError, SignatureEvidenceError, align, align_with_phone_retry,
+    align_with_signature_retry, recognize_words, report_alignment_failure, tokens,
+)
 
 
 SEGMENTS = [
@@ -37,6 +41,14 @@ def speech(segments):
             for index, token in enumerate(words)]
 
 
+def phone_gap():
+    words = speech(SEGMENTS)
+    index = next(i for i, word in enumerate(words) if word['word'] == 'plus')
+    phone_count = len(tokens(next(segment['text'] for segment in SEGMENTS if segment['id'] == 'phone')))
+    return (words[:index] + words[index + phone_count:], words[index:index + phone_count], index,
+            [(word['start'], word['end']) for word in words])
+
+
 class V11AlignmentTest(unittest.TestCase):
     def test_keeps_authored_steps_and_formats_the_full_number_in_digits(self):
         alignment = align(SEGMENTS, speech(SEGMENTS), 70)
@@ -49,6 +61,44 @@ class V11AlignmentTest(unittest.TestCase):
             alignment['phoneGroups'], alignment['phoneGroups'][1:])))
         self.assertTrue(alignment['reviewRequired'])
 
+    def test_preroll_stays_after_the_last_word_when_both_scene_anchors_agree(self):
+        words = speech(SEGMENTS)
+        index = sum(len(tokens(row['text'])) for row in SEGMENTS[:6])
+        previous, leading = words[index - 1], words[index]
+        previous['end'] = leading['start'] - .02
+        alignment = align(SEGMENTS, words, 70)
+        cut = alignment['segments'][6]['start']
+        self.assertEqual(cut, previous['end'])
+        self.assertEqual(alignment['segments'][5]['end'], cut)
+        self.assertEqual([caption['end'] for caption in alignment['captions']
+                          if caption['start'] < cut][-1], cut)
+
+        previous['word'] = 'incertain'
+        unconfirmed = align(SEGMENTS, words, 70)
+        self.assertAlmostEqual(unconfirmed['segments'][6]['start'], leading['start'] - .08)
+
+    def test_unconfirmed_next_word_uses_a_measured_pause_after_an_exact_line_end(self):
+        words = speech(SEGMENTS)
+        boundary = sum(len(tokens(row['text'])) for row in SEGMENTS[:7])
+        for word in words[boundary:]:
+            word['start'] += .42
+            word['end'] += .42
+        words[boundary]['word'] = 'Jam'
+        words[boundary + 1]['word'] = 'Imo'
+        sound = [(word['start'], word['end']) for word in words]
+        with_pause = align(SEGMENTS, words, 70, sound)
+        self.assertAlmostEqual(with_pause['segments'][7]['start'], words[boundary]['start'] - .18)
+        self.assertTrue(with_pause['reviewRequired'])
+
+        # Continuous speech, or an uncertain prior line end, cannot establish
+        # a replacement timing simply because the next start is uncertain.
+        continuous = sound[:boundary - 1] + [(sound[boundary - 1][0], sound[boundary][1])] + sound[boundary + 1:]
+        for evidence, last_word in [(continuous, words[boundary - 1]['word']), (sound, 'indécis')]:
+            with self.subTest(last_word=last_word):
+                changed = [*words[:boundary - 1], {**words[boundary - 1], 'word': last_word}, *words[boundary:]]
+                result = align(SEGMENTS, changed, 70, evidence)
+                self.assertAlmostEqual(result['segments'][7]['start'], words[boundary + 2]['start'] - .08)
+
     def test_wrong_phone_and_trailing_dead_air_fail(self):
         words = speech(SEGMENTS)
         index = next(i for i, word in enumerate(words) if word['word'] == 'neuf')
@@ -57,6 +107,114 @@ class V11AlignmentTest(unittest.TestCase):
             align(SEGMENTS, words, 70)
         with self.assertRaisesRegex(ValueError, 'excessive silence'):
             align(SEGMENTS, speech(SEGMENTS), 75)
+
+    def test_phone_window_recovers_only_absent_number_with_small_timestamp_overlap(self):
+        full, phone, index, sound = phone_gap()
+        phone[0] = {**phone[0], 'start': full[index - 1]['end'] - .06}
+        focused = Mock(return_value=[full[index - 1], *phone])
+        recognize_tail = Mock()
+        with self.assertRaises(PhoneEvidenceError):
+            align(SEGMENTS, full, 70, sound)
+
+        actual = align_with_phone_retry(SEGMENTS, full, 70, sound, recognize_tail, focused)
+        focused.assert_called_once_with(full[index - 1]['end'] - .44, full[index]['start'])
+        recognize_tail.assert_not_called()
+        expected = align(SEGMENTS, [*full[:index], *phone, *full[index:]], 70, sound)
+        self.assertEqual(actual, {**expected, 'phoneEvidenceMethod': PHONE_WINDOW_EVIDENCE})
+
+    def test_phone_window_is_skipped_for_an_already_recognized_number(self):
+        words = speech(SEGMENTS)
+        focused = Mock()
+        sound = [(word['start'], word['end']) for word in words]
+        self.assertEqual(align_with_phone_retry(SEGMENTS, words, 70, sound, Mock(), focused),
+                         align(SEGMENTS, words, 70, sound))
+        focused.assert_not_called()
+
+    def test_phone_window_does_not_replace_a_competing_word_or_guess_an_anchor(self):
+        full, phone, index, sound = phone_gap()
+        competing = {**phone[2], 'word': 'sept'}
+        unconfirmed = [*full[:index - 1], {**full[index - 1], 'word': 'murmure'}, *full[index:]]
+        for words in ([*full[:index], competing, *full[index:]], unconfirmed):
+            with self.subTest(words=words[index - 1:index + 1]):
+                focused = Mock(return_value=phone)
+                with self.assertRaises(PhoneEvidenceError):
+                    align_with_phone_retry(SEGMENTS, words, 70, sound, Mock(), focused)
+                focused.assert_not_called()
+
+    def test_phone_window_requires_exact_complete_words_and_bounded_valid_timings(self):
+        full, phone, index, sound = phone_gap()
+        for result in (phone[:-1], [*phone[:3], {**phone[3], 'word': 'sept'}, *phone[4:]],
+                       [{**phone[0], 'start': float('nan')}, *phone[1:]],
+                       [{**phone[0], 'start': full[index - 1]['end'] - .11}, *phone[1:]],
+                       [{**phone[0], 'word': 'murmure'}, *phone],
+                       [{**phone[0], 'word': 'au plus'}, *phone[1:]]):
+            with self.subTest(first_word=result[0]):
+                focused = Mock(return_value=result)
+                with self.assertRaises(PhoneEvidenceError):
+                    align_with_phone_retry(SEGMENTS, full, 70, sound, Mock(), focused)
+                focused.assert_called_once()
+
+    def test_phone_window_refuses_multiple_exact_reads_or_changed_script(self):
+        full, phone, index, sound = phone_gap()
+        start, end = full[index - 1]['end'], full[index]['start']
+        step = (end - start) / (len(phone) * 2 + 1)
+        twice = [{**word, 'start': start + i * step, 'end': start + (i + .5) * step}
+                 for i, word in enumerate(phone + phone)]
+        focused = Mock(return_value=twice)
+        with self.assertRaises(PhoneEvidenceError):
+            align_with_phone_retry(SEGMENTS, full, 70, sound, Mock(), focused)
+        focused.assert_called_once()
+
+        changed = [{**segment, 'text': segment['text'].replace('quarante-neuf', 'quarante-sept')}
+                   if segment['id'] == 'phone' else segment for segment in SEGMENTS]
+        focused.reset_mock()
+        with self.assertRaises(PhoneEvidenceError):
+            align_with_phone_retry(changed, full, 70, sound, Mock(), focused)
+        focused.assert_not_called()
+
+    def test_phone_window_rejects_a_quiet_gap_before_decoding(self):
+        full, phone, index, sound = phone_gap()
+        start, end = full[index - 1]['end'], full[index]['start']
+        quiet = [(a, b) for a, b in sound if b <= start or a >= end]
+        quiet.extend((position, position + .05) for position in
+                     [start + (end - start) * fraction for fraction in (.25, .50, .75)])
+        focused = Mock(return_value=phone)
+        with self.assertRaises(PhoneEvidenceError):
+            align_with_phone_retry(SEGMENTS, full, 70, sorted(quiet), Mock(), focused)
+        focused.assert_not_called()
+
+    def test_phone_window_rejects_a_recognized_word_with_no_voiced_span(self):
+        full, phone, _, sound = phone_gap()
+        silent_word = phone[5]
+        sound.remove((silent_word['start'], silent_word['end']))
+        focused = Mock(return_value=phone)
+        with self.assertRaises(PhoneEvidenceError):
+            align_with_phone_retry(SEGMENTS, full, 70, sound, Mock(), focused)
+        focused.assert_called_once()
+
+    def test_decoder_scalar_offsets_become_plain_floats_before_validation(self):
+        class DecoderScalar(float):
+            def __add__(self, offset):
+                return DecoderScalar(super().__add__(offset))
+
+        words = [SimpleNamespace(word='plus', start=DecoderScalar(.25), end=DecoderScalar(.5))]
+        model = Mock()
+        model.transcribe.return_value = ([SimpleNamespace(words=words)], None)
+        observed = recognize_words(model, 'local.wav', beam_size=5, time_offset=54)
+        self.assertEqual(observed, [{'word': 'plus', 'start': 54.25, 'end': 54.5}])
+        self.assertIs(type(observed[0]['start']), float)
+        self.assertIs(type(observed[0]['end']), float)
+        model.transcribe.assert_called_once_with('local.wav', language='fr', beam_size=5,
+                                                word_timestamps=True, condition_on_previous_text=False)
+
+    def test_phone_recovery_does_not_exempt_the_signature_gate(self):
+        full, phone, _, sound = phone_gap()
+        ending_count = len(tokens(SEGMENTS[-1]['text']))
+        missing_signature = full[:-ending_count]
+        focused = Mock(return_value=phone)
+        with self.assertRaises(SignatureEvidenceError):
+            align_with_phone_retry(SEGMENTS, missing_signature, 70, sound, lambda _: [], focused)
+        focused.assert_called_once()
 
     def test_retries_only_the_signature_and_rechecks_the_full_contract(self):
         words = speech(SEGMENTS)

@@ -1,0 +1,52 @@
+{
+  "title": "Exemple contrôlé local",
+  "durationInFrames": 168,
+  "audio": "",
+  "assistantEnabled": false,
+  "visualTopic": "general",
+  "segments": [
+    {
+      "id": "greeting",
+      "start": 0.0,
+      "end": 0.8,
+      "text": "Texte fictif de la recette."
+    },
+    {
+      "id": "hook",
+      "start": 0.8,
+      "end": 1.6,
+      "text": "Texte fictif de la recette."
+    },
+    {
+      "id": "domain",
+      "start": 1.6,
+      "end": 2.4000000000000004,
+      "text": "Texte fictif de la recette."
+    },
+    {
+      "id": "contact",
+      "start": 2.4000000000000004,
+      "end": 3.2,
+      "text": "Texte fictif de la recette."
+    },
+    {
+      "id": "phone",
+      "start": 3.2,
+      "end": 4.0,
+      "text": "Texte fictif de la recette."
+    },
+    {
+      "id": "socials",
+      "start": 4.0,
+      "end": 4.800000000000001,
+      "text": "Texte fictif de la recette."
+    },
+    {
+      "id": "signature",
+      "start": 4.800000000000001,
+      "end": 5.6000000000000005,
+      "text": "Texte fictif de la recette."
+    }
+  ],
+  "captions": []
+}
