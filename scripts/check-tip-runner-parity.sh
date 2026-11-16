@@ -36,8 +36,8 @@ if [[ -d "$python_dir/../lib" ]]; then
   clean+=("LD_LIBRARY_PATH=$(cd -- "$python_dir/../lib" && pwd -P)")
 fi
 if [[ "$("${clean[@]}" node --version)" != v22.20.0 || "$("${clean[@]}" npm --version)" != 10.9.3 ]] \
-  || ! "${clean[@]}" python -c 'import sys; sys.exit(sys.version_info[:2] != (3, 11))'; then
-  echo 'Expected Node 22.20.0, npm 10.9.3 and Python 3.11.' >&2
+  || ! "${clean[@]}" python -c 'import sys; sys.exit(sys.version_info[:3] != (3, 11, 14))'; then
+  echo 'Expected Node 22.20.0, npm 10.9.3 and Python 3.11.14.' >&2
   exit 1
 fi
 ffmpeg=$(command -v ffmpeg)

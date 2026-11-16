@@ -91,7 +91,7 @@ La CI de PR exécute les tests de contrat et d’alignement sans Gemini. Pour un
 
 ### Recette identique sur GitHub et le mini-PC
 
-GitHub et le mini-PC utilisent le même point d’entrée pour tester un commit exact du moteur. Sur Linux x86-64, utiliser un checkout propre, Node 22.20.0 avec npm 10.9.3, Python 3.11, FFmpeg, ffprobe et `sudo -n unshare` disponible pour l’utilisateur du runner.
+GitHub et le mini-PC utilisent le même point d’entrée pour tester un commit exact du moteur. Sur Linux x86-64, utiliser un checkout propre, Node 22.20.0 avec npm 10.9.3, Python 3.11.14, FFmpeg, ffprobe et `sudo -n unshare` disponible pour l’utilisateur du runner.
 
 ```bash
 TIP_PARITY_EXPECTED_SHA='<commit-approuve>' \
