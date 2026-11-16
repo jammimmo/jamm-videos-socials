@@ -146,7 +146,7 @@ async function main() {
 
     const probe = spawnSync('ffprobe', [
       '-v', 'trace', '-show_packets', '-show_entries',
-      'stream=codec_type,codec_name,sample_rate,channels,bit_rate,start_time,pix_fmt,field_order,nal_length_size:packet=codec_type,size,pos,flags',
+      'stream=codec_type,codec_name,profile,sample_rate,channels,bit_rate,start_time,pix_fmt,field_order,nal_length_size:packet=codec_type,size,pos,flags,pts_time',
       '-of', 'json', video,
     ], { encoding: 'utf8', timeout: 20_000, maxBuffer: 4 * 1024 * 1024 });
     assert.equal(probe.status, 0);
@@ -157,8 +157,9 @@ async function main() {
     assert.match(videoStream.pix_fmt, /^yuvj?420p$/u);
     assert.equal(Number(videoStream.start_time), 0);
     assert.equal(audio.codec_name, 'aac');
+    assert.equal(audio.profile, 'LC');
     assert.equal(audio.sample_rate, '48000');
-    assert.ok([1, 2].includes(audio.channels));
+    assert.equal(audio.channels, 2);
     assert.ok(Number(audio.bit_rate) > 0 && Number(audio.bit_rate) <= 132_000);
     assert.equal(Number(audio.start_time), 0);
     const moov = probe.stderr.indexOf("type:'moov' parent:'root'");
@@ -167,6 +168,8 @@ async function main() {
     assert.doesNotMatch(probe.stderr, /type:'elst'/u);
     const keyframes = packets.filter(packet => packet.codec_type === 'video' && packet.flags.includes('K'));
     assert.ok(keyframes.length > 1, 'Expected several H.264 GOP boundaries');
+    assert.deepEqual(keyframes.map(packet => Number(packet.pts_time)),
+      keyframes.map((_, index) => index * 3), 'Expected an IDR every three seconds');
     assert.equal(Number(videoStream.nal_length_size), 4);
     const videoBytes = await readFile(video);
     for (const packet of keyframes) {
@@ -190,7 +193,7 @@ async function main() {
       renderer: 'TipV11Fr', voiceSource: manifest.voice.source,
       alignment: alignment.provenance, captionGeometry: manifest.caption_geometry.status,
       duration: media.duration, width: media.width, height: media.height,
-      audioBitrate: Number(audio.bit_rate), closedGopKeyframes: keyframes.length,
+      audioBitrate: Number(audio.bit_rate), closedGopKeyframes: keyframes.length, closedGopSeconds: 3,
       mediaSha256: manifest.media_sha256, retainedArtifact: false,
     };
   } finally {

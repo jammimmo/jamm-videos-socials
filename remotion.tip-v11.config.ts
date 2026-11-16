@@ -4,9 +4,9 @@ import { Config } from '@remotion/cli/config';
 Config.setAudioBitrate('128k');
 
 Config.overrideFfmpegCommand(({ type, args }) => {
-  // Remotion may encode before stitching or combine both operations.
+  // Facebook Reels requires closed GOPs of 2–5 seconds. V11 runs at 30 fps.
   const outputArgs = args.includes('libx264')
-    ? [...args.slice(0, -1), '-x264-params', 'open-gop=0', args[args.length - 1]]
+    ? [...args.slice(0, -1), '-x264-params', 'open-gop=0:keyint=90:scenecut=0', args[args.length - 1]]
     : args;
   if (type !== 'stitcher') return outputArgs;
   const flags = args.indexOf('-movflags');
