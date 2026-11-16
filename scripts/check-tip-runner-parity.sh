@@ -43,12 +43,36 @@ fi
 ffmpeg=$(command -v ffmpeg)
 ffprobe=$(command -v ffprobe)
 
+run_isolated() {
+  "${network_namespace[@]}" bash -euo pipefail -c '
+    if [[ "$1" == rootless ]]; then
+      read -r mapped_uid owner_uid mapped_count < /proc/self/uid_map
+      [[ "$mapped_uid" == 0 && "$owner_uid" == "$2" && "$mapped_count" == 1 ]]
+    fi
+    [[ "$(readlink /proc/self/ns/net)" != "$3" ]]
+    shift 3
+    ip link set lo up
+    exec "$@"
+  ' _ "$isolation_mode" "$host_uid" "$host_network" "${isolated_identity[@]}" "$@"
+}
+
 if [[ "$output" != --checks-only ]]; then
-  if [[ -e "$output" || -L "$output" || ! -d "$(dirname -- "$output")" || "$(id -u)" -eq 0 ]]; then
+  host_uid=$(id -u)
+  if [[ -e "$output" || -L "$output" || ! -d "$(dirname -- "$output")" || "$host_uid" -eq 0 ]]; then
     echo 'Use a non-root runner and an unused receipt path in an existing directory.' >&2
     exit 1
   fi
-  sudo -n unshare --net -- true
+  host_network=$(readlink /proc/self/ns/net)
+  isolation_mode=rootless
+  network_namespace=(unshare --user --map-root-user --net --)
+  isolated_identity=()
+  if ! run_isolated true 2>/dev/null; then
+    isolation_mode=sudo
+    network_namespace=(sudo -n unshare --net --)
+    isolated_identity=(runuser -u "$(id -un)" --)
+    run_isolated true
+  fi
+  printf 'Renderer parity network isolation: %s\n' "$isolation_mode"
 fi
 
 "${clean[@]}" npm ci --no-audit --no-fund
@@ -63,16 +87,9 @@ if [[ "$output" == --checks-only ]]; then
 fi
 
 "${clean[@]}" npm exec --offline -- remotion browser ensure
-user=$(id -un)
-sudo -n unshare --net -- bash -euo pipefail -c '
-  ip link set lo up
-  user=$1; fixture_log=$2; receipt=$3; expected=$4; ffmpeg=$5; ffprobe=$6
-  shift 6
-  exec runuser -u "$user" -- "$@" OFFLINE_SMOKE_NETWORK_ISOLATED=1 \
-    bash -euo pipefail -c '\''
-      node scripts/offline-tip-v11-smoke.mjs | tee "$1"
-      node scripts/write-tip-runner-parity.mjs "$@"
-    '\'' _ "$fixture_log" "$receipt" "$expected" "$ffmpeg" "$ffprobe"
-' _ "$user" "$scratch/fixture.log" "$scratch/receipt.json" "$expected" "$ffmpeg" "$ffprobe" "${clean[@]}"
+run_isolated "${clean[@]}" OFFLINE_SMOKE_NETWORK_ISOLATED=1 bash -euo pipefail -c '
+  node scripts/offline-tip-v11-smoke.mjs | tee "$1"
+  node scripts/write-tip-runner-parity.mjs "$@"
+' _ "$scratch/fixture.log" "$scratch/receipt.json" "$expected" "$ffmpeg" "$ffprobe"
 git diff --exit-code HEAD --quiet --
 (set -o noclobber; cat -- "$scratch/receipt.json" >"$output")
