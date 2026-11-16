@@ -122,6 +122,8 @@ jobs:
       - name: Report a terminal renderer failure
         if: ${{ failure() }}
         continue-on-error: true
+        env:
+          TIP_FAILURE_CONTRACT: ${{ github.event.client_payload.contract }}
         run: |
           if [ -f "${RUNNER_TEMP}/tip-delivery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]; then
             echo 'Tip delivery remains subject to existing attempt recovery.'
@@ -141,11 +143,18 @@ jobs:
                   ;;
               esac
             fi
-            curl --silent --show-error --output /dev/null --write-out 'Renderer failure callback HTTP %{http_code}\n' \
-              -X POST "${TIP_UPLOAD_URL}&status=failed" \
-              -H "Authorization: Bearer ${TIP_CALLBACK_TOKEN}" \
-              -H "X-Job-Id: ${TIP_JOB_ID}" \
-              -H "X-Error: ${reason}; GitHub run ${GITHUB_RUN_ID}" || true
+            case "${TIP_FAILURE_CONTRACT}" in
+              jamm-tip-render-v2|jamm-tip-render-v3-reviewed-narration)
+                node scripts/deliver-tip-failure.mjs "${reason}; GitHub run ${GITHUB_RUN_ID}"
+                ;;
+              jamm-tip-render-v1)
+                curl --silent --show-error --output /dev/null --write-out 'Renderer failure callback HTTP %{http_code}\n' \
+                  -X POST "${TIP_UPLOAD_URL}&status=failed" \
+                  -H "Authorization: Bearer ${TIP_CALLBACK_TOKEN}" \
+                  -H "X-Job-Id: ${TIP_JOB_ID}" \
+                  -H "X-Error: ${reason}; GitHub run ${GITHUB_RUN_ID}" || true
+                ;;
+            esac
           fi
 
       - name: Remove the staged private narration

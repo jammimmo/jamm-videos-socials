@@ -107,6 +107,93 @@ class V11FinalSpeechTest(unittest.TestCase):
                     else:
                         self.assertEqual(row['status'], 'matched')
 
+    def test_fixed_brand_spelling_requires_exact_separate_words_and_keeps_original_digest(self):
+        services = {'id': 'services', 'text': 'Jamm Immo vous accompagne.', 'start': 0, 'end': 2}
+        words = [(' Jam', .04, .38, .85), (' Imo', .38, .64, .62),
+                 (' vous', .72, .81, .96), (' accompagne', .86, 1.54, .96)]
+        [row] = compare_french_segments([services], words, 0)
+        self.assertEqual(row['status'], 'matched')
+        self.assertEqual(row['observed_sha256'], row['expected_sha256'])
+        self.assertEqual(row['measurement'], {
+            'method': 'fixed_jamm_immo_phonetic_spelling',
+            'raw_observed_sha256': sha256(b'jam imo vous accompagne'),
+        })
+
+        socials = {'id': 'socials', 'text': 'Suivez aussi Jamm Immo sur nos réseaux.', 'start': 0, 'end': 3}
+        social_words = [
+            (' Suivez', .03, .18, .99), (' aussi', .28, .44, .99),
+            (' Jam', .54, .88, .85), (' Imo', .88, 1.14, .62),
+            (' sur', 1.22, 1.37, .96), (' nos', 1.4, 1.63, .96), (' réseaux', 1.68, 2.06, .97),
+        ]
+        self.assertEqual(compare_french_segments([socials], social_words, 0)[0]['status'], 'matched')
+
+        cases = {
+            'fused brand': [(' Jamimo', .04, .64, .98), *words[2:]],
+            'brand in one recognition row': [(' Jam Imo', .04, .64, .98), *words[2:]],
+            'overlapping words': [words[0], (' Imo', .33, .64, .98), *words[2:]],
+            'low confidence': [words[0], (' Imo', .38, .64, .599), *words[2:]],
+            'partial alias': [words[0], (' Immo', .38, .64, .98), *words[2:]],
+            'different name': [(' Jean', .04, .38, .98), *words[1:]],
+            'name repeated': [*words, (' Imo', 1.60, 1.8, .98)],
+            'missing unrelated word': words[:2] + words[3:],
+            'wrong unrelated word': words[:3] + [(' assiste', .86, 1.54, .98)],
+        }
+        for name, incompatible in cases.items():
+            with self.subTest(name=name):
+                [rejected] = compare_french_segments([services], incompatible, 0)
+                self.assertEqual(rejected['status'], 'inconclusive')
+                self.assertNotIn('measurement', rejected)
+        [other_scene] = compare_french_segments([{**services, 'id': 'hook'}], words, 0)
+        self.assertEqual(other_scene['status'], 'inconclusive')
+        [wrong_position] = compare_french_segments([{**socials, 'id': 'services'}], social_words, 0)
+        self.assertEqual(wrong_position['status'], 'inconclusive')
+        signature = {'id': 'signature', 'text': 'Kër gu baax.', 'start': 3, 'end': 4}
+        [mixed_language] = compare_french_segments([socials, signature], [
+            *social_words, (' expression', 2.96, 3.22, .93),
+        ], 0)
+        self.assertEqual(mixed_language['reason'], 'mixed_language_boundary')
+        self.assertNotIn('measurement', mixed_language)
+
+    def test_services_can_recheck_the_exact_preserved_pcm_when_only_brand_spelling_differs(self):
+        services = {'id': 'services', 'text': 'Jamm Immo vous accompagne.', 'start': 0, 'end': 2}
+        global_words = [(' Jam', .04, .38, .58), (' Imo', .38, .64, .83),
+                        (' vous', .72, .81, .96), (' accompagne', .86, 1.54, .96)]
+        cold_words = [(' Jam', .04, .38, .84), *global_words[1:]]
+        decoded = b'\x00\x01' * (48000 + 128)
+        preservation = {'status': 'matched', 'lag_samples': 128, 'decoded_pcm_sha256': sha256(decoded)}
+        with TemporaryDirectory() as directory:
+            def recognize_services(path):
+                with wave.open(str(path), 'rb') as source:
+                    self.assertEqual(source.readframes(source.getnframes()), decoded[256:])
+                return cold_words
+
+            def run(whole, focused, evidence=preservation):
+                return measure_final_french_speech(
+                    [services], decoded, {'passed': True, 'lag_samples': 128}, directory,
+                    recognize=lambda _path: whole, preservation=evidence, recognize_services=focused,
+                )
+
+            result = run(global_words, recognize_services)
+            self.assertEqual(result['status'], 'matched')
+            [row] = result['segments']
+            self.assertEqual(row['observed_sha256'], row['expected_sha256'])
+            self.assertEqual(row['measurement']['method'], 'services_exact_brand_window')
+            self.assertEqual(row['measurement']['start_sample'], 128)
+            self.assertEqual(row['measurement']['pcm_sha256'], sha256(decoded[256:]))
+            self.assertEqual(row['measurement']['window_raw_observed_sha256'],
+                             sha256(b'jam imo vous accompagne'))
+
+            for words in (cold_words[:-1], [*cold_words[:3], (' assiste', .86, 1.54, .96)], global_words,
+                          [(' Jam Imo', .04, .64, .98), *cold_words[2:]]):
+                result = run(global_words, lambda _path: words)
+                self.assertEqual(result['status'], 'inconclusive')
+            never = Mock(return_value=cold_words)
+            self.assertEqual(run(global_words[:-1], never)['status'], 'inconclusive')
+            self.assertEqual(run(global_words, never, {**preservation, 'decoded_pcm_sha256': '0' * 64})['status'],
+                             'inconclusive')
+            self.assertEqual(run(global_words, never, {**preservation, 'lag_samples': 0})['status'], 'inconclusive')
+            never.assert_not_called()
+
     def test_final_hook_recovers_only_the_exact_cut_verified_in_both_signals(self):
         rate, lag = 24_000, 1024
         start, end = 2.52, 9.14

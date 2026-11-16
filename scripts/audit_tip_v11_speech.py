@@ -34,6 +34,7 @@ MIN_PHONE_WORD_AUDIBLE_SECONDS = .05
 HOOK_QUIET_WINDOW = SAMPLE_RATE // 100
 HOOK_QUIET_MIN_SIDE = SAMPLE_RATE // 10
 HOOK_QUIET_MIN_TOTAL = SAMPLE_RATE * 3 // 10
+FIXED_BRAND_WORD_INDEX = {'services': 0, 'socials': 2}
 
 
 def sha256(value):
@@ -123,6 +124,27 @@ def segment_words(identity, words):
     return normalized_words(identity, ' '.join(word[0] for word in words))
 
 
+def fixed_brand_alias_index(identity, expected, actual):
+    index = FIXED_BRAND_WORD_INDEX.get(identity)
+    if (index is not None and expected[index:index + 2] == ['jamm', 'immo']
+        and actual[index:index + 2] == ['jam', 'imo']
+        and actual[:index] == expected[:index] and actual[index + 2:] == expected[index + 2:]):
+        return index
+    return None
+
+
+def canonical_fixed_brand_words(identity, expected, actual, rows):
+    """Allow the observed phonetic spelling only in the two fixed French lines."""
+    index = fixed_brand_alias_index(identity, expected, actual)
+    if index is None or len(rows) != len(actual):
+        return actual
+    first, second = rows[index:index + 2]
+    if (normalized_words('', first[0]) != ['jam'] or normalized_words('', second[0]) != ['imo']
+        or first[2] > second[1] or min(first[3], second[3]) < MIN_WORD_PROBABILITY):
+        return actual
+    return actual[:index] + ['jamm', 'immo'] + actual[index + 2:]
+
+
 def exact_adjacent_split(left, right, rows, original_split, expected_left, expected_right):
     if abs(left['end'] - right['start']) > .001 or not rows:
         return None
@@ -178,7 +200,8 @@ def anchored_phone_range(segments, expected_words, observed, index):
     return windows[0] if len(windows) == 1 else None
 
 
-def compare_french_segments(segments, recognized_words, lag_samples, verify_phone=None, *, verify_hook=None):
+def compare_french_segments(segments, recognized_words, lag_samples, verify_phone=None, *, verify_hook=None,
+                            verify_services=None):
     opening_hook = None
     if (verify_hook and len(segments) > 2 and [part['id'] for part in segments[:2]] == ['greeting', 'hook']
         and segments[0]['end'] == segments[1]['start'] and segments[1]['end'] == segments[2]['start']):
@@ -213,7 +236,10 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
         if identity in EXCLUDED_SEGMENTS:
             continue
         expected = expected_words[index]
-        actual = segment_words(identity, observed[index])
+        raw_actual = segment_words(identity, observed[index])
+        actual = raw_actual if index in ambiguous_boundary else canonical_fixed_brand_words(
+            identity, expected, raw_actual, observed[index],
+        )
         # A standalone sign can be numeric formatting. It needs the focused
         # phone check and acoustic evidence before it can count as speech.
         exact = (bool(expected) and actual == expected
@@ -223,6 +249,11 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
                 'expected_token_count': len(expected), 'observed_token_count': len(actual),
                 'expected_sha256': sha256(' '.join(expected).encode()),
                 'observed_sha256': sha256(' '.join(actual).encode())}
+        if matched and actual != raw_actual:
+            item['measurement'] = {
+                'method': 'fixed_jamm_immo_phonetic_spelling',
+                'raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
+            }
         if index in ambiguous_boundary:
             item['reason'] = 'mixed_language_boundary'
             rows = observed[index]
@@ -242,6 +273,15 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
             if measurement:
                 item.update(status='matched', observed_sha256=item['expected_sha256'],
                             observed_token_count=len(expected), measurement=measurement)
+        elif not matched and identity == 'services' and verify_services:
+            if fixed_brand_alias_index(identity, expected, raw_actual) is not None:
+                confirmed = verify_services(segment, expected)
+                if confirmed:
+                    verified_words, measurement = confirmed
+                    item.update(status='matched', observed_sha256=sha256(' '.join(verified_words).encode()),
+                                observed_token_count=len(verified_words), measurement={
+                                    **measurement, 'raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
+                                })
         results.append(item)
     return results
 
@@ -334,9 +374,35 @@ def verify_phone_samples(decoded_pcm, lag_samples, directory, start, end, recogn
             'pcm_sha256': sha256(clip)}
 
 
+def verify_services_samples(decoded_pcm, lag_samples, directory, segment, expected, recognize):
+    first, last = (round(segment[edge] * SAMPLE_RATE) + lag_samples for edge in ('start', 'end'))
+    if not 0 <= first < last <= len(decoded_pcm) // 2:
+        return None
+    clip = decoded_pcm[first * 2:last * 2]
+    path = Path(directory) / 'decoded-final-services.wav'
+    measured_segment = {**segment, 'start': 0, 'end': (last - first) / SAMPLE_RATE}
+    try:
+        with wave.open(str(path), 'wb') as output:
+            output.setparams((1, 2, SAMPLE_RATE, 0, 'NONE', 'not compressed'))
+            output.writeframes(clip)
+        [rows], _ = words_by_segment([measured_segment], recognize(path), 0)
+        raw_words = segment_words('services', rows)
+        actual = canonical_fixed_brand_words('services', expected, raw_words, rows)
+        if (actual != expected or any(row[2] > measured_segment['end'] or row[3] < MIN_WORD_PROBABILITY for row in rows)
+            or any(left[2] > right[1] for left, right in zip(rows, rows[1:]))):
+            return None
+    except Exception:
+        return None
+    return actual, {
+        'method': 'services_exact_brand_window', 'start_sample': first, 'end_sample': last,
+        'pcm_sha256': sha256(clip), 'window_raw_observed_sha256': sha256(' '.join(raw_words).encode()),
+        'bounded_min_word_probability': min(row[3] for row in rows),
+    }
+
+
 def measure_final_french_speech(segments, decoded_pcm, waveform, directory, recognize=recognize_with_timeout,
                                 recognize_phone=recognize_final_window, *, narration=None, preservation=None,
-                                recognize_hook=recognize_final_window):
+                                recognize_hook=recognize_final_window, recognize_services=recognize_final_window):
     result = {'contract': CONTRACT, 'source': SOURCE, 'status': 'inconclusive',
               'model_revision': ASR_REVISION, 'decoded_pcm_sha256': sha256(decoded_pcm),
               'excluded_segments': list(EXCLUDED_SEGMENTS), 'accent_evaluated': False, 'segments': []}
@@ -348,19 +414,25 @@ def measure_final_french_speech(segments, decoded_pcm, waveform, directory, reco
             output.setparams((1, 2, SAMPLE_RATE, 0, 'NONE', 'not compressed'))
             output.writeframes(decoded_pcm)
         lag_samples = waveform['lag_samples']
-        hook_check = None
-        if (narration is not None and type(lag_samples) is int and lag_samples >= 0
-            and preservation and preservation.get('status') == 'matched'
+        preserved = (type(lag_samples) is int and lag_samples >= 0 and preservation
+            and preservation.get('status') == 'matched'
             and preservation.get('lag_samples') == lag_samples
-            and preservation.get('decoded_pcm_sha256') == result['decoded_pcm_sha256']):
+            and preservation.get('decoded_pcm_sha256') == result['decoded_pcm_sha256'])
+        hook_check = None
+        if narration is not None and preserved:
             def hook_check(start, end, expected):
                 return verify_hook_samples(narration, decoded_pcm, lag_samples, directory,
                                            start, end, expected, recognize_hook)
+        services_check = None
+        if preserved:
+            def services_check(segment, expected):
+                return verify_services_samples(decoded_pcm, lag_samples, directory,
+                                               segment, expected, recognize_services)
 
         results = compare_french_segments(
             segments, recognize(wav_path), lag_samples,
             lambda start, end: verify_phone_samples(decoded_pcm, lag_samples, directory, start, end, recognize_phone),
-            verify_hook=hook_check,
+            verify_hook=hook_check, verify_services=services_check,
         )
     except ValueError:
         return {**result, 'reason': 'recognition_or_timing_inconclusive'}
