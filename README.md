@@ -88,3 +88,14 @@ Le master V11 est vertical, en 1080 × 1920 à 30 images par seconde. Une seule 
 La variable GitHub Actions `TIPS_V11_ASSISTANT_PUBLIC=true` ajoute la démo générale de l’Assistant Jamm. L’activer après vérification de sa présence sur la vitrine. Les trois exemples montrent une estimation, la recherche d’une annonce et la prise de contact avec un conseiller.
 
 La CI de PR exécute les tests de contrat et d’alignement sans Gemini. Pour une recette locale avec une piste déjà disponible, la fonction `renderTipV11` accepte `localNarration` et passe la piste par le même alignement et le même export.
+
+### Recette identique sur GitHub et le mini-PC
+
+GitHub et le mini-PC utilisent le même point d’entrée pour tester un commit exact du moteur. Sur Linux x86-64, utiliser un checkout propre, Node 22.20.0 avec npm 10.9.3, Python 3.11, FFmpeg, ffprobe et `sudo -n unshare` disponible pour l’utilisateur du runner.
+
+```bash
+TIP_PARITY_EXPECTED_SHA='<commit-approuve>' \
+  bash scripts/check-tip-runner-parity.sh /chemin/absolu/recette.json
+```
+
+Le script installe les dépendances du lockfile, prépare le Chromium de Remotion, puis exécute le rendu synthétique dans un espace réseau limité à la boucle locale et avec un environnement vidé. Le reçu enregistre le commit, le lockfile, les versions et empreintes des outils ainsi que les mesures du MP4 synthétique. Le rendu est supprimé. `--checks-only` exécute les mêmes vérifications de source sans rendu. La livraison des conseils réels conserve l’attestation du workflow GitHub de production.
