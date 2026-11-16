@@ -107,6 +107,107 @@ class V11FinalSpeechTest(unittest.TestCase):
                     else:
                         self.assertEqual(row['status'], 'matched')
 
+    def test_final_hook_recovers_only_the_exact_cut_verified_in_both_signals(self):
+        rate, lag = 24_000, 1024
+        start, end = 2.52, 9.14
+        cut, first, last = round(start * rate), round(start * rate) + lag, round(end * rate) + lag
+        hook = 'Vous pouvez acheter à distance en toute sécurité si vous vérifiez chaque étape avant de signer'
+        scenes = [
+            {**self.segments[0], 'end': start},
+            {'id': 'hook', 'text': hook, 'start': start, 'end': end},
+            {**self.segments[2], 'start': end, 'end': 11},
+        ]
+        hook_words = [('Vous', 2.38, 3.44, .98)] + [
+            (word, 3.46 + index * .32, 3.7 + index * .32, .97)
+            for index, word in enumerate(hook.split()[1:])
+        ]
+        full = [('salutation', .3, 2.12, .9), *hook_words, ('jamm immo point com', 9.4, 10.8, .97)]
+        focused = [(word, .4 + index * .35, .65 + index * .35, .91)
+                   for index, word in enumerate(hook.split())]
+        narration = [512] * (11 * rate)
+        quiet_first, quiet_last = cut - rate // 10, cut + rate // 5
+        narration[quiet_first:quiet_last] = [135] * (quiet_last - quiet_first)
+        final_samples = [0] * lag + narration
+        decoded = struct.pack(f'<{len(final_samples)}h', *final_samples)
+        fixture_preservation = {'status': 'matched', 'lag_samples': lag, 'decoded_pcm_sha256': sha256(decoded)}
+
+        with TemporaryDirectory() as folder:
+            def read_clip(path):
+                with wave.open(str(path), 'rb') as audio:
+                    self.assertEqual(audio.readframes(audio.getnframes()), decoded[2 * first:2 * last])
+                return focused
+
+            def inspect(reader, words=full, source=narration, pcm=decoded, preservation=fixture_preservation):
+                shifted = [(word, start + lag / rate, end + lag / rate, confidence)
+                           for word, start, end, confidence in words]
+                return measure_final_french_speech(
+                    scenes, pcm, {'passed': True, 'lag_samples': lag}, folder, lambda unused: shifted,
+                    narration=source, preservation=preservation, recognize_hook=reader,
+                )
+
+            recognizer = Mock(side_effect=read_clip)
+            report = inspect(recognizer)
+            recognizer.assert_called_once()
+            self.assertEqual(report['status'], 'matched')
+            self.assertFalse(report['accent_evaluated'])
+            self.assertEqual(report['segments'][0]['observed_token_count'], 16)
+            self.assertEqual(report['segments'][0]['measurement'], {
+                'method': 'hook_exact_silence_boundary',
+                'start_sample': first, 'end_sample': last, 'pcm_sha256': sha256(decoded[2 * first:2 * last]),
+                'source_quiet': {
+                    'start_sample': quiet_first, 'cut_sample': cut, 'end_sample': quiet_last,
+                    'pcm_sha256': sha256(decoded[2 * (quiet_first + lag):2 * (quiet_last + lag)]),
+                },
+                'decoded_quiet': {
+                    'start_sample': quiet_first + lag, 'cut_sample': first, 'end_sample': quiet_last + lag,
+                    'pcm_sha256': sha256(decoded[2 * (quiet_first + lag):2 * (quiet_last + lag)]),
+                },
+                'global_crossing_source_samples': [round(2.38 * rate), round(3.44 * rate)],
+                'global_min_word_probability': .97, 'bounded_min_word_probability': .91,
+            })
+
+            # Even an exact high-confidence reconstruction cannot justify cutting phonemes.
+            changed_export = decoded[:2 * first] + struct.pack('<h', 8192) + decoded[2 * (first + 1):]
+            changed_source = narration.copy()
+            changed_source[cut] = 8192
+            short_source = narration.copy()
+            short_source[quiet_last - rate // 100:quiet_last] = [512] * (rate // 100)
+            for changed in (
+                {'source': changed_source},
+                {'source': short_source},
+                {'pcm': changed_export, 'preservation': {**fixture_preservation,
+                                                         'decoded_pcm_sha256': sha256(changed_export)}},
+                {'preservation': None},
+                {'preservation': {**fixture_preservation, 'status': 'inconclusive'}},
+                {'preservation': {**fixture_preservation, 'lag_samples': 0}},
+                {'preservation': {**fixture_preservation, 'decoded_pcm_sha256': sha256(b'other')}},
+                {'words': [full[0], ('Nous', 2.38, 3.44, .98), *full[2:]]},
+                {'words': [full[0], ('Vous', 2.38, 3.44, .59), *full[2:]]},
+                {'words': [('salutation', .3, 2.54, .9), *full[1:]]},
+                {'words': [*full[:-2], ('signer', 8.4, 9.16, .97), full[-1]]},
+            ):
+                with self.subTest(fields=list(changed)):
+                    forbidden = Mock(return_value=focused)
+                    held = inspect(forbidden, **changed)
+                    forbidden.assert_not_called()
+                    self.assertEqual(held['segments'][0]['reason'], 'mixed_language_boundary')
+
+            for changed in (
+                focused[1:],
+                [('Nous', .4, .65, .98), *focused[1:]],
+                [('Vous', .4, .65, .59), *focused[1:]],
+                [*focused[:-1], ('signer', 6.1, 6.65, .91)],
+            ):
+                retry = Mock(return_value=changed)
+                held = inspect(retry)
+                retry.assert_called_once()
+                self.assertEqual(held['segments'][0]['reason'], 'mixed_language_boundary')
+                self.assertEqual(held['segments'][1]['status'], 'matched')
+
+            domain_held = inspect(recognizer, words=[*full[:-1], ('jamimo com', 9.4, 10.8, .97)])
+            self.assertEqual(domain_held['status'], 'inconclusive')
+            self.assertEqual([item['status'] for item in domain_held['segments']], ['matched', 'inconclusive'])
+
     def test_neighboring_french_scenes_use_one_exact_partition_without_reusing_brand_words(self):
         scenes = [
             {'id': 'takeaway', 'text': 'Consultez Jamm Immo.', 'start': 0, 'end': 4},
@@ -267,6 +368,7 @@ class V11FinalSpeechTest(unittest.TestCase):
              patch('audit_tip_v11.media_shape', return_value={'passed': True}), \
              patch('audit_tip_v11.command', return_value=self.decoded) as command, \
              patch('audit_tip_v11.measure_audio', return_value=waveform), \
+             patch('audit_tip_v11.measure_audio_preservation', return_value={'status': 'inconclusive'}) as preserve, \
              patch('audit_tip_v11.measure_text', return_value={'passed': True}), \
              patch('audit_tip_v11.measure_final_french_speech', return_value=speech) as measure:
             report = audit(args)
@@ -274,6 +376,9 @@ class V11FinalSpeechTest(unittest.TestCase):
             self.assertEqual(report['final_french_speech'], speech)
             measure.assert_called_once()
             self.assertEqual(measure.call_args.args[:3], (self.segments, self.decoded, waveform))
+            self.assertEqual(measure.call_args.kwargs, {
+                'narration': 'different reference bytes', 'preservation': preserve.return_value,
+            })
             decoded_input = command.call_args.args[command.call_args.args.index('-i') + 1]
             self.assertEqual(decoded_input, snapshot.call_args.args[1])
             self.assertEqual(Path(decoded_input).name, 'audit.mp4')

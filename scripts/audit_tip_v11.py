@@ -436,7 +436,7 @@ def audit(args):
         preservation = measure_audio_preservation(alignment, narration, mix, decoded_pcm, audio.get('lag_samples'))
         text = measure_text(video, alignment, args.ocr_language)
         speech = {'final_french_speech': measure_final_french_speech(
-            alignment['segments'], decoded_pcm, audio, folder,
+            alignment['segments'], decoded_pcm, audio, folder, narration=narration, preservation=preservation,
         )} if args.measure_final_french else {}
         visibility = {'final_brand_cta_visibility': measure_final_brand_cta(
             video, alignment, args.brand_logo, args.ocr_language,

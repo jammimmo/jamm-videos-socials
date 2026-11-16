@@ -6,12 +6,15 @@ import json
 import math
 from pathlib import Path
 import re
+import struct
 import subprocess
 import sys
 import unicodedata
 import wave
 
-from align_tip_v11 import ASR_REPO, ASR_REVISION, NUMBER_WORDS, PHONE_WORDS, audible_windows, voiced_overlap
+from align_tip_v11 import (
+    ASR_REPO, ASR_REVISION, NUMBER_WORDS, PHONE_WORDS, audible_windows, has_audible_narration, voiced_overlap,
+)
 
 
 CONTRACT = 'tip-v11-fr-final-speech-v1'
@@ -25,9 +28,12 @@ MIN_WORD_PROBABILITY = .6
 # plus a small allowance for differences in word timestamps.
 MAX_FRENCH_BOUNDARY_SHIFT_SECONDS = 1.25
 RECOGNITION_TIMEOUT_SECONDS = 150
-PHONE_WINDOW_TIMEOUT_SECONDS = 45
+LOCAL_SPEECH_WINDOW_TIMEOUT_SECONDS = 45
 MAX_PHONE_EDGE_SHIFT_SECONDS = .75
 MIN_PHONE_WORD_AUDIBLE_SECONDS = .05
+HOOK_QUIET_WINDOW = SAMPLE_RATE // 100
+HOOK_QUIET_MIN_SIDE = SAMPLE_RATE // 10
+HOOK_QUIET_MIN_TOTAL = SAMPLE_RATE * 3 // 10
 
 
 def sha256(value):
@@ -74,7 +80,7 @@ def recognize_with_timeout(wav_path, timeout=RECOGNITION_TIMEOUT_SECONDS):
     return json.loads(completed.stdout)
 
 
-def words_by_segment(segments, recognized_words, lag_samples):
+def words_by_segment(segments, recognized_words, lag_samples, *, opening_hook=None, hook_crossings=None):
     observed = [[] for _ in segments]
     ambiguous_boundary = set()
     offset = lag_samples / SAMPLE_RATE
@@ -93,6 +99,9 @@ def words_by_segment(segments, recognized_words, lag_samples):
         if not spoken_plus and not normalized_words('', text):
             continue
         start, end = start - offset, end - offset
+        row = (text, start, end, probability)
+        if opening_hook and (start < opening_hook['start'] < end or start < opening_hook['end'] < end):
+            hook_crossings.append(row)
         middle = (start + end) / 2
         while index + 1 < len(segments) and middle >= segments[index]['end']:
             index += 1
@@ -106,7 +115,7 @@ def words_by_segment(segments, recognized_words, lag_samples):
         if any((segments[i]['id'] in EXCLUDED_SEGMENTS) != excluded for i in overlaps):
             ambiguous_boundary.update(i for i in overlaps if segments[i]['id'] not in EXCLUDED_SEGMENTS)
         if not excluded and (not spoken_plus or segment['id'] == 'phone'):
-            observed[index].append((text, start, end, probability))
+            observed[index].append(row)
     return observed, ambiguous_boundary
 
 
@@ -169,8 +178,15 @@ def anchored_phone_range(segments, expected_words, observed, index):
     return windows[0] if len(windows) == 1 else None
 
 
-def compare_french_segments(segments, recognized_words, lag_samples, verify_phone=None):
-    observed, ambiguous_boundary = words_by_segment(segments, recognized_words, lag_samples)
+def compare_french_segments(segments, recognized_words, lag_samples, verify_phone=None, *, verify_hook=None):
+    opening_hook = None
+    if (verify_hook and len(segments) > 2 and [part['id'] for part in segments[:2]] == ['greeting', 'hook']
+        and segments[0]['end'] == segments[1]['start'] and segments[1]['end'] == segments[2]['start']):
+        opening_hook = segments[1]
+    hook_crossings = []
+    observed, ambiguous_boundary = words_by_segment(
+        segments, recognized_words, lag_samples, opening_hook=opening_hook, hook_crossings=hook_crossings,
+    )
     expected_words = [normalized_words(segment['id'], segment['text']) for segment in segments]
     actual_words = [segment_words(segment['id'], words) for segment, words in zip(segments, observed)]
     # Keep each ASR row in exactly one report. Two proposed changes that
@@ -200,14 +216,26 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
         actual = segment_words(identity, observed[index])
         # A standalone sign can be numeric formatting. It needs the focused
         # phone check and acoustic evidence before it can count as speech.
-        matched = (bool(expected) and actual == expected and index not in ambiguous_boundary
-                   and all(word[0] != '+' and word[3] >= MIN_WORD_PROBABILITY for word in observed[index]))
+        exact = (bool(expected) and actual == expected
+                 and all(word[0] != '+' and word[3] >= MIN_WORD_PROBABILITY for word in observed[index]))
+        matched = exact and index not in ambiguous_boundary
         item = {'segment': identity, 'status': 'matched' if matched else 'inconclusive',
                 'expected_token_count': len(expected), 'observed_token_count': len(actual),
                 'expected_sha256': sha256(' '.join(expected).encode()),
                 'observed_sha256': sha256(' '.join(actual).encode())}
         if index in ambiguous_boundary:
             item['reason'] = 'mixed_language_boundary'
+            rows = observed[index]
+            if (segment is opening_hook and exact and hook_crossings == rows[:1]
+                and rows[0][1] < segment['start'] < rows[0][2] <= segment['end']
+                and normalized_words('hook', rows[0][0]) == expected[:1]):
+                measurement = verify_hook(segment['start'], segment['end'], expected)
+                if measurement:
+                    item.pop('reason')
+                    item.update(status='matched', measurement={
+                        **measurement, 'global_min_word_probability': min(row[3] for row in rows),
+                        'global_crossing_source_samples': [round(point * SAMPLE_RATE) for point in rows[0][1:3]],
+                    })
         elif not matched and identity == 'phone' and verify_phone:
             window = anchored_phone_range(segments, expected_words, observed, index)
             measurement = verify_phone(*window) if window else None
@@ -218,8 +246,66 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
     return results
 
 
-def recognize_final_phone(wav_path):
-    return recognize_with_timeout(wav_path, PHONE_WINDOW_TIMEOUT_SECONDS)
+def quiet_hook_cut(samples, cut):
+    """Measure contiguous 10 ms windows on both sides of the certified cut."""
+    if not 0 < cut < len(samples):
+        return None
+    start = end = cut
+    while start - HOOK_QUIET_WINDOW >= max(0, cut - SAMPLE_RATE):
+        if has_audible_narration(samples[start - HOOK_QUIET_WINDOW:start]):
+            break
+        start -= HOOK_QUIET_WINDOW
+    while end + HOOK_QUIET_WINDOW <= min(len(samples), cut + SAMPLE_RATE):
+        if has_audible_narration(samples[end:end + HOOK_QUIET_WINDOW]):
+            break
+        end += HOOK_QUIET_WINDOW
+    if min(cut - start, end - cut) < HOOK_QUIET_MIN_SIDE or end - start < HOOK_QUIET_MIN_TOTAL:
+        return None
+    return {
+        'start_sample': start, 'cut_sample': cut, 'end_sample': end,
+        'pcm_sha256': sha256(struct.pack(f'<{end - start}h', *samples[start:end])),
+    }
+
+
+def recognize_final_window(wav_path):
+    return recognize_with_timeout(wav_path, LOCAL_SPEECH_WINDOW_TIMEOUT_SECONDS)
+
+
+def verify_hook_samples(narration, decoded_pcm, lag_samples, directory, start, end, expected, recognize):
+    source_cut = round(start * SAMPLE_RATE)
+    first, last = source_cut + lag_samples, round(end * SAMPLE_RATE) + lag_samples
+    if not 0 <= first < last <= len(decoded_pcm) // 2:
+        return None
+    source_quiet = quiet_hook_cut(narration, source_cut)
+    if source_quiet is None:
+        return None
+    # Decode at most one second per side to attest the final cut at the same lag.
+    probe_start = max(0, first - SAMPLE_RATE)
+    probe_end = min(len(decoded_pcm) // 2, first + SAMPLE_RATE)
+    probe = struct.unpack(f'<{probe_end - probe_start}h', decoded_pcm[probe_start * 2:probe_end * 2])
+    final_quiet = quiet_hook_cut(probe, first - probe_start)
+    if final_quiet is None:
+        return None
+    for field in ('start_sample', 'cut_sample', 'end_sample'):
+        final_quiet[field] += probe_start
+    clip = decoded_pcm[first * 2:last * 2]
+    path = Path(directory) / 'decoded-final-hook.wav'
+    try:
+        with wave.open(str(path), 'wb') as output:
+            output.setparams((1, 2, SAMPLE_RATE, 0, 'NONE', 'not compressed'))
+            output.writeframes(clip)
+        duration = (last - first) / SAMPLE_RATE
+        [rows], _ = words_by_segment([{'id': 'hook', 'start': 0, 'end': duration}], recognize(path), 0)
+        if (segment_words('hook', rows) != expected
+            or any(row[2] > duration or row[3] < MIN_WORD_PROBABILITY for row in rows)):
+            return None
+    except Exception:
+        return None
+    return {
+        'method': 'hook_exact_silence_boundary', 'start_sample': first, 'end_sample': last,
+        'pcm_sha256': sha256(clip), 'source_quiet': source_quiet, 'decoded_quiet': final_quiet,
+        'bounded_min_word_probability': min(row[3] for row in rows),
+    }
 
 
 def verify_phone_samples(decoded_pcm, lag_samples, directory, start, end, recognize):
@@ -249,7 +335,8 @@ def verify_phone_samples(decoded_pcm, lag_samples, directory, start, end, recogn
 
 
 def measure_final_french_speech(segments, decoded_pcm, waveform, directory, recognize=recognize_with_timeout,
-                                recognize_phone=recognize_final_phone):
+                                recognize_phone=recognize_final_window, *, narration=None, preservation=None,
+                                recognize_hook=recognize_final_window):
     result = {'contract': CONTRACT, 'source': SOURCE, 'status': 'inconclusive',
               'model_revision': ASR_REVISION, 'decoded_pcm_sha256': sha256(decoded_pcm),
               'excluded_segments': list(EXCLUDED_SEGMENTS), 'accent_evaluated': False, 'segments': []}
@@ -261,9 +348,19 @@ def measure_final_french_speech(segments, decoded_pcm, waveform, directory, reco
             output.setparams((1, 2, SAMPLE_RATE, 0, 'NONE', 'not compressed'))
             output.writeframes(decoded_pcm)
         lag_samples = waveform['lag_samples']
+        hook_check = None
+        if (narration is not None and type(lag_samples) is int and lag_samples >= 0
+            and preservation and preservation.get('status') == 'matched'
+            and preservation.get('lag_samples') == lag_samples
+            and preservation.get('decoded_pcm_sha256') == result['decoded_pcm_sha256']):
+            def hook_check(start, end, expected):
+                return verify_hook_samples(narration, decoded_pcm, lag_samples, directory,
+                                           start, end, expected, recognize_hook)
+
         results = compare_french_segments(
             segments, recognize(wav_path), lag_samples,
             lambda start, end: verify_phone_samples(decoded_pcm, lag_samples, directory, start, end, recognize_phone),
+            verify_hook=hook_check,
         )
     except ValueError:
         return {**result, 'reason': 'recognition_or_timing_inconclusive'}
