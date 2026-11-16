@@ -9,8 +9,8 @@ import wave
 
 from audit_tip_v11 import audit
 from audit_tip_v11_speech import (
-    ASR_REVISION, MAX_RECOGNIZED_WORDS, RECOGNITION_TIMEOUT_SECONDS, compare_french_segments, measure_final_french_speech,
-    recognize_final_wav, recognize_with_timeout, sha256,
+    ASR_REVISION, CONTRACT, MAX_RECOGNIZED_WORDS, RECOGNITION_TIMEOUT_SECONDS, compare_french_segments,
+    measure_final_french_speech, recognize_final_wav, recognize_with_timeout, sha256,
 )
 
 
@@ -47,8 +47,24 @@ class V11FinalSpeechTest(unittest.TestCase):
             self.assertNotEqual(result.get('reason'), 'recognizer_unavailable')
             return result
 
+    def measure_scenes(self, scenes, observations):
+        recognized = []
+        for scene, words in zip(scenes, observations):
+            step = (scene['end'] - scene['start']) / (len(words) + 1)
+            for index, observation in enumerate(words, 1):
+                word, probability = observation if isinstance(observation, tuple) else (observation, .96)
+                start = scene['start'] + step * (index - .2)
+                recognized.append((word, start, start + step * .4, probability))
+        with TemporaryDirectory() as folder:
+            return measure_final_french_speech(
+                scenes, self.decoded, {'passed': True, 'lag_samples': 0}, folder,
+                lambda _path: recognized,
+            )
+
     def test_exact_full_french_uses_normalized_words_and_keeps_other_speech_out_of_scope(self):
         result = self.measure()
+        self.assertEqual(result['contract'], 'tip-v11-fr-final-speech-v2')
+        self.assertEqual(CONTRACT, 'tip-v11-fr-final-speech-v2')
         self.assertEqual(result['status'], 'matched')
         self.assertEqual(result['decoded_pcm_sha256'], sha256(self.decoded))
         self.assertEqual(result['excluded_segments'], ['greeting', 'signature'])
@@ -58,27 +74,145 @@ class V11FinalSpeechTest(unittest.TestCase):
             self.assertEqual(row['status'], 'matched')
             self.assertEqual(row['expected_sha256'], row['observed_sha256'])
             self.assertEqual(row['expected_token_count'], row['observed_token_count'])
+            self.assertEqual(row['observed_sha256'], sha256(' '.join(row['observed_words']).encode()))
         self.assertNotIn('Wolof greeting output', json.dumps(result))
 
-    def test_insertions_deletions_substitutions_and_low_confidence_are_inconclusive(self):
+    def test_scored_nonsemantic_word_edits_match_but_protected_or_untrusted_edits_fail(self):
         words = self.recognized
-        variants = [
+        accepted = [
             words[:4] + words[5:],
             words[:4] + [(' et', 3.25, 3.29, .93)] + words[4:],
             words[:3] + [(' fermer', 2.7, 3.2, .93)] + words[4:],
-            words[:4] + [(' zéro', 3.3, 3.7, .95)] + words[5:],
             words[:4] + [(' avant', 3.3, 3.7, .59)] + words[5:],
             words[:4] + [(' слова', 3.25, 3.29, .93)] + words[4:],
+        ]
+        for sequence in accepted:
+            with self.subTest(accepted=sequence):
+                self.assertEqual(self.measure(sequence)['status'], 'matched')
+
+        rejected = [
+            words[:4] + [(' zéro', 3.3, 3.7, .95)] + words[5:],
             words[:6] + [(' Jam Imo point com', 5.1, 6.0, .9)] + words[7:],
             words[:7] + [(' 221', 7.2, 7.5, .92)] + words[8:],
             words[:11] + [(' 48.', 9.3, 10.8, .96)] + words[12:],
         ]
-        for sequence in variants:
-            with self.subTest(sequence=sequence):
+        for sequence in rejected:
+            with self.subTest(rejected=sequence):
                 result = self.measure(sequence)
                 self.assertEqual(result['status'], 'inconclusive')
                 self.assertEqual(result['reason'], 'ordered_words_unconfirmed')
         self.assertEqual(self.measure([])['status'], 'inconclusive')
+
+    def test_v2_low_confidence_ordinary_word_spends_one_edit_but_weak_or_protected_words_hold(self):
+        long = 'maison durable quartier calme proche ecole transport jardin terrasse securite'.split()
+        support = 'dossier complet solide verifie fiable durable conforme utile clair simple rapide exact'.split()
+        scenes = [
+            {'id': 'hook', 'text': ' '.join(long) + '.', 'start': 0, 'end': 5},
+            {'id': 'step1', 'text': ' '.join(support) + '.', 'start': 5, 'end': 10},
+        ]
+        uncertain = [*long[:4], (long[4], .59), *long[5:]]
+        accepted = self.measure_scenes(scenes, [uncertain, support])
+        self.assertEqual(accepted['status'], 'matched')
+        self.assertIsNone(accepted['segments'][0]['observed_words'][4])
+        self.assertNotIn('observed_sha256', accepted['segments'][0])
+
+        short = 'maison quartier calme proche ecole transport'.split()
+        short_scenes = [
+            {'id': 'hook', 'text': ' '.join(short) + '.', 'start': 0, 'end': 4},
+            {'id': 'step1', 'text': ' '.join(support) + '.', 'start': 4, 'end': 9},
+        ]
+        weak = self.measure_scenes(short_scenes, [[*short[:2], (short[2], .59), *short[3:]], support])
+        self.assertEqual(weak['segments'][0]['status'], 'inconclusive')
+        self.assertEqual(weak['status'], 'inconclusive')
+
+        protected = 'vous ne signez jamais sans deux controles avant une visite'.split()
+        protected_scenes = [
+            {'id': 'hook', 'text': ' '.join(protected) + '.', 'start': 0, 'end': 5},
+            {'id': 'step1', 'text': ' '.join(support) + '.', 'start': 5, 'end': 10},
+        ]
+        for index in (1, 3, 4, 5, 8):
+            heard = protected.copy()
+            heard[index] = (heard[index], .59)
+            with self.subTest(protected=protected[index]):
+                held = self.measure_scenes(protected_scenes, [heard, support])
+                self.assertEqual(held['segments'][0]['status'], 'inconclusive')
+                self.assertEqual(held['status'], 'inconclusive')
+
+        ordinary_heard = [*long[:4], ('deux', .59), *long[5:]]
+        held = self.measure_scenes(scenes, [ordinary_heard, support])
+        self.assertEqual(held['segments'][0]['status'], 'inconclusive',
+                         'a weak protected ASR token cannot be hidden as an ordinary null')
+
+    def test_v2_enforces_each_segment_then_the_global_accuracy_without_publishing_scores(self):
+        first = 'maison durable quartier calme proche ecole transport jardin terrasse securite'.split()
+        second = 'achetez logement fiable avec dossier complet avant toute signature finale'.split()
+        scenes = [
+            {'id': 'hook', 'text': ' '.join(first) + '.', 'start': 0, 'end': 5},
+            {'id': 'step1', 'text': ' '.join(second) + '.', 'start': 5, 'end': 10},
+        ]
+        one_edit = [*first[:4], 'voisine', *first[5:]]
+        matched = self.measure_scenes(scenes, [one_edit, second])
+        self.assertEqual(matched['status'], 'matched')
+        self.assertEqual(matched['segments'][0]['observed_words'], one_edit)
+        self.assertNotIn('accuracy', json.dumps(matched))
+        self.assertNotIn('edit', json.dumps(matched))
+
+        two_edits = [*second[:5], 'apres', *second[6:]]
+        global_failure = self.measure_scenes(scenes, [one_edit, two_edits])
+        self.assertEqual([row['status'] for row in global_failure['segments']], ['matched', 'matched'])
+        self.assertEqual(global_failure['status'], 'inconclusive')
+
+        short = 'maison quartier calme proche ecole transport'.split()
+        long = 'dossier complet solide verifie fiable durable conforme utile clair simple rapide exact'.split()
+        uneven = [
+            {'id': 'hook', 'text': ' '.join(short) + '.', 'start': 0, 'end': 4},
+            {'id': 'step1', 'text': ' '.join(long) + '.', 'start': 4, 'end': 9},
+        ]
+        segment_failure = self.measure_scenes(uneven, [[*short[:-1], 'gare'], long])
+        self.assertEqual(segment_failure['segments'][0]['status'], 'inconclusive')
+        self.assertEqual(segment_failure['status'], 'inconclusive')
+
+    def test_v2_keeps_numeric_and_negation_semantics_exact_at_high_word_accuracy(self):
+        expected = 'vous ne signez jamais sans deux controles avant une troisieme visite 2 fois'.split()
+        support = 'dossier complet solide verifie fiable durable conforme utile clair simple rapide exact'.split()
+        scenes = [
+            {'id': 'hook', 'text': ' '.join(expected) + '.', 'start': 0, 'end': 5},
+            {'id': 'step1', 'text': ' '.join(support) + '.', 'start': 5, 'end': 10},
+        ]
+        for index, replacement in [
+            (1, 'deja'), (3, 'souvent'), (4, 'avec'), (5, 'trois'),
+            (8, 'la'), (9, 'prochaine'), (11, '3'),
+        ]:
+            changed = expected.copy()
+            changed[index] = replacement
+            with self.subTest(expected=expected[index], replacement=replacement):
+                report = self.measure_scenes(scenes, [changed, support])
+                self.assertEqual(report['segments'][0]['status'], 'inconclusive')
+                self.assertEqual(report['status'], 'inconclusive')
+
+    def test_v2_allows_one_unprotected_point_omission_only_as_speech_evidence(self):
+        domain = 'Retrouvez nous sur notre site jamm immo point com'.split()
+        support = 'consultez toujours le dossier complet avant de signer votre achat'.split()
+        scenes = [
+            {'id': 'domain', 'text': ' '.join(domain) + '.', 'start': 0, 'end': 5},
+            {'id': 'contact', 'text': ' '.join(support) + '.', 'start': 5, 'end': 10},
+        ]
+        heard_domain = [word for word in domain if word != 'point']
+        report = self.measure_scenes(scenes, [heard_domain, support])
+        self.assertEqual(report['status'], 'matched')
+        self.assertEqual(report['segments'][0]['observed_words'], [word.lower() for word in heard_domain])
+        self.assertNotIn('website', json.dumps(report), 'the separate exact screen receipt remains authoritative')
+
+    def test_v2_bounds_private_observed_words_fail_closed(self):
+        segment = {'id': 'hook', 'text': 'conseil utile.', 'start': 0, 'end': 3}
+        too_many = [(f'mot{index}', index / 100, index / 100 + .005, .9) for index in range(129)]
+        [row] = compare_french_segments([segment], too_many, 0)
+        self.assertEqual(row['status'], 'inconclusive')
+        self.assertEqual(row['observed_words'], [])
+
+        [row] = compare_french_segments([segment], [('x' * 129, .1, .2, .9)], 0)
+        self.assertEqual(row['status'], 'inconclusive')
+        self.assertEqual(row['observed_words'], [])
 
     def test_missing_timing_or_ambiguous_mixed_language_boundary_is_inconclusive(self):
         for bad_word in [('mot', 1.8, 2.1, .93), ('mot', float('nan'), 2.1, .93),

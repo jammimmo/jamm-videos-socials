@@ -17,12 +17,16 @@ from align_tip_v11 import (
 )
 
 
-CONTRACT = 'tip-v11-fr-final-speech-v1'
+CONTRACT = 'tip-v11-fr-final-speech-v2'
 SOURCE = 'final_mp4_pcm_s16le_mono_24khz'
 SAMPLE_RATE = 24_000
 EXCLUDED_SEGMENTS = ('greeting', 'signature')
 MAX_RECOGNIZED_WORDS = 500
+MAX_OBSERVED_WORDS = 128
+MAX_OBSERVED_WORD_LENGTH = 128
 MIN_WORD_PROBABILITY = .6
+MIN_SEGMENT_ACCURACY_PERCENT = 85
+MIN_GLOBAL_ACCURACY_PERCENT = 92
 # The ordinary cut still owns every word outside this window. A pair can
 # recover a displaced cut of at most the 1.1 seconds observed in the MP4,
 # plus a small allowance for differences in word timestamps.
@@ -35,6 +39,12 @@ HOOK_QUIET_WINDOW = SAMPLE_RATE // 100
 HOOK_QUIET_MIN_SIDE = SAMPLE_RATE // 10
 HOOK_QUIET_MIN_TOTAL = SAMPLE_RATE * 3 // 10
 FIXED_BRAND_WORD_INDEX = {'services': 0, 'socials': 2}
+PROTECTED_SPEECH_WORDS = frozenset('''
+zero un une deux trois quatre cinq six sept huit neuf dix onze douze treize quatorze quinze seize
+vingt trente quarante cinquante soixante septante huitante octante nonante cent cents mille millier
+milliers million millions milliard milliards premier premiere second seconde ne n pas aucun aucune
+aucuns aucunes jamais ni sans plus non rien guere
+'''.split())
 
 
 def sha256(value):
@@ -42,18 +52,77 @@ def sha256(value):
 
 
 def normalized_words(segment_id, value):
-    """Fold typography with no fuzzy spelling or word substitutions."""
-    value = ''.join(char for char in unicodedata.normalize('NFKD', value).casefold()
-                    if not unicodedata.combining(char))
+    """Match the Worker's NFKD/lower/mark-removal and Unicode L/N tokens."""
+    value = ''.join(char for char in unicodedata.normalize('NFKD', value).lower()
+                    if not unicodedata.category(char).startswith('M'))
     if segment_id == 'domain':
         value = re.sub(r'(?<!\w)jamm\s*immo\s*\.\s*com(?!\w)', 'jamm immo point com', value)
     if segment_id == 'phone':
         value = value.replace('+', ' plus ')
         value = re.sub(r'(?<!\w)221769444849(?!\w)', '221 76 944 48 49', value)
-    words = re.findall(r'[^\W_]+', value)
+    words = []
+    current = []
+    for char in value:
+        if unicodedata.category(char)[:1] in ('L', 'N'):
+            current.append(char)
+        elif current:
+            words.append(''.join(current))
+            current = []
+    if current:
+        words.append(''.join(current))
     if segment_id != 'phone':
         return words
     return [word for token in words for word in NUMBER_WORDS.get(token, token).split()]
+
+
+def speech_edits(expected, observed):
+    """Bounded Levenshtein distance, identical to the Worker's row scorer."""
+    previous = list(range(len(observed) + 1))
+    for index, word in enumerate(expected):
+        following = [index + 1]
+        for column, heard in enumerate(observed):
+            following.append(min(previous[column + 1] + 1, following[column] + 1,
+                                 previous[column] + int(word != heard)))
+        previous = following
+    return previous[-1]
+
+
+def protected_speech(words):
+    """Keep numeric and negation semantics exact even when other words score."""
+    def protected(word):
+        if any(unicodedata.category(char).startswith('N') for char in word) or word in PROTECTED_SPEECH_WORDS:
+            return True
+        stem = word[:-4] if word.endswith('ieme') else ''
+        return bool(stem) and all(unicodedata.category(char).startswith('L') for char in stem)
+    return [word for word in words if word is not None and protected(word)]
+
+
+def bounded_observed_words(words):
+    if (not 1 <= len(words) <= MAX_OBSERVED_WORDS
+        or any(word is not None and not 1 <= len(word) <= MAX_OBSERVED_WORD_LENGTH for word in words)):
+        return None
+    return words
+
+
+def observed_words_with_uncertainty(identity, expected, raw_actual, actual, rows):
+    """Replace only safely mapped, ordinary low-confidence ASR tokens with null."""
+    token_rows = [normalized_words(identity, row[0]) for row in rows]
+    flattened = [word for words in token_rows for word in words]
+    uncertain = [word for words, row in zip(token_rows, rows) if row[3] < MIN_WORD_PROBABILITY for word in words]
+    # Cross-row domain/phone rewrites cannot be assigned to one uncertain ASR
+    # row. Exact rows retain the established fast path; uncertain rows fail.
+    if flattened != raw_actual:
+        return (actual, False) if not uncertain else (None, True)
+    if protected_speech(uncertain):
+        return None, True
+    reported = [None if row[3] < MIN_WORD_PROBABILITY else word
+                for words, row in zip(token_rows, rows) for word in words]
+    alias = fixed_brand_alias_index(identity, expected, raw_actual)
+    if actual != raw_actual:
+        if alias is None or reported[alias:alias + 2] != ['jam', 'imo']:
+            return None, True
+        reported[alias:alias + 2] = ['jamm', 'immo']
+    return reported, False
 
 
 def recognize_final_wav(wav_path):
@@ -72,8 +141,10 @@ def recognize_final_wav(wav_path):
 
 
 def recognize_with_timeout(wav_path, timeout=RECOGNITION_TIMEOUT_SECONDS):
-    # The child receives only the extracted audio path. Its transcript crosses
-    # a captured pipe in memory and is never saved to the report or logged.
+    # The child receives only the extracted audio path. Raw words, timestamps
+    # and confidence values cross a captured pipe in memory and are never
+    # logged or saved; only bounded normalized observations enter the private
+    # v2 receipt.
     completed = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), str(wav_path)],
         capture_output=True, check=True, timeout=timeout,
@@ -240,15 +311,26 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
         actual = raw_actual if index in ambiguous_boundary else canonical_fixed_brand_words(
             identity, expected, raw_actual, observed[index],
         )
+        uncertain_actual, unsafe_uncertainty = observed_words_with_uncertainty(
+            identity, expected, raw_actual, actual, observed[index],
+        )
+        reported = bounded_observed_words(uncertain_actual) if uncertain_actual is not None else None
         # A standalone sign can be numeric formatting. It needs the focused
         # phone check and acoustic evidence before it can count as speech.
         exact = (bool(expected) and actual == expected
                  and all(word[0] != '+' and word[3] >= MIN_WORD_PROBABILITY for word in observed[index]))
-        matched = exact and index not in ambiguous_boundary
+        edits = speech_edits(expected, reported) if expected and reported is not None else len(expected) + len(actual)
+        scored = (bool(expected) and reported is not None and not unsafe_uncertainty
+                  and edits * 100 <= len(expected) * (100 - MIN_SEGMENT_ACCURACY_PERCENT)
+                  and protected_speech(reported) == protected_speech(expected)
+                  and all(word[0] != '+' for word in observed[index]))
+        matched = scored and index not in ambiguous_boundary
         item = {'segment': identity, 'status': 'matched' if matched else 'inconclusive',
                 'expected_token_count': len(expected), 'observed_token_count': len(actual),
                 'expected_sha256': sha256(' '.join(expected).encode()),
-                'observed_sha256': sha256(' '.join(actual).encode())}
+                'observed_words': reported or []}
+        if reported is not None and all(word is not None for word in reported):
+            item['observed_sha256'] = sha256(' '.join(reported).encode())
         if matched and actual != raw_actual:
             item['measurement'] = {
                 'method': 'fixed_jamm_immo_phonetic_spelling',
@@ -263,7 +345,8 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
                 measurement = verify_hook(segment['start'], segment['end'], expected)
                 if measurement:
                     item.pop('reason')
-                    item.update(status='matched', measurement={
+                    item.update(status='matched', observed_token_count=len(expected),
+                                observed_sha256=item['expected_sha256'], observed_words=expected, measurement={
                         **measurement, 'global_min_word_probability': min(row[3] for row in rows),
                         'global_crossing_source_samples': [round(point * SAMPLE_RATE) for point in rows[0][1:3]],
                     })
@@ -272,14 +355,14 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
             measurement = verify_phone(*window) if window else None
             if measurement:
                 item.update(status='matched', observed_sha256=item['expected_sha256'],
-                            observed_token_count=len(expected), measurement=measurement)
+                            observed_token_count=len(expected), observed_words=expected, measurement=measurement)
         elif not matched and identity == 'services' and verify_services:
             if fixed_brand_alias_index(identity, expected, raw_actual) is not None:
                 confirmed = verify_services(segment, expected)
                 if confirmed:
                     verified_words, measurement = confirmed
                     item.update(status='matched', observed_sha256=sha256(' '.join(verified_words).encode()),
-                                observed_token_count=len(verified_words), measurement={
+                                observed_token_count=len(verified_words), observed_words=verified_words, measurement={
                                     **measurement, 'raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
                                 })
         results.append(item)
@@ -443,6 +526,12 @@ def measure_final_french_speech(segments, decoded_pcm, waveform, directory, reco
     if any(item.get('reason') == 'mixed_language_boundary' for item in results):
         return {**result, 'reason': 'recognition_or_timing_inconclusive', 'segments': results}
     if not results or any(item['status'] != 'matched' for item in results):
+        return {**result, 'reason': 'ordered_words_unconfirmed', 'segments': results}
+    total_words = sum(item['expected_token_count'] for item in results)
+    total_edits = sum(speech_edits(
+        normalized_words(segment['id'], segment['text']), item['observed_words'],
+    ) for segment, item in zip((segment for segment in segments if segment['id'] not in EXCLUDED_SEGMENTS), results))
+    if not total_words or total_edits * 100 > total_words * (100 - MIN_GLOBAL_ACCURACY_PERCENT):
         return {**result, 'reason': 'ordered_words_unconfirmed', 'segments': results}
     return {**result, 'status': 'matched', 'segments': results}
 
