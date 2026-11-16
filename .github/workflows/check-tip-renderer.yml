@@ -2,7 +2,9 @@ name: Check tip renderer
 
 on:
   pull_request:
-    branches: [main]
+    branches:
+      - main
+      - 'feature/tip-v11-*'
 
 permissions:
   contents: read
@@ -29,6 +31,7 @@ jobs:
 
   offline-render-smoke:
     name: Offline Remotion smoke
+    if: github.base_ref == 'main'
     permissions:
       contents: read
     runs-on: ubuntu-24.04
