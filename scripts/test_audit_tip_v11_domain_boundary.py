@@ -74,6 +74,21 @@ class FixedDomainAndSocialOnsetTest(unittest.TestCase):
         self.assertEqual(item['status'], 'matched')
         self.assertNotIn('point', item['observed_words'])
 
+    def test_fragmented_host_address_and_scheme_separators_are_not_ordinary_insertions(self):
+        prefix = ['Retrouvez-nous', 'sur', 'notre', 'site']
+        fragments = [
+            ['evil.', 'JammImmo.com'], ['evil . JammImmo.com'], ['evil', '.', 'JammImmo.com'],
+            ['evil@', 'JammImmo.com'], ['evil', '@', 'Jamm', 'Immo', '.com'],
+            ['evil-', 'JammImmo.com'], ['evil', '-', 'JammImmo.com'],
+            ['evil/', 'JammImmo.com'], ['evil\\', 'JammImmo.com'],
+            ['https://', 'JammImmo.com'], ['https', ':', '/', '/', 'JammImmo.com'],
+        ]
+        for tail in fragments:
+            with self.subTest(tail=tail):
+                rows = observations([*prefix, *tail], step=.1)
+                self.assertIsNone(fixed_company_domain_notation(list(FIXED_DOMAIN_WORDS), rows))
+                self.assertEqual(compare_french_segments([self.domain], rows, 0)[0]['status'], 'inconclusive')
+
     def synthetic_complete_phone(self):
         """A unit fixture; explicitly not actual AAC phone boundary evidence."""
         phone = self.social_scenes[0]

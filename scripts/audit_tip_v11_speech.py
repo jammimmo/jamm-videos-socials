@@ -299,6 +299,11 @@ def fixed_company_domain_notation(expected, rows):
     match = re.search(pattern, text)
     if match is None:
         return None
+    # Joining ASR rows inserts spaces. They must not hide a split host,
+    # address or scheme separator (evil. + JammImmo.com, evil@ + name).
+    # Ambiguous preceding URL punctuation remains inconclusive.
+    if re.search(r'[.@/\\:-]\s*$', text[:match.start()]):
+        return None
     def origin_probability(first, last):
         indices = {origin for origin in origins[first:last] if origin is not None}
         return min(rows[index][3] for index in indices) if indices else 0
