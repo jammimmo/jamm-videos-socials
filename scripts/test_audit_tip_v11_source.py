@@ -1,14 +1,16 @@
 import io
+import json
 from pathlib import Path
 import struct
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 import wave
 
 from audit_tip_v11_speech import ASR_REVISION, SAMPLE_RATE, compare_french_segments, french_speech_outcome, sha256
 from score_tip_source import score_source
-from test_align_tip_v11 import SEGMENTS, speech
+from test_align_tip_v11 import SEGMENTS, phone_gap, speech
 
 
 def make_wav(data):
@@ -24,7 +26,7 @@ class SourceScoringTest(unittest.TestCase):
     wav = make_wav(data)
     plan = {'segments': SEGMENTS, 'draft_sha256': 'a' * 64, 'source_script_sha256': 'b' * 64}
 
-    def run_source(self, rows=None, wav=None):
+    def run_source(self, rows=None, wav=None, recognizer=None, window=None):
         if rows is None:
             rows = [(row['word'], row['start'], row['end'], .95) for row in speech(self.plan['segments'])]
         wav = self.wav if wav is None else wav
@@ -35,7 +37,7 @@ class SourceScoringTest(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), wav)
                 return rows
 
-            return score_source(self.plan, wav, directory, recognize, Mock(return_value=[]))
+            return score_source(self.plan, wav, directory, recognizer or recognize, window or Mock(return_value=[]))
 
     def test_scores_exact_source_with_bound_pcm_draft_and_model(self):
         report = self.run_source()
@@ -51,6 +53,59 @@ class SourceScoringTest(unittest.TestCase):
         self.assertEqual(report['deferred_checks'], ['domain_audio', 'visible_domain_cta'])
         self.assertEqual(report['excluded_segments'], ['greeting', 'signature'])
         self.assertFalse(report['accent_evaluated'])
+        diagnostic, = report['recognizer_diagnostics']
+        self.assertEqual(diagnostic['stage'], 'full_audio')
+        self.assertEqual(diagnostic['window_duration_ms'], 70_000)
+        self.assertEqual(diagnostic['outcome'], 'completed')
+        self.assertGreater(diagnostic['recognized_row_count'], 0)
+
+    def test_classifies_full_decode_timeout_without_exposing_exception_or_transcript(self):
+        failure = subprocess.TimeoutExpired(['sensitive-command-path'], 150,
+                                             output=b'private raw spoken words', stderr=b'private diagnostics')
+        with patch('score_tip_source.monotonic', side_effect=[0, 150.005]):
+            report = self.run_source(recognizer=Mock(side_effect=failure))
+        self.assertEqual(report['status'], 'inconclusive')
+        self.assertEqual(report['reason'], 'recognizer_timeout')
+        self.assertEqual(report['segments'], [])
+        self.assertEqual(report['recognizer_diagnostics'], [{
+            'call_index': 1, 'stage': 'full_audio', 'window_duration_ms': 70_000,
+            'outcome': 'timeout', 'error_class': 'TimeoutExpired', 'elapsed_ms': 150_005,
+        }])
+        for secret in ('sensitive-command-path', 'private raw spoken words', 'private diagnostics'):
+            self.assertNotIn(secret, json.dumps(report))
+
+    def test_classifies_subprocess_and_json_failures_without_treating_them_as_voice_mismatches(self):
+        for failure, reason, error_class in (
+            (subprocess.CalledProcessError(2, ['sensitive-command-path'], output=b'private raw words',
+                                          stderr=b'private diagnostic'), 'recognizer_process_failed', 'CalledProcessError'),
+            (json.JSONDecodeError('private diagnostic', 'private raw words', 0),
+             'recognizer_output_invalid', 'JSONDecodeError'),
+            (FileNotFoundError('/private/sensitive-model-path'), 'recognizer_unavailable', 'FileNotFoundError'),
+        ):
+            with self.subTest(reason=reason):
+                report = self.run_source(recognizer=Mock(side_effect=failure))
+                self.assertEqual(report['status'], 'inconclusive')
+                self.assertEqual(report['reason'], reason)
+                diagnostic, = report['recognizer_diagnostics']
+                self.assertEqual(diagnostic['stage'], 'full_audio')
+                self.assertEqual(diagnostic['error_class'], error_class)
+                if isinstance(failure, subprocess.CalledProcessError):
+                    self.assertEqual(diagnostic['exit_code'], 2)
+                self.assertNotIn('private', json.dumps(diagnostic))
+                self.assertNotIn('sensitive', json.dumps(diagnostic))
+
+    def test_identifies_a_focused_alignment_failure_separately_from_a_completed_full_decode(self):
+        full, _, _, _ = phone_gap()
+        rows = [(row['word'], row['start'], row['end'], .95) for row in full]
+        report = self.run_source(rows=rows, window=Mock(side_effect=subprocess.TimeoutExpired('private-path', 45)))
+        self.assertEqual(report['status'], 'inconclusive')
+        self.assertEqual(report['reason'], 'recognizer_timeout')
+        first, failed = report['recognizer_diagnostics']
+        self.assertEqual((first['stage'], first['outcome']), ('full_audio', 'completed'))
+        self.assertEqual((failed['stage'], failed['outcome'], failed['error_class']),
+                         ('alignment_phone', 'timeout', 'TimeoutExpired'))
+        self.assertLess(failed['window_duration_ms'], 10_000)
+        self.assertNotIn('private-path', json.dumps(report))
 
     def test_rejects_changed_negation_and_number(self):
         rows = [(row['word'], row['start'], row['end'], .95) for row in speech(self.plan['segments'])]
