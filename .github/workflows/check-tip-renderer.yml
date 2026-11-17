@@ -1,4 +1,4 @@
-name: Bounded synthetic CPU codec parity hosted
+name: One-image synthetic JPEG preencoder hosted
 
 on:
   workflow_dispatch:
@@ -14,12 +14,12 @@ jobs:
   codec:
     if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/qa/codec-parity-hosted-v2-20261117'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: jammimmo/jamm-videos-socials
-          ref: b33308174b39c138b6504030c3707a28699640f8
+          ref: ea5d87ecdc8bd1d94b7d44f74971f1c57f948619
           path: codec-renderer
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -37,20 +37,19 @@ jobs:
           test "$(sha256sum "$ffmpeg_path" | cut -d ' ' -f 1)" = ed16af623947494a72e284b6eb8ff225f2da22b38b5d5069c2fd4b4ba3384e41
           test "$(node --version)" = v22.20.0
           test "$(npm --version)" = 10.9.3
-      - name: Measure pre-encoder pixels and four CPU codec modes
+      - name: Decode one common synthetic JPEG in two CPU modes
         working-directory: codec-renderer
         shell: bash
         env:
-          TIP_PARITY_EXPECTED_SHA: b33308174b39c138b6504030c3707a28699640f8
+          TIP_PARITY_EXPECTED_SHA: ea5d87ecdc8bd1d94b7d44f74971f1c57f948619
         run: |
           set -euo pipefail
           mkdir "$RUNNER_TEMP/codec-parity-receipts"
-          bash scripts/check-tip-codec-parity.sh "$RUNNER_TEMP/codec-parity-receipts"
+          bash scripts/check-tip-jpeg-preencoder.sh "$RUNNER_TEMP/codec-parity-receipts"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: codec-parity-hosted
+          name: jpeg-preencoder-hosted
           path: |
             ${{ runner.temp }}/codec-parity-receipts/receipt.json
-            ${{ runner.temp }}/codec-parity-receipts/*.log
           if-no-files-found: error
           retention-days: 7
