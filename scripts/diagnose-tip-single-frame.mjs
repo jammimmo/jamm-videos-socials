@@ -6,8 +6,7 @@ import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, cpSync } f
 import { tmpdir, networkInterfaces } from 'node:os';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { bundle } from '@remotion/bundler';
-import { ensureBrowser, openBrowser, selectComposition, renderFrames, makeCancelSignal } from '@remotion/renderer';
+import { admitTipCaptureRenderer } from './admit-tip-capture-renderer.mjs';
 import { buildTipV11Narration } from './tip-v11-contract.mjs';
 import { collectTipV11StaticFiles } from './tip-v11-render-manifest.mjs';
 import '../remotion.tip-v11.config.ts';
@@ -24,14 +23,17 @@ const sourceSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encodi
 assert.equal(sourceSha, process.env.TIP_PARITY_EXPECTED_SHA);
 const out = resolve(process.argv[2]);
 mkdirSync(out, { recursive: true });
-const rendererDir = dirname(require.resolve('@remotion/renderer'));
+// Admission proves this CommonJS renderer is connected to the actual hook before
+// any ensureBrowser/openBrowser/bundle/capture call. No ESM renderer imports.
+const { renderer, rendererDir, screenshotModule, admission } = await admitTipCaptureRenderer();
+const { ensureBrowser, openBrowser, selectComposition, renderFrames, makeCancelSignal } = renderer;
+const { bundle } = require('@remotion/bundler');
 const { getChromiumOpenGlRenderer } = require(join(rendererDir, 'options/gl.js'));
 const { getJpegQuality } = require(join(rendererDir, 'options/jpeg-quality.js'));
 const { videoImageFormatOption } = require(join(rendererDir, 'options/video-image-format.js'));
 assert.equal(getChromiumOpenGlRenderer(), 'angle');
 assert.equal(getJpegQuality(), 80);
 assert.equal(videoImageFormatOption.getValue({ commandLine: {} }).value, 'jpeg');
-const screenshotModule = require(join(rendererDir, 'screenshot-task.js'));
 const originalScreenshotTask = screenshotModule.screenshotTask;
 // Same exact synthetic text as offline-tip-v11-smoke; timings below are deliberate
 // diagnostic inputs, not recovered alignment timings from the old full render.
@@ -172,7 +174,7 @@ try {
     pixels[name] = { format, bytes: bytes.length, sha256: hash(bytes), nonOpaquePixels };
   }
   const receipt = { schema: 'jamm-v11-single-frame-capture-v1', syntheticOnly: true, publishable: false,
-    sourceSha, input, inputSha256: hash(JSON.stringify(input)), inventory, configSha256: hash(readFileSync(join(root, 'remotion.tip-v11.config.ts'))),
+    sourceSha, admission, input, inputSha256: hash(JSON.stringify(input)), inventory, configSha256: hash(readFileSync(join(root, 'remotion.tip-v11.config.ts'))),
     chromium: { path: cached.path, sha256: hash(readFileSync(cached.path)), browserVersion },
     bundledFfmpeg: { path: binary, sha256: hash(readFileSync(binary)) },
     observedGpu: gpu, capture, piped, pixels,

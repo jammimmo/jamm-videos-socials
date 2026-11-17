@@ -1,7 +1,8 @@
 # Single synthetic V11 frame: review plan
 
 No product file, global config, comparator, dependency or installed module is
-changed. This diagnostic is based on d60f33f. It has not been executed.
+changed. This diagnostic is based on d60f33f. The original90e8 diagnostic failed
+before producing capture evidence; the corrected version has not been rendered.
 
 ## Input and bounded work
 
@@ -21,6 +22,21 @@ one active render tab; this does not reproduce the full render's scheduling.
 No renderStill, video encoding, audio, Python, alignment, model, ASR or TTS.
 
 ## Instrumentation without changing installed files
+
+The90e8 hosted failure exposed separate renderer module instances: ESM imports
+resolve the bundled dist/esm/index.mjs, whereas the hook targeted CommonJS
+screenshot-task.js. The corrected process obtains every renderer API and the
+bundler with require, so the rendering path and hook share CommonJS instances.
+Admission runs before ensureBrowser/openBrowser/bundle/capture: verify public
+function identity against each defining CJS module and the actual require-cache
+child chain through render-frames, retry wrapper, render-frame, take-frame,
+puppeteer-screenshot and screenshot-task. Then invoke actual takeFrame with a
+stub page, stub evaluation and a sentinel screenshot hook; require one call and
+exact returned buffer identity. Restore both stubs in finally. This admission
+opens no browser and captures no image; it is also covered by a local unit test.
+Its measured module/code hashes and dispatch counts are retained in the receipt.
+The actual capture still must match onFrameBuffer and all previous guards.
+
 
 Load the actual V11 config and assert its installed getters resolve angle,
 video image format jpeg and quality80. Wrap only the in-process CommonJS export
