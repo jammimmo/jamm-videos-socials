@@ -38,6 +38,7 @@ MAX_PHONE_EDGE_SHIFT_SECONDS = .75
 SOCIALS_SIGNATURE_CONTEXT_SECONDS = 1.0
 SOCIALS_CONTEXT_GRID_PER_SECOND = 10
 MAX_SOCIALS_CONTEXT_SECONDS = 8
+MAX_DOMAIN_SCENE_SECONDS = 8
 MIN_PHONE_WORD_AUDIBLE_SECONDS = .05
 HOOK_QUIET_WINDOW = SAMPLE_RATE // 100
 HOOK_QUIET_MIN_SIDE = SAMPLE_RATE // 10
@@ -283,15 +284,9 @@ def fixed_domain_alias(expected, raw_actual, rows):
     return [*FIXED_DOMAIN_WORDS[:-2], 'com'], index
 
 
-def fixed_company_domain_notation(expected, rows):
-    """Normalize only the company's literal URL spelling, preserving row trust.
-
-    A dot actually observed in .com is URL notation for ``point com``. The
-    two bounded single/double consonants identify the same fixed brand. They
-    are not phonetic aliases: no edit-distance/domain search is performed.
-    Every expanded token retains the probability of its original ASR row.
-    """
-    if tuple(expected[-4:]) != ('jamm', 'immo', 'point', 'com') or not rows:
+def literal_company_domain_input(rows, *, allow_point_omission=False):
+    """Parse raw ASR URL syntax before punctuation can become ordinary edits."""
+    if not rows:
         return None
     text, origins = '', []
     for index, row in enumerate(rows):
@@ -302,17 +297,30 @@ def fixed_company_domain_notation(expected, rows):
             origins.append(None)
         text += part
         origins.extend([index] * len(part))
+    separator = r'(?:\s*(?P<dot>\.)\s*|\s+(?P<point>point)\s+'
+    separator += r'|\s+)' if allow_point_omission else ')'
     pattern = (r'(?<![\w.@/-])(?P<first>jam{1,2})\s*(?P<second>im{1,2}o)'
-               r'(?:\s*(?P<dot>\.)\s*|\s+(?P<point>point)\s+)'
-               r'(?P<tld>com)[.!?,;:\s]*$')
+               + separator + r'(?P<tld>com)[.!?,;:\s]*$')
     match = re.search(pattern, text)
-    if match is None:
+    # Inter-row whitespace must not conceal a split host/address/scheme.
+    if match is None or re.search(r'[.@/\\:-]\s*$', text[:match.start()]):
         return None
-    # Joining ASR rows inserts spaces. They must not hide a split host,
-    # address or scheme separator (evil. + JammImmo.com, evil@ + name).
-    # Ambiguous preceding URL punctuation remains inconclusive.
-    if re.search(r'[.@/\\:-]\s*$', text[:match.start()]):
+    return text, origins, match
+
+
+def fixed_domain_raw_url_guard(expected, rows):
+    return (tuple(expected[-4:]) == ('jamm', 'immo', 'point', 'com')
+            and literal_company_domain_input(rows, allow_point_omission=True) is not None)
+
+
+def fixed_company_domain_notation(expected, rows):
+    """Normalize only literal fixed-company URL notation, retaining row trust."""
+    if tuple(expected[-4:]) != ('jamm', 'immo', 'point', 'com'):
         return None
+    parsed = literal_company_domain_input(rows)
+    if parsed is None:
+        return None
+    text, origins, match = parsed
     def origin_probability(first, last):
         indices = {origin for origin in origins[first:last] if origin is not None}
         return min(rows[index][3] for index in indices) if indices else 0
@@ -334,6 +342,12 @@ def fixed_company_domain_notation(expected, rows):
         'raw_uncertain_token_count': sum(len(normalized_words('', row[0]))
                                          for row in rows if row[3] < MIN_WORD_PROBABILITY),
         'notation': 'dot' if match.group('dot') else 'point',
+        'brand_observed': match.group('first') + match.group('second'),
+        'brand_probability_ppm': math.floor(origin_probability(match.start('first'), match.end('second')) * 1_000_000),
+        'tld_probability_ppm': math.floor(origin_probability(*match.span('tld')) * 1_000_000),
+        'brand_row_indices': sorted({origin for origin in origins[match.start('first'):match.end('second')]
+                                     if origin is not None}),
+        'tld_row_indices': sorted({origin for origin in origins[slice(*match.span('tld'))] if origin is not None}),
     }
 
 
@@ -515,7 +529,7 @@ def anchored_phone_range(segments, expected_words, observed, index):
 
 
 def compare_french_segments(segments, recognized_words, lag_samples, verify_phone=None, *, verify_hook=None,
-                            verify_services=None, verify_socials=None):
+                            verify_services=None, verify_socials=None, verify_domain=None):
     opening_hook = None
     if (verify_hook and len(segments) > 2 and [part['id'] for part in segments[:2]] == ['greeting', 'hook']
         and segments[0]['end'] == segments[1]['start'] and segments[1]['end'] == segments[2]['start']):
@@ -563,7 +577,9 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
             observed[index - 1] if index else None,
         ) if index in ambiguous_boundary else None
         socials_alias = fixed_socials_boundary_alias(expected, raw_actual, observed[index], crossing)
-        domain_alias = fixed_domain_alias(expected, raw_actual, observed[index]) if index not in ambiguous_boundary else None
+        domain_raw_verified = identity != 'domain' or fixed_domain_raw_url_guard(expected, observed[index])
+        domain_alias = fixed_domain_alias(expected, raw_actual, observed[index]) if (
+            index not in ambiguous_boundary and domain_raw_verified) else None
         domain_notation = fixed_company_domain_notation(expected, observed[index]) if identity == 'domain' else None
         if complete_socials:
             actual = complete_socials[0]
@@ -604,8 +620,8 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
         # A wrong company domain/TLD is never an ordinary 1-in-9 word edit.
         canonical_point_omission = (tuple(expected) == FIXED_DOMAIN_WORDS
             and tuple(raw_actual) == tuple(word for word in FIXED_DOMAIN_WORDS if word != 'point'))
-        domain_verified = (identity != 'domain' or domain_notation is not None
-                           or domain_alias is not None or canonical_point_omission)
+        domain_verified = (identity != 'domain' or (domain_raw_verified and (
+            domain_notation is not None or domain_alias is not None or canonical_point_omission)))
         matched = scored and domain_verified and (index not in ambiguous_boundary or boundary_verified)
         item = {'segment': identity, 'status': 'matched' if matched else 'inconclusive',
                 'expected_token_count': len(expected), 'observed_token_count': len(actual),
@@ -685,6 +701,13 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
                             **measurement,
                             'global_raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
                         })
+        elif not matched and identity == 'domain' and verify_domain:
+            confirmed = verify_domain(segment, expected)
+            if confirmed:
+                item = {**confirmed, 'measurement': {
+                    **confirmed.get('measurement', {}),
+                    'global_raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
+                }}
         elif not matched and identity == 'phone' and verify_phone:
             window = anchored_phone_range(segments, expected_words, observed, index)
             measurement = verify_phone(*window) if window else None
@@ -983,6 +1006,90 @@ def verify_socials_scene_samples(decoded_pcm, lag_samples, directory, segments, 
             path.unlink(missing_ok=True)
 
 
+def uncertain_fixed_domain_scene_measurement(decoded_pcm, lag_samples, segment, first, last, rows, notation):
+    """Describe a held brand observation; never turn its uncertainty into words."""
+    if (notation is None or tuple(normalized_words('domain', segment['text'])) != FIXED_DOMAIN_WORDS
+        or first != round(segment['start'] * SAMPLE_RATE) + lag_samples
+        or last != round(segment['end'] * SAMPLE_RATE) + lag_samples
+        or not 0 <= first < last <= len(decoded_pcm) // 2
+        or last - first > MAX_DOMAIN_SCENE_SECONDS * SAMPLE_RATE
+        or notation['reported'] != [*FIXED_DOMAIN_WORDS[:5], None, None, *FIXED_DOMAIN_WORDS[7:]]
+        or any(left[2] > right[1] for left, right in zip(rows, rows[1:]))
+        or not 0 <= notation['brand_probability_ppm'] < 600000
+        or not 600000 <= notation['tld_probability_ppm'] <= 1000000):
+        return None
+    brand = notation['brand_observed']
+    raw = notation['raw_words']
+    if (not re.fullmatch(r'jam{1,2}im{1,2}o', brand)
+        or raw not in ([*FIXED_DOMAIN_WORDS[:5], brand, 'com'],
+                       [*FIXED_DOMAIN_WORDS[:5], brand, 'point', 'com'])):
+        return None
+    url_first = min(round(rows[index][1] * SAMPLE_RATE) + lag_samples
+                    for index in notation['brand_row_indices'])
+    url_last = max(round(rows[index][2] * SAMPLE_RATE) + lag_samples
+                   for index in notation['tld_row_indices'])
+    if not first <= url_first < url_last <= last:
+        return None
+    return {
+        'method': 'fixed_company_domain_asr_uncertain_v1',
+        'decoded_pcm_sha256': sha256(decoded_pcm),
+        'start_sample': first, 'end_sample': last,
+        'scene_start_sample': first, 'scene_end_sample': last,
+        'url_start_sample': url_first, 'url_end_sample': url_last,
+        'pcm_sha256': sha256(decoded_pcm[first * 2:last * 2]),
+        'raw_observed_words': raw, 'raw_observed_sha256': sha256(' '.join(raw).encode()),
+        'brand_observed': brand, 'brand_probability_ppm': notation['brand_probability_ppm'],
+        'tld_observed': '.com', 'tld_probability_ppm': notation['tld_probability_ppm'],
+    }
+
+
+def verify_domain_scene_samples(decoded_pcm, lag_samples, directory, segment, expected, recognize):
+    """One actual final-PCM read strictly within the domain's own scene."""
+    if (segment['id'] != 'domain' or tuple(expected) != FIXED_DOMAIN_WORDS
+        or type(lag_samples) is not int or lag_samples < 0):
+        return None
+    first = round(segment['start'] * SAMPLE_RATE) + lag_samples
+    last = round(segment['end'] * SAMPLE_RATE) + lag_samples
+    if (not 0 <= first < last <= len(decoded_pcm) // 2
+        or last - first > MAX_DOMAIN_SCENE_SECONDS * SAMPLE_RATE):
+        return None
+    clip = decoded_pcm[first * 2:last * 2]
+    path = Path(directory) / 'decoded-domain-scene.wav'
+    created = False
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+        created = True
+        with os.fdopen(descriptor, 'wb') as target:
+            with wave.open(target, 'wb') as output:
+                output.setparams((1, 2, SAMPLE_RATE, 0, 'NONE', 'not compressed'))
+                output.writeframes(clip)
+        rows = list(islice(recognize(path), MAX_RECOGNIZED_WORDS + 1))
+        duration = (last - first) / SAMPLE_RATE
+        if (len(rows) > MAX_RECOGNIZED_WORDS
+            or any(not all(type(value) in (int, float) and math.isfinite(value) for value in row[1:])
+                   or not 0 <= row[1] < row[2] <= duration + .12 for row in rows)):
+            return None
+        shifted = [(word, start + first / SAMPLE_RATE, end + first / SAMPLE_RATE, probability)
+                   for word, start, end, probability in rows]
+        [result] = compare_french_segments([segment], shifted, lag_samples)
+        observed, _ = words_by_segment([segment], shifted, lag_samples)
+        notation = fixed_company_domain_notation(expected, observed[0])
+        held = uncertain_fixed_domain_scene_measurement(
+            decoded_pcm, lag_samples, segment, first, last, observed[0], notation,
+        ) if result['status'] == 'inconclusive' else None
+        result['measurement'] = held or {
+            'method': 'domain_exact_scene_window', 'decoded_pcm_sha256': sha256(decoded_pcm),
+            'start_sample': first, 'end_sample': last, 'scene_start_sample': first, 'scene_end_sample': last,
+            'pcm_sha256': sha256(clip), 'normalization_evidence': result.get('measurement'),
+        }
+        return result
+    except Exception:
+        return None
+    finally:
+        if created:
+            path.unlink(missing_ok=True)
+
+
 def french_speech_outcome(segments, results):
     if any(item.get('reason') == 'mixed_language_boundary' for item in results):
         return {'status': 'inconclusive', 'reason': 'recognition_or_timing_inconclusive', 'segments': results}
@@ -1000,7 +1107,7 @@ def french_speech_outcome(segments, results):
 def measure_final_french_speech(segments, decoded_pcm, waveform, directory, recognize=recognize_with_timeout,
                                 recognize_phone=recognize_final_window, *, narration=None, preservation=None,
                                 recognize_hook=recognize_final_window, recognize_services=recognize_final_window,
-                                recognize_socials=recognize_final_window):
+                                recognize_socials=recognize_final_window, recognize_domain=recognize_final_window):
     result = {'contract': CONTRACT, 'source': SOURCE, 'status': 'inconclusive',
               'model_revision': ASR_REVISION, 'decoded_pcm_sha256': sha256(decoded_pcm),
               'excluded_segments': list(EXCLUDED_SEGMENTS), 'accent_evaluated': False, 'segments': []}
@@ -1038,11 +1145,22 @@ def measure_final_french_speech(segments, decoded_pcm, waveform, directory, reco
                 return verify_socials_scene_samples(decoded_pcm, lag_samples, directory, parts, index,
                                                    expected, recognize_socials)
 
+        domain_check = None
+        if preserved:
+            domain_attempted = False
+            def domain_check(segment, expected):
+                nonlocal domain_attempted
+                if domain_attempted:
+                    return None
+                domain_attempted = True
+                return verify_domain_scene_samples(decoded_pcm, lag_samples, directory, segment,
+                                                   expected, recognize_domain)
+
         results = compare_french_segments(
             segments, recognize(wav_path), lag_samples,
             lambda start, end: verify_phone_with_context(decoded_pcm, lag_samples, directory, segments,
                                                        start, end, recognize_phone),
-            verify_hook=hook_check, verify_services=services_check, verify_socials=socials_check,
+            verify_hook=hook_check, verify_services=services_check, verify_socials=socials_check, verify_domain=domain_check,
         )
     except ValueError:
         return {**result, 'reason': 'recognition_or_timing_inconclusive'}

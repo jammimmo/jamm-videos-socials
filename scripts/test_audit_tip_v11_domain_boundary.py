@@ -82,6 +82,7 @@ class FixedDomainAndSocialOnsetTest(unittest.TestCase):
             ['evil-', 'JammImmo.com'], ['evil', '-', 'JammImmo.com'],
             ['evil/', 'JammImmo.com'], ['evil\\', 'JammImmo.com'],
             ['https://', 'JammImmo.com'], ['https', ':', '/', '/', 'JammImmo.com'],
+            ['jamm@', 'immo', 'com'], ['jamm.', 'immo', 'com'], ['jamimo@', 'com'],
         ]
         for tail in fragments:
             with self.subTest(tail=tail):
