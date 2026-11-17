@@ -1,62 +1,52 @@
-name: Check tip renderer
+name: Bounded synthetic codec parity hosted
 
 on:
-  pull_request:
-    branches:
-      - main
-      - 'feature/tip-v11-*'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-jobs:
-  check:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: 22.20.0
-          cache: npm
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: '3.11.14'
-      - name: Install FFmpeg for narration runtime tests
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ffmpeg
-      - name: Run renderer source checks
-        env:
-          TIP_PARITY_EXPECTED_SHA: ${{ github.sha }}
-        run: bash scripts/check-tip-runner-parity.sh --checks-only
+concurrency:
+  group: bounded-codec-parity-hosted
+  cancel-in-progress: false
 
-  offline-render-smoke:
-    name: Offline Remotion smoke
-    if: github.base_ref == 'main'
-    permissions:
-      contents: read
+jobs:
+  codec:
+    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/qa/codec-parity-hosted-v2-20261117'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          repository: jammimmo/jamm-videos-socials
+          ref: 49c9e51bd92cff4f28b7eca35411d287628ec9af
+          path: codec-renderer
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: 22.20.0
-          cache: npm
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: '3.11.14'
-      - name: Install local network isolation tools
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends iproute2
-      - name: Render and audit the non-publishable fixture without outbound network
+          node-version: '22.20.0'
+      - name: Provision only codec and network isolation tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg iproute2
+          test "$(node --version)" = v22.20.0
+          test "$(npm --version)" = 10.9.3
+      - name: Isolate and measure twelve synthetic frames
+        working-directory: codec-renderer
+        shell: bash
         env:
-          TIP_PARITY_EXPECTED_SHA: ${{ github.sha }}
-        run: bash scripts/check-tip-runner-parity.sh "$RUNNER_TEMP/tip-runner-parity.json"
+          TIP_PARITY_EXPECTED_SHA: 49c9e51bd92cff4f28b7eca35411d287628ec9af
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/codec-parity-receipts"
+          bash scripts/check-tip-codec-parity.sh "$RUNNER_TEMP/codec-parity-receipts"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: tip-runner-parity-hosted
-          path: ${{ runner.temp }}/tip-runner-parity.json
+          name: codec-parity-hosted
+          path: |
+            ${{ runner.temp }}/codec-parity-receipts/receipt.json
+            ${{ runner.temp }}/codec-parity-receipts/*.log
           if-no-files-found: error
           retention-days: 7
