@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: jammimmo/jamm-videos-socials
-          ref: 148fc51d81291d09ea2d4985a50b7431f816c3c9
+          ref: ba5a241eca4072d1dd886a4eeff7545212e949a9
           path: codec-renderer
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -41,7 +41,7 @@ jobs:
         working-directory: codec-renderer
         shell: bash
         env:
-          TIP_PARITY_EXPECTED_SHA: 148fc51d81291d09ea2d4985a50b7431f816c3c9
+          TIP_PARITY_EXPECTED_SHA: ba5a241eca4072d1dd886a4eeff7545212e949a9
         run: |
           set -euo pipefail
           mkdir "$RUNNER_TEMP/codec-parity-receipts"
