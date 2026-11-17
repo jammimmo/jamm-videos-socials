@@ -121,6 +121,7 @@ export async function renderTipV11(spec, {
   await writeFile(specPath, JSON.stringify(plan), { mode: 0o600 });
   await run('python3', ['scripts/align_tip_v11.py', '--wav', normalizedPath,
     '--spec', specPath, '--output', alignPath,
+    '--defer-domain-to-final',
     ...(localWordTimings ? ['--transcript', resolve(localWordTimings)] : []),
     ...(failureCodePath ? ['--failure-code-file', failureCodePath] : [])], root);
   const alignment = JSON.parse(await readFile(alignPath, 'utf8'));

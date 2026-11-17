@@ -46,7 +46,7 @@ function abort(msg, code = 1) {
 }
 
 // Wrap raw PCM with a minimal RIFF/WAVE header.
-function pcmToWav(pcm) {
+export function pcmToWav(pcm) {
   const byteRate = (SAMPLE_RATE * NUM_CHANNELS * BITS_PER_SAMPLE) / 8;
   const blockAlign = (NUM_CHANNELS * BITS_PER_SAMPLE) / 8;
   const dataSize = pcm.length;
