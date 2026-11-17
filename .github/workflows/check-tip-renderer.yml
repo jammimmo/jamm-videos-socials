@@ -1,4 +1,4 @@
-name: One-image synthetic JPEG preencoder hosted
+name: One synthetic V11 frame capture hosted
 
 on:
   workflow_dispatch:
@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: jammimmo/jamm-videos-socials
-          ref: ea5d87ecdc8bd1d94b7d44f74971f1c57f948619
+          ref: 90e8b0384083f8abe4669ed0dacbd3f66018604f
           path: codec-renderer
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -37,19 +37,21 @@ jobs:
           test "$(sha256sum "$ffmpeg_path" | cut -d ' ' -f 1)" = ed16af623947494a72e284b6eb8ff225f2da22b38b5d5069c2fd4b4ba3384e41
           test "$(node --version)" = v22.20.0
           test "$(npm --version)" = 10.9.3
-      - name: Decode one common synthetic JPEG in two CPU modes
+      - name: Capture one V11 frame as JPEG and same-state PNG
         working-directory: codec-renderer
         shell: bash
         env:
-          TIP_PARITY_EXPECTED_SHA: ea5d87ecdc8bd1d94b7d44f74971f1c57f948619
+          TIP_PARITY_EXPECTED_SHA: 90e8b0384083f8abe4669ed0dacbd3f66018604f
         run: |
           set -euo pipefail
           mkdir "$RUNNER_TEMP/codec-parity-receipts"
-          bash scripts/check-tip-jpeg-preencoder.sh "$RUNNER_TEMP/codec-parity-receipts"
+          bash scripts/check-tip-single-frame.sh "$RUNNER_TEMP/codec-parity-receipts"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: jpeg-preencoder-hosted
+          name: single-frame-capture-hosted
           path: |
             ${{ runner.temp }}/codec-parity-receipts/receipt.json
+            ${{ runner.temp }}/codec-parity-receipts/frame.jpg
+            ${{ runner.temp }}/codec-parity-receipts/frame.png
           if-no-files-found: error
           retention-days: 7
