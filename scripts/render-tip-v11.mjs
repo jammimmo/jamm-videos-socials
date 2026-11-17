@@ -8,7 +8,7 @@ import { tipV11Effects } from './tip-v11-effects.mjs';
 import { buildTipV11RenderManifest, collectTipV11StaticFiles } from './tip-v11-render-manifest.mjs';
 import { geometryArtifactDirectory } from '../src/compositions/tip-v11-caption-geometry.ts';
 import { summarizeCaptionGeometry } from './tip-v11-caption-geometry.mjs';
-import { readStagedPrivateReviewedNarration, stageReviewedNarration } from './tip-v11-reviewed-narration.mjs';
+import { isReviewedPcm, NORMALIZED_NARRATION_PROCESSING, readStagedPrivateReviewedNarration, stageReviewedNarration } from './tip-v11-reviewed-narration.mjs';
 
 const MIN_NARRATION_SECONDS = 58.5;
 const MAX_NARRATION_SECONDS = 119;
@@ -62,6 +62,15 @@ export function tipV11NarrationTempo(rawSeconds, { exactTourV8 = false } = {}) {
 
 export async function normalizeTipV11Narration(root, raw, normalizedPath, options) {
   const rawSeconds = narrationDuration(raw);
+  if (options?.alreadyNormalized === true) {
+    const bytes = await readFile(raw);
+    if (bytes.length > 8 * 1024 * 1024 || !isReviewedPcm(bytes) || !Number.isFinite(rawSeconds)
+      || rawSeconds < MIN_NARRATION_SECONDS || rawSeconds > MAX_NARRATION_SECONDS) {
+      throw new TipNarrationDurationError('Invalid normalized source narration');
+    }
+    await writeFile(normalizedPath, bytes, { mode: 0o600 });
+    return { rawSeconds, normalizedSeconds: rawSeconds, tempo: 1, processing: NORMALIZED_NARRATION_PROCESSING };
+  }
   const tempo = tipV11NarrationTempo(rawSeconds, options);
   const normalize = 'loudnorm=I=-16:TP=-1.5:LRA=11';
   const filters = tempo === 1 ? normalize : `atempo=${tempo},${normalize}`;
@@ -111,7 +120,7 @@ export async function renderTipV11(spec, {
   const failureCodePath = process.env.TIP_V11_ALIGNMENT_FAILURE_CODE_FILE;
   const exactTourV8 = narration.source === 'provider' || narration.source === 'cache';
   try {
-    await normalizeTipV11Narration(root, raw, normalizedPath, { exactTourV8 });
+    await normalizeTipV11Narration(root, raw, normalizedPath, { exactTourV8, alreadyNormalized: narration.alreadyNormalized === true });
   } catch (error) {
     if (exactTourV8 && error instanceof TipNarrationDurationError && failureCodePath) {
       await writeFile(failureCodePath, 'narration_duration_out_of_range\n', { mode: 0o600, flag: 'wx' });

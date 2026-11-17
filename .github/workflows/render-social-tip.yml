@@ -161,7 +161,7 @@ jobs:
         if: ${{ always() }}
         run: |
           if [ -n "${TIP_PRIVATE_NARRATION_FILE:-}" ]; then
-            rm -f -- "${TIP_PRIVATE_NARRATION_FILE}"
+            rm -f -- "${TIP_PRIVATE_NARRATION_FILE}" "${TIP_PRIVATE_NARRATION_FILE}.processing.json"
           fi
 
       - name: Keep a legacy render artifact for audit
