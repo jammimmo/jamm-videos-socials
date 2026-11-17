@@ -10,7 +10,7 @@ import wave
 from audit_tip_v11 import audit
 from audit_tip_v11_speech import (
     ASR_REVISION, CONTRACT, MAX_RECOGNIZED_WORDS, RECOGNITION_TIMEOUT_SECONDS, compare_french_segments,
-    measure_final_french_speech, recognize_final_wav, recognize_with_timeout, sha256,
+    measure_final_french_speech, recognize_final_wav, recognize_with_timeout, sha256, verify_phone_context_samples,
 )
 
 
@@ -325,6 +325,50 @@ class V11FinalSpeechTest(unittest.TestCase):
         self.assertEqual(rejected['status'], 'inconclusive')
         self.assertEqual(rejected['reason'], 'mixed_language_boundary')
 
+    def test_complete_socials_does_not_need_to_certify_an_excluded_wolof_cue(self):
+        scenes = [
+            {'id': 'socials',
+             'text': 'Suivez aussi Jamm Immo sur nos réseaux sociaux pour retrouver nos prochains conseils.',
+             'start': 0, 'end': 4},
+            {'id': 'signature', 'text': 'À bientôt ! Jamm Immo ! Kër gu baax, xel mu dal !',
+             'start': 4, 'end': 6},
+        ]
+        heard = 'Suivez aussi Jam Imo sur nos réseaux sociaux pour retrouver nos prochains conseils'.split()
+        french = [(word, .15 + i * .27, .15 + i * .27 + .18, .65 if word in ('Jam', 'Imo') else .96)
+                  for i, word in enumerate(heard)]
+        excluded = ('Keur', 3.96, 4.32, .593)
+        [row] = compare_french_segments(scenes, [*french, excluded], 0)
+        self.assertEqual(row['status'], 'matched')
+        self.assertEqual(row['observed_words'], [
+            'suivez', 'aussi', 'jamm', 'immo', 'sur', 'nos', 'reseaux', 'sociaux',
+            'pour', 'retrouver', 'nos', 'prochains', 'conseils',
+        ])
+        self.assertNotIn('keur', row['observed_words'])
+        self.assertEqual(row['measurement']['method'], 'fixed_socials_complete_before_excluded_cue')
+        self.assertFalse(row['measurement']['excluded_cue_used_as_french'])
+        self.assertEqual(row['measurement']['excluded_cue_probability_milli'], 593)
+        self.assertEqual(row['measurement']['raw_observed_sha256'], sha256(' '.join(word.lower() for word in heard)
+                                                                       .replace('réseaux', 'reseaux').encode()))
+
+        cases = {
+            'missing French opening': french[1:] + [excluded],
+            'missing ordinary French word': french[:7] + french[8:] + [excluded],
+            'uncertain French brand': [*french[:2], (*french[2][:3], .599), *french[3:], excluded],
+            'uncertain ordinary French word': [*french[:6], (*french[6][:3], .599), *french[7:], excluded],
+            'negation crossing': [*french, ('non', *excluded[1:3], .99)],
+            'numeric crossing': [*french, ('deux', *excluded[1:3], .99)],
+            'second excluded crossing': [*french, excluded, ('xel', 3.98, 4.4, .99)],
+            'unbounded excluded span': [*french, ('Keur', 3.9, 4.8, .593)],
+            'overlapping actual French ending': [*french[:-1], (french[-1][0], french[-1][1], 3.98, .96), excluded],
+            'excluded word assigned to French': [*french, ('Keur', 3.82, 4.1, .593)],
+        }
+        for label, words in cases.items():
+            with self.subTest(label=label):
+                [held] = compare_french_segments(scenes, words, 0)
+                self.assertEqual(held['status'], 'inconclusive')
+                self.assertNotEqual(held.get('measurement', {}).get('method'),
+                                    'fixed_socials_complete_before_excluded_cue')
+
     def test_fixed_brand_spelling_requires_exact_separate_words_and_keeps_original_digest(self):
         services = {'id': 'services', 'text': 'Jamm Immo vous accompagne.', 'start': 0, 'end': 2}
         words = [(' Jam', .04, .38, .85), (' Imo', .38, .64, .62),
@@ -619,6 +663,56 @@ class V11FinalSpeechTest(unittest.TestCase):
         self.assertEqual(report['segments'][2]['status'], 'inconclusive')
         expected_count = report['segments'][2]['expected_token_count']
         self.assertEqual(report['segments'][2]['observed_token_count'], expected_count)
+
+    def test_phone_context_requires_actual_confident_number_without_relying_on_later_brand_spelling(self):
+        scenes = [
+            {'id': 'contact', 'text': 'Vous pouvez nous appeler ou nous écrire sur WhatsApp au même numéro.',
+             'start': 0, 'end': 2.9},
+            {**self.segments[3], 'start': 2.9, 'end': 8},
+            {'id': 'socials',
+             'text': 'Suivez aussi Jamm Immo sur nos réseaux sociaux pour retrouver nos prochains conseils.',
+             'start': 8, 'end': 13},
+        ]
+        contact = [(word, .15 + i * .21, .29 + i * .21, .3 if i == 0 else .95)
+                   for i, word in enumerate('Vous pouvez nous appeler ou nous écrire sur WhatsApp au même numéro'.split())]
+        phone = [('Plus', 3, 3.3, .77), ('221', 3.3, 4.05, .92), ('76', 4.1, 4.85, .93),
+                 ('944', 4.9, 6, .94), ('48', 6.05, 6.8, .95), ('49', 6.85, 7.8, .96)]
+        social = [(word, 8.05 + i * .25, 8.2 + i * .25, .3 if i == 2 else .96)
+                  for i, word in enumerate('Suivez aussi Jean Immo sur nos réseaux sociaux pour retrouver nos prochains conseils'.split())]
+        observed = contact + phone + social
+        audio = struct.pack('<h', 512) * (13 * 24_000 + 512)
+        lag = 512
+        with TemporaryDirectory() as folder:
+            def inspect(rows, decoded=audio, template=scenes):
+                return verify_phone_context_samples(decoded, lag, folder, template, 2.9, 8, lambda path: rows)
+            result = inspect(observed)
+            self.assertIsNotNone(result)
+            self.assertEqual(result['method'], 'phone_exact_contact_context_v1')
+            self.assertEqual(result['bounded_min_word_probability'], .77)
+            self.assertEqual(result['context_pcm_sha256'], sha256(audio[lag * 2:]))
+            self.assertEqual(result['pcm_sha256'], sha256(audio[(3 * 24_000 + lag) * 2:(round(7.8 * 24_000) + lag) * 2]))
+            self.assertEqual(result['observed_words'],
+                             'plus deux cent vingt et un soixante seize neuf cent quarante quatre quarante huit quarante neuf'.split())
+
+            bad_cases = {
+                'changed country code': contact + [phone[0], ('222', *phone[1][1:]), *phone[2:]] + social,
+                'reordered last groups': contact + phone[:4] + [('49', *phone[4][1:]), ('48', *phone[5][1:])] + social,
+                'missing international prefix': contact + phone[1:] + social,
+                'uncertain prefix': contact + [('Plus', *phone[0][1:3], .599), *phone[1:]] + social,
+                'uncertain numeric group': contact + phone[:3] + [('944', *phone[3][1:3], .599), *phone[4:]] + social,
+                'unconfirmed contact anchor': [('Nous', *contact[0][1:]), *contact[1:]] + phone + social,
+                'unconfirmed right anchor': contact + phone + [('Écoutez', *social[0][1:]), *social[1:]],
+                'duplicate complete phone': contact + phone + phone + social,
+                'zero-length prefix': contact + [('Plus', 3, 3, .99), *phone[1:]] + social,
+                'phone outside original range': contact + [('Plus', 3.7, 3.9, .99), *phone[1:]] + social,
+                'shared contact/phone row': contact[:-1] + [('numéro Plus', contact[-1][1], 3.3, .99)] + phone[1:] + social,
+            }
+            for label, rows in bad_cases.items():
+                with self.subTest(label=label):
+                    self.assertIsNone(inspect(rows))
+            silent_prefix = audio[:(3 * 24_000 + lag) * 2] + bytes(round(.3 * 24_000) * 2) + audio[(round(3.3 * 24_000) + lag) * 2:]
+            self.assertIsNone(inspect(observed, decoded=silent_prefix))
+            self.assertIsNone(inspect(observed, template=[{**scenes[0], 'text': 'Autre phrase.'}, *scenes[1:]]))
 
     def test_mux_offset_and_model_failure_fail_closed(self):
         shifted = [(text, start + .002, end + .002, probability)

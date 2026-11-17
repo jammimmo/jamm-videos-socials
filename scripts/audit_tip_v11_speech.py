@@ -140,12 +140,16 @@ def observed_words_with_uncertainty(identity, expected, raw_actual, actual, rows
     return reported, False
 
 
-def recognize_final_wav(wav_path):
-    """Only audio goes into the recognizer. The alignment step caches this model."""
+def load_speech_model():
+    """Load only the pinned cached model; no expected text reaches the decoder."""
     from faster_whisper import WhisperModel, download_model
 
     path = download_model(ASR_REPO, revision=ASR_REVISION, local_files_only=True)
-    model = WhisperModel(path, device='cpu', compute_type='int8', local_files_only=True, cpu_threads=4)
+    return WhisperModel(path, device='cpu', compute_type='int8', local_files_only=True, cpu_threads=4)
+
+
+def recognize_model_wav(model, wav_path):
+    """Share the exact decoder settings between one-shot and resident scoring."""
     segments, _ = model.transcribe(
         str(wav_path), language='fr', beam_size=5, word_timestamps=True,
         condition_on_previous_text=False, initial_prompt=None, hotwords=None, vad_filter=False,
@@ -153,6 +157,11 @@ def recognize_final_wav(wav_path):
     for segment in segments:
         for word in segment.words or ():
             yield word.word, float(word.start), float(word.end), float(word.probability)
+
+
+def recognize_final_wav(wav_path):
+    """Only audio goes into the recognizer. Final-audit timeout stays unchanged."""
+    yield from recognize_model_wav(load_speech_model(), wav_path)
 
 
 def recognize_with_timeout(wav_path, timeout=RECOGNITION_TIMEOUT_SECONDS):
@@ -295,6 +304,39 @@ def fixed_socials_boundary_alias(expected, raw_actual, rows, crossing):
     return ['aussi', 'jamm', 'immo', *FIXED_SOCIALS_WORDS[4:]], index
 
 
+def complete_socials_before_excluded_cue(segments, index, crossings, rows, expected, raw_actual):
+    """Certify a fully observed French line, never the excluded crossing cue.
+
+    Uncertain spelling in the excluded closing is irrelevant only when every
+    French word was already heard before that cue. This does not fill a missing French word
+    from the signature, or reinterpret an overlapping/protected word.
+    """
+    segment = segments[index]
+    if (segment['id'] != 'socials' or index + 1 >= len(segments)
+        or segments[index + 1]['id'] != 'signature'
+        or abs(segment['end'] - segments[index + 1]['start']) > .001
+        or tuple(expected) != FIXED_SOCIALS_WORDS or len(crossings) != 1 or not rows):
+        return None
+    crossing, overlap_ids = crossings[0]
+    crossing_words = normalized_words('', crossing[0])
+    if (overlap_ids != ('socials', 'signature') or crossing in rows or len(crossing_words) != 1
+        or protected_speech(crossing_words)
+        or not crossing[1] < segment['end'] < crossing[2]
+        or not 0 < crossing[2] - crossing[1] <= .75
+        or segment['end'] - crossing[1] > .15 or crossing[2] - segment['end'] > .6
+        or not rows[-1][2] <= crossing[1] <= rows[-1][2] + .75
+        or any(row[1] < segment['start'] or row[2] > segment['end']
+               or row[3] < MIN_WORD_PROBABILITY for row in rows)
+        or any(left[2] > right[1] for left, right in zip(rows, rows[1:]))):
+        return None
+    actual = canonical_fixed_brand_words('socials', expected, raw_actual, rows)
+    # The existing fixed-brand spelling normalization is the only rewrite.
+    # All thirteen observed French words must remain, with no insertion.
+    if actual != expected or len(actual) != len(raw_actual):
+        return None
+    return actual, crossing
+
+
 def exact_adjacent_split(left, right, rows, original_split, expected_left, expected_right):
     if abs(left['end'] - right['start']) > .001 or not rows:
         return None
@@ -394,9 +436,15 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
         crossing = safe_socials_signature_boundary(
             segments, index, boundary_crossings.get(index, []), observed[index],
         ) if index in ambiguous_boundary else None
+        complete_socials = complete_socials_before_excluded_cue(
+            segments, index, boundary_crossings.get(index, []), observed[index], expected, raw_actual,
+        ) if index in ambiguous_boundary else None
         socials_alias = fixed_socials_boundary_alias(expected, raw_actual, observed[index], crossing)
         domain_alias = fixed_domain_alias(expected, raw_actual, observed[index]) if index not in ambiguous_boundary else None
-        if socials_alias:
+        if complete_socials:
+            actual, _ = complete_socials
+            alias_kind = 'fixed_socials_complete_boundary'
+        elif socials_alias:
             actual, alias_index = socials_alias
             alias_kind = 'fixed_socials_boundary'
         elif domain_alias:
@@ -421,7 +469,8 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
                   and edits * 100 <= len(expected) * (100 - MIN_SEGMENT_ACCURACY_PERCENT)
                   and protected_speech(reported) == protected_speech(expected)
                   and all(word[0] != '+' for word in observed[index]))
-        matched = scored and (index not in ambiguous_boundary or alias_kind == 'fixed_socials_boundary')
+        boundary_verified = alias_kind in ('fixed_socials_boundary', 'fixed_socials_complete_boundary')
+        matched = scored and (index not in ambiguous_boundary or boundary_verified)
         item = {'segment': identity, 'status': 'matched' if matched else 'inconclusive',
                 'expected_token_count': len(expected), 'observed_token_count': len(actual),
                 'expected_sha256': sha256(' '.join(expected).encode()),
@@ -435,6 +484,16 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
                     'raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
                     'brand_probability_milli': round(observed[index][alias_index][3] * 1000),
                     'visible_domain_required': True,
+                }
+            elif alias_kind == 'fixed_socials_complete_boundary':
+                excluded_cue = complete_socials[1]
+                item['measurement'] = {
+                    'method': 'fixed_socials_complete_before_excluded_cue',
+                    'raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
+                    'excluded_cue_sha256': sha256(' '.join(normalized_words('', excluded_cue[0])).encode()),
+                    'excluded_cue_probability_milli': round(excluded_cue[3] * 1000),
+                    'excluded_cue_used_as_french': False,
+                    'french_min_probability_milli': round(min(word[3] for word in observed[index]) * 1000),
                 }
             elif alias_kind == 'fixed_socials_boundary':
                 crossing_tokens = normalized_words('', crossing[0])
@@ -452,7 +511,7 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
                     'method': 'fixed_jamm_immo_phonetic_spelling',
                     'raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
                 }
-        if index in ambiguous_boundary and alias_kind != 'fixed_socials_boundary':
+        if index in ambiguous_boundary and not boundary_verified:
             item['reason'] = 'mixed_language_boundary'
             rows = observed[index]
             if (segment is opening_hook and exact and hook_crossings == rows[:1]
@@ -469,9 +528,11 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
         elif not matched and identity == 'phone' and verify_phone:
             window = anchored_phone_range(segments, expected_words, observed, index)
             measurement = verify_phone(*window) if window else None
-            if measurement:
-                item.update(status='matched', observed_sha256=item['expected_sha256'],
-                            observed_token_count=len(expected), observed_words=expected, measurement=measurement)
+            verified_words = measurement.get('observed_words') if measurement else None
+            if verified_words == expected:
+                item.update(status='matched', observed_sha256=sha256(' '.join(verified_words).encode()),
+                            observed_token_count=len(verified_words), observed_words=verified_words,
+                            measurement={key: value for key, value in measurement.items() if key != 'observed_words'})
         elif not matched and identity == 'services' and verify_services:
             if fixed_brand_alias_index(identity, expected, raw_actual) is not None:
                 confirmed = verify_services(segment, expected)
@@ -570,7 +631,115 @@ def verify_phone_samples(decoded_pcm, lag_samples, directory, start, end, recogn
     except Exception:
         return None
     return {'method': 'phone_exact_neighbor_window', 'start_sample': first, 'end_sample': last,
-            'pcm_sha256': sha256(clip)}
+            'pcm_sha256': sha256(clip), 'observed_words': segment_words('phone', observed)}
+
+
+def context_phone_rows(rows, contact_words, social_words):
+    """Select one whole, actually recognized number between fixed anchors.
+
+    Later social-brand spelling does not change the preceding phone proof.
+    No expected token is inserted, and no recognition row may be divided.
+    """
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 64:
+        return None
+    flattened = []
+    for index, row in enumerate(rows):
+        if (not isinstance(row, (tuple, list)) or len(row) != 4 or not isinstance(row[0], str)
+            or not 1 <= len(row[0]) <= 80):
+            return None
+        flattened.extend((word, index) for word in normalized_words('phone', row[0]))
+    observed = [word for word, _ in flattened]
+    matches = [index for index in range(len(observed)) if observed[index:index + len(PHONE_WORDS)] == PHONE_WORDS]
+    if len(matches) != 1:
+        return None
+    first = matches[0]
+    end = first + len(PHONE_WORDS)
+    if observed[:first] != contact_words or observed[end:end + 2] != social_words[:2]:
+        return None
+    first_row, last_row = flattened[first][1], flattened[end - 1][1]
+    if ((first and flattened[first - 1][1] == first_row)
+        or (end < len(flattened) and flattened[end][1] == last_row)):
+        return None
+    return rows[first_row:last_row + 1]
+
+
+def verify_phone_context_samples(decoded_pcm, lag_samples, directory, segments, start, end, recognize):
+    """Recheck the fixed phone in its bounded, unprompted French CTA context."""
+    identifiers = [row.get('id') for row in segments]
+    if identifiers.count('phone') != 1:
+        return None
+    index = identifiers.index('phone')
+    if (not 0 < index < len(segments) - 1
+        or identifiers[index - 1:index + 2] != ['contact', 'phone', 'socials']):
+        return None
+    contact, phone, social = segments[index - 1:index + 2]
+    contact_words = normalized_words('contact', contact['text'])
+    social_words = normalized_words('socials', social['text'])
+    if (contact_words != normalized_words('contact',
+            'Vous pouvez nous appeler ou nous écrire sur WhatsApp au même numéro.')
+        or tuple(social_words) != FIXED_SOCIALS_WORDS
+        or normalized_words('phone', phone['text']) != PHONE_WORDS
+        or not contact['start'] <= start < end <= social['end']
+        or not 0 < social['end'] - contact['start'] <= 18):
+        return None
+    first, last = (round(point * SAMPLE_RATE) + lag_samples for point in (contact['start'], social['end']))
+    if not 0 <= first < last <= len(decoded_pcm) // 2:
+        return None
+    clip = decoded_pcm[first * 2:last * 2]
+    sound = list(audible_windows(clip, SAMPLE_RATE))
+    if not sound:
+        return None
+    path = Path(directory) / 'decoded-final-phone-context.wav'
+    try:
+        with wave.open(str(path), 'wb') as output:
+            output.setparams((1, 2, SAMPLE_RATE, 0, 'NONE', 'not compressed'))
+            output.writeframes(clip)
+        context_rows = recognize(path)
+        duration = (last - first) / SAMPLE_RATE
+        previous_end = 0
+        for row in context_rows:
+            if (not isinstance(row, (tuple, list)) or len(row) != 4
+                or not all(type(value) in (int, float) and math.isfinite(value) for value in row[1:])
+                or not previous_end <= row[1] < row[2] <= duration or not 0 <= row[3] <= 1):
+                return None
+            previous_end = row[2]
+        rows = context_phone_rows(context_rows, contact_words, social_words)
+        if not rows or segment_words('phone', rows) != PHONE_WORDS:
+            return None
+        previous_end = 0
+        for _, left, right, confidence in rows:
+            if (not all(type(value) in (int, float) and math.isfinite(value) for value in (left, right, confidence))
+                or not previous_end <= left < right <= duration or not MIN_WORD_PROBABILITY <= confidence <= 1
+                or voiced_overlap(sound, left, right) < MIN_PHONE_WORD_AUDIBLE_SECONDS):
+                return None
+            previous_end = right
+        phone_first = first + round(rows[0][1] * SAMPLE_RATE)
+        phone_last = first + round(rows[-1][2] * SAMPLE_RATE)
+        expected_first = round(start * SAMPLE_RATE) + lag_samples
+        expected_last = round(end * SAMPLE_RATE) + lag_samples
+        tolerance = round(MAX_PHONE_EDGE_SHIFT_SECONDS * SAMPLE_RATE)
+        if (abs(phone_first - expected_first) > tolerance or abs(phone_last - expected_last) > tolerance
+            or not 4 <= (phone_last - phone_first) / SAMPLE_RATE <= 8):
+            return None
+    except Exception:
+        return None
+    return {
+        'method': 'phone_exact_contact_context_v1',
+        'start_sample': phone_first, 'end_sample': phone_last,
+        'pcm_sha256': sha256(decoded_pcm[phone_first * 2:phone_last * 2]),
+        'context_start_sample': first, 'context_end_sample': last, 'context_pcm_sha256': sha256(clip),
+        'bounded_min_word_probability': min(row[3] for row in rows),
+        'observed_words': segment_words('phone', rows),
+    }
+
+
+def verify_phone_with_context(decoded_pcm, lag_samples, directory, segments, start, end, recognize,
+                              recognize_context=None):
+    direct = verify_phone_samples(decoded_pcm, lag_samples, directory, start, end, recognize)
+    if direct:
+        return direct
+    return verify_phone_context_samples(decoded_pcm, lag_samples, directory, segments, start, end,
+                                        recognize_context or recognize)
 
 
 def verify_services_samples(decoded_pcm, lag_samples, directory, segment, expected, recognize):
@@ -644,7 +813,8 @@ def measure_final_french_speech(segments, decoded_pcm, waveform, directory, reco
 
         results = compare_french_segments(
             segments, recognize(wav_path), lag_samples,
-            lambda start, end: verify_phone_samples(decoded_pcm, lag_samples, directory, start, end, recognize_phone),
+            lambda start, end: verify_phone_with_context(decoded_pcm, lag_samples, directory, segments,
+                                                       start, end, recognize_phone),
             verify_hook=hook_check, verify_services=services_check,
         )
     except ValueError:

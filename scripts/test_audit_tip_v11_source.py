@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import struct
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
@@ -10,6 +11,7 @@ import wave
 
 from audit_tip_v11_speech import ASR_REVISION, SAMPLE_RATE, compare_french_segments, french_speech_outcome, sha256
 from score_tip_source import score_source
+from tip_source_asr_session import SourceAsrSession, serve
 from test_align_tip_v11 import SEGMENTS, phone_gap, speech
 
 
@@ -172,3 +174,110 @@ class SourceScoringTest(unittest.TestCase):
                      if [word[0] for word in rows[index:index + 4]] == ['jamm', 'immo', 'point', 'com'])
         rows[first:first + 4] = [('inaudible', rows[first][1], rows[first + 3][2], .95)]
         self.assertEqual(self.run_source(rows)['reason'], 'website_evidence_unconfirmed')
+
+    def test_default_source_reuses_one_model_and_closes_on_success_and_timeout(self):
+        rows = [(row['word'], row['start'], row['end'], .95) for row in speech(self.plan['segments'])]
+        with TemporaryDirectory() as folder, patch('score_tip_source.SourceAsrSession') as factory:
+            session = factory.return_value
+            session.start.return_value = []
+            session.recognize.return_value = rows
+            report = score_source(self.plan, self.wav, Path(folder))
+            self.assertEqual(report['status'], 'matched')
+            self.assertEqual([row['stage'] for row in report['recognizer_diagnostics']], ['model_load', 'full_audio'])
+            self.assertEqual(report['recognizer_diagnostics'][0]['window_duration_ms'], 0)
+            factory.assert_called_once_with(Path(folder))
+            session.start.assert_called_once_with()
+            session.recognize.assert_called_once()
+            session.close.assert_called_once_with()
+            session.reset_mock()
+            session.start.side_effect = subprocess.TimeoutExpired('private-path', 120)
+            report = score_source(self.plan, self.wav, Path(folder))
+            self.assertEqual(report['reason'], 'recognizer_timeout')
+            self.assertEqual(report['recognizer_diagnostics'][0]['stage'], 'model_load')
+            self.assertNotIn('private-path', json.dumps(report))
+            session.recognize.assert_not_called()
+            session.close.assert_called_once_with()
+
+    def test_resident_worker_loads_once_and_receives_only_private_audio_paths(self):
+        with TemporaryDirectory() as folder:
+            directory = Path(folder)
+            wav = directory / 'source.wav'
+            wav.write_bytes(self.wav)
+            window = directory / 'phone.wav'
+            window.write_bytes(make_wav(self.data[:48_000]))
+            output = io.StringIO()
+            loader = Mock(return_value=object())
+            decoder = Mock(return_value=[(' observed', .1, .3, .9)])
+            requests = io.BytesIO(b''.join(json.dumps({'wav': str(path)}).encode() + b'\n'
+                                          for path in (wav, window)))
+            serve(directory, loader=loader, decode=decoder, source=requests, destination=output)
+            self.assertEqual([json.loads(row) for row in output.getvalue().splitlines()], [
+                {'status': 'ready'}, {'rows': [[' observed', .1, .3, .9]]},
+                {'rows': [[' observed', .1, .3, .9]]},
+            ])
+            loader.assert_called_once_with()
+            self.assertEqual(decoder.call_count, 2)
+            self.assertEqual([call.args[1] for call in decoder.call_args_list], [wav, window])
+            self.assertTrue(all(call.args[0] is loader.return_value for call in decoder.call_args_list))
+
+    def test_resident_worker_rejects_foreign_symlink_or_oversized_requests_without_private_errors(self):
+        with TemporaryDirectory() as folder, TemporaryDirectory() as foreign:
+            directory = Path(folder)
+            outside = Path(foreign) / 'private.wav'
+            outside.write_bytes(self.wav)
+            link = directory / 'link.wav'
+            link.symlink_to(outside)
+            for request in ({'wav': str(outside)}, {'wav': str(link)}, {'script': 'private expected text'},
+                            {'wav': str(outside), 'script': 'private expected text'}):
+                output, decoder = io.StringIO(), Mock()
+                serve(directory, loader=Mock(), decode=decoder,
+                      source=io.BytesIO(json.dumps(request).encode() + b'\n'), destination=output)
+                self.assertEqual(output.getvalue(), '{"status": "ready"}\n{"status": "error"}\n')
+                decoder.assert_not_called()
+            output = io.StringIO()
+            serve(directory, loader=Mock(side_effect=RuntimeError('private model path')),
+                  source=io.BytesIO(), destination=output)
+            self.assertEqual(output.getvalue(), '{"status": "error"}\n')
+
+    def test_resident_transport_reuses_process_and_terminates_on_bounded_timeout(self):
+        popen = subprocess.Popen
+        responder = ('import json,sys\nprint(json.dumps({"status":"ready"}),flush=True)\n'
+                     'for line in sys.stdin:\n'
+                     ' print(json.dumps({"rows":[[" observed",.1,.3,.9]]}),flush=True)\n')
+        with TemporaryDirectory() as folder:
+            directory = Path(folder)
+            path = directory / 'source.wav'
+            path.write_bytes(self.wav)
+            with patch('tip_source_asr_session.subprocess.Popen',
+                       side_effect=lambda *args, **kwargs: popen([sys.executable, '-u', '-c', responder], **kwargs)) as run:
+                session = SourceAsrSession(directory)
+                try:
+                    session.start()
+                    process = session.process
+                    self.assertEqual(session.recognize(path), [[' observed', .1, .3, .9]])
+                    self.assertEqual(session.recognize_window(path), [[' observed', .1, .3, .9]])
+                    run.assert_called_once()
+                finally:
+                    session.close()
+                self.assertIsNotNone(process.poll())
+                self.assertTrue(process.stdin.closed)
+                self.assertTrue(process.stdout.closed)
+            with patch('tip_source_asr_session.subprocess.Popen', side_effect=lambda *args, **kwargs:
+                       popen([sys.executable, '-u', '-c', 'import time;time.sleep(10)'], **kwargs)), \
+                    patch('tip_source_asr_session.MODEL_LOAD_TIMEOUT_SECONDS', .05):
+                session = SourceAsrSession(directory)
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    session.start()
+                self.assertIsNone(session.process)
+                session.close()
+
+    def test_resident_transport_bounds_unterminated_private_output(self):
+        popen = subprocess.Popen
+        responder = 'import sys;sys.stdout.write("x"*140000);sys.stdout.flush()'
+        with TemporaryDirectory() as folder, patch('tip_source_asr_session.subprocess.Popen',
+                side_effect=lambda *args, **kwargs: popen([sys.executable, '-u', '-c', responder], **kwargs)):
+            session = SourceAsrSession(folder)
+            with self.assertRaisesRegex(ValueError, '^Oversized source ASR response$'):
+                session.start()
+            self.assertIsNone(session.process)
+            session.close()

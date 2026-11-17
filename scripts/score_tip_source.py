@@ -17,9 +17,10 @@ from align_tip_v11 import (
 from audit_tip_v11 import pcm
 from audit_tip_v11_speech import (
     EXCLUDED_SEGMENTS, MAX_RECOGNIZED_WORDS, SAMPLE_RATE, compare_french_segments, french_speech_outcome,
-    recognize_final_window, recognize_with_timeout, sha256, verify_hook_samples, verify_phone_samples,
+    recognize_final_window, recognize_with_timeout, sha256, verify_hook_samples, verify_phone_with_context,
     verify_services_samples,
 )
+from tip_source_asr_session import SourceAsrSession
 
 
 class SourceRecognitionError(RuntimeError):
@@ -38,8 +39,10 @@ def measured_recognizer(recognize, stage, diagnostics):
     def measured(path):
         if len(diagnostics) >= 12:
             raise SourceRecognitionError('recognizer_call_limit')
-        with wave.open(str(path), 'rb') as source:
-            window_duration_ms = round(source.getnframes() * 1000 / source.getframerate())
+        window_duration_ms = 0
+        if stage != 'model_load':
+            with wave.open(str(path), 'rb') as source:
+                window_duration_ms = round(source.getnframes() * 1000 / source.getframerate())
         diagnostic = {'call_index': len(diagnostics) + 1, 'stage': stage,
                       'window_duration_ms': window_duration_ms, 'outcome': 'unavailable'}
         diagnostics.append(diagnostic)
@@ -93,7 +96,21 @@ def timed_words(rows, offset=0):
     return [{'word': word, 'start': start + offset, 'end': end + offset} for word, start, end, _ in rows]
 
 
-def score_source(plan, wav, directory, recognize=recognize_with_timeout, recognize_window=recognize_final_window):
+def score_source(plan, wav, directory, recognize=None, recognize_window=None):
+    # Only the source scorer shares a model between its bounded WAV windows.
+    # The final MP4 audit and injected test recognizers keep their own paths.
+    if recognize is not None or recognize_window is not None:
+        return _score_source(plan, wav, directory, recognize or recognize_with_timeout,
+                             recognize_window or recognize_final_window)
+    session = SourceAsrSession(directory)
+    try:
+        return _score_source(plan, wav, directory, session.recognize, session.recognize_window,
+                             startup=session.start)
+    finally:
+        session.close()
+
+
+def _score_source(plan, wav, directory, recognize, recognize_window, *, startup=None):
     raw = extract_pcm(wav)
     duration = len(raw) / (2 * SAMPLE_RATE)
     sound = list(audible_windows(raw, SAMPLE_RATE))
@@ -122,6 +139,8 @@ def score_source(plan, wav, directory, recognize=recognize_with_timeout, recogni
         return timed_words(measured_recognizer(recognize_window, stage, diagnostics)(path), first / SAMPLE_RATE)
 
     try:
+        if startup is not None:
+            measured_recognizer(lambda _: startup(), 'model_load', diagnostics)(source_path)
         recognized = measured_recognizer(recognize, 'full_audio', diagnostics)(source_path)
         segments = align_with_phone_retry(
             plan['segments'], timed_words(recognized), duration, sound,
@@ -139,8 +158,9 @@ def score_source(plan, wav, directory, recognize=recognize_with_timeout, recogni
         narration = pcm(raw)
         results = compare_french_segments(
             segments, recognized, 0,
-            lambda start, end: verify_phone_samples(raw, 0, directory, start, end,
-                measured_recognizer(recognize_window, 'audit_phone', diagnostics)),
+            lambda start, end: verify_phone_with_context(raw, 0, directory, segments, start, end,
+                measured_recognizer(recognize_window, 'audit_phone', diagnostics),
+                recognize_context=measured_recognizer(recognize_window, 'audit_phone_context', diagnostics)),
             verify_hook=lambda start, end, expected: verify_hook_samples(
                 narration, raw, 0, directory, start, end, expected,
                 measured_recognizer(recognize_window, 'audit_hook', diagnostics)),
