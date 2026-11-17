@@ -31,6 +31,19 @@ export async function requestTipNarrationOidc(jobId, attemptToken, wavSha256, en
   return requestGithubOidc(tipNarrationAudience(jobId, attemptToken, wavSha256), env, fetchToken);
 }
 
+export async function requestTipSourceQualificationOidc(jsonBytes, env, fetchToken = fetch) {
+  return requestGithubOidc(`urn:jammimmo:tip-v11:machine-source:${sha256(jsonBytes)}`, env, fetchToken);
+}
+
+export async function requestTipSourceNarrationOidc(wavSha256, env, fetchToken = fetch) {
+  if (!SHA256.test(wavSha256)) throw new Error('V11 source narration digest is invalid');
+  return requestGithubOidc(`urn:jammimmo:tip-v11:machine-source-narration:${wavSha256}`, env, fetchToken);
+}
+
+export async function requestTipSourceAttemptOidc(jsonBytes, env, fetchToken = fetch) {
+  return requestGithubOidc(`urn:jammimmo:tip-v11:machine-source-attempt:${sha256(jsonBytes)}`, env, fetchToken);
+}
+
 async function requestGithubOidc(audience, env, fetchToken) {
   const url = new URL(env.ACTIONS_ID_TOKEN_REQUEST_URL);
   const bearer = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;

@@ -8,6 +8,7 @@ export const REVIEWED_NARRATION_CONTRACT = 'tip-v11-reviewed-narration-v1';
 export const REVIEWED_NARRATION_DISPATCH = 'jamm-tip-render-v3-reviewed-narration';
 export const REVIEWED_NARRATION_MODEL = 'reviewed-source-pcm-v1';
 export const TIP_DELIVERY_ORIGIN = 'https://jammimmo-estate-flow.jammimmo221admin.workers.dev';
+export const NORMALIZED_NARRATION_PROCESSING = 'tip-v11-normalized-pcm24k-v1';
 const SHA256 = /^[a-f0-9]{64}$/;
 const COMMIT_SHA = /^[a-f0-9]{40}$/;
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
@@ -28,7 +29,7 @@ export function parseReviewedNarration(value, actualRendererSha) {
     ...(privateAttempt && { source: 'private-attempt' }) };
 }
 
-function isReviewedPcm(wav) {
+export function isReviewedPcm(wav) {
   if (wav.length < 44 || wav.toString('ascii', 0, 4) !== 'RIFF'
     || wav.readUInt32LE(4) !== wav.length - 8 || wav.toString('ascii', 8, 12) !== 'WAVE') return false;
   let validFormat = false;
@@ -117,10 +118,15 @@ async function fetchPrivateWav(delivery, pin, env, fetchImpl) {
   const contentLength = response.headers.get('Content-Length') ?? '';
   const size = /^(?:[1-9][0-9]{1,6})$/.test(contentLength) ? Number(contentLength) : 0;
   const contentEncoding = response.headers.get('Content-Encoding');
+  const processing = response.headers.get('X-Tip-Narration-Processing') ?? 'raw-source-v1';
   if (response.status !== 200 || response.headers.get('Content-Type') !== 'audio/wav'
     || (contentEncoding !== null && contentEncoding !== 'identity') || size < 44 || size > MAX_BYTES || !response.body) {
     await response.body?.cancel().catch(() => {});
     throw new Error('V11 private narration response is invalid');
+  }
+  if (!['raw-source-v1', NORMALIZED_NARRATION_PROCESSING].includes(processing)) {
+    await response.body.cancel().catch(() => {});
+    throw new Error('V11 private narration processing identity is invalid');
   }
   const bytes = Buffer.alloc(size);
   const reader = response.body.getReader();
@@ -141,7 +147,7 @@ async function fetchPrivateWav(delivery, pin, env, fetchImpl) {
     reader.releaseLock();
   }
   verifyReviewedWav(bytes, pin);
-  return bytes;
+  return { bytes, processing };
 }
 
 export async function stagePrivateReviewedNarration(delivery, reviewed, env, fetchImpl = fetch) {
@@ -150,11 +156,12 @@ export async function stagePrivateReviewedNarration(delivery, reviewed, env, fet
   const scratchRoot = await realpath(env.RUNNER_TEMP);
   // The scratch path becomes one GITHUB_ENV value.
   if (/[\r\n]/.test(scratchRoot)) throw new Error('V11 private narration scratch directory is invalid');
-  const bytes = await fetchPrivateWav(delivery, pin, env, fetchImpl);
+  const { bytes, processing } = await fetchPrivateWav(delivery, pin, env, fetchImpl);
   const directory = await mkdtemp(resolve(scratchRoot, SCRATCH_PREFIX));
   const path = resolve(directory, `${pin.sha256}.wav`);
   try {
     await writeFile(path, bytes, { flag: 'wx', mode: 0o600 });
+    await writeFile(`${path}.processing.json`, JSON.stringify({ sha256: pin.sha256, processing }), { flag: 'wx', mode: 0o600 });
   } catch (error) {
     await rm(directory, { recursive: true, force: true }).catch(() => {});
     throw error;
@@ -172,5 +179,31 @@ export async function readStagedPrivateReviewedNarration(reviewed, env) {
   if (dirname(directory) !== await realpath(env.RUNNER_TEMP) || !basename(directory).startsWith(SCRATCH_PREFIX)
     || await realpath(directory).catch(() => null) !== directory) throw new Error('V11 private narration scratch identity mismatch');
   await readReviewedWav(path, pin, true);
-  return { path, source: 'reviewed-bundle' };
+  const processing = await readProcessingMarker(path, pin.sha256);
+  return { path, source: 'reviewed-bundle', ...(processing === NORMALIZED_NARRATION_PROCESSING && { alreadyNormalized: true }) };
+}
+
+async function readProcessingMarker(path, sha256) {
+  let file;
+  try {
+    file = await open(`${path}.processing.json`, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return 'raw-source-v1';
+    throw new Error('V11 private narration processing marker unavailable');
+  }
+  try {
+    const meta = await file.stat();
+    if (!meta.isFile() || meta.size < 1 || meta.size > 1024 || (meta.mode & 0o077) !== 0) throw new Error();
+    const bytes = Buffer.alloc(meta.size + 1);
+    const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+    if (bytesRead !== meta.size) throw new Error();
+    const marker = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes.subarray(0, bytesRead)));
+    if (!marker || Object.keys(marker).length !== 2 || marker.sha256 !== sha256
+      || !['raw-source-v1', NORMALIZED_NARRATION_PROCESSING].includes(marker.processing)) throw new Error();
+    return marker.processing;
+  } catch {
+    throw new Error('V11 private narration processing marker is invalid');
+  } finally {
+    await file.close();
+  }
 }

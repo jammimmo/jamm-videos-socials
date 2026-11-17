@@ -8,6 +8,7 @@ import { networkInterfaces, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildTipV11Narration } from './tip-v11-contract.mjs';
+import { decodedTipMediaFingerprints } from './tip-decoded-media-fingerprint.mjs';
 import { renderTipV11 } from './render-tip-v11.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -194,6 +195,7 @@ async function main() {
       alignment: alignment.provenance, captionGeometry: manifest.caption_geometry.status,
       duration: media.duration, width: media.width, height: media.height,
       audioBitrate: Number(audio.bit_rate), closedGopKeyframes: keyframes.length, closedGopSeconds: 3,
+      ...decodedTipMediaFingerprints(video),
       mediaSha256: manifest.media_sha256, retainedArtifact: false,
     };
   } finally {

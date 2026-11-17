@@ -1,4 +1,5 @@
 from contextlib import redirect_stderr
+import difflib
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,8 +8,9 @@ import unittest
 from unittest.mock import Mock
 
 from align_tip_v11 import (
-    PHONE_WINDOW_EVIDENCE, PhoneEvidenceError, SignatureEvidenceError, align, align_with_phone_retry,
+    DOMAIN_BOUNDARY_METHOD, PHONE_WINDOW_EVIDENCE, PhoneEvidenceError, SignatureEvidenceError, align, align_with_phone_retry,
     align_with_signature_retry, recognize_words, report_alignment_failure, tokens,
+    bounded_domain_boundary,
 )
 
 
@@ -50,6 +52,92 @@ def phone_gap():
 
 
 class V11AlignmentTest(unittest.TestCase):
+    def deferred_domain_fixture(self):
+        segments = [row if row['id'] != 'domain' else {
+            **row, 'text': 'Retrouvez-nous sur notre site, jamm immo point com.',
+        } for row in SEGMENTS]
+        words = speech(segments)
+        first = sum(len(tokens(row['text'])) for row in segments[:8]) + 5
+        heard = [*words[:first], {**words[first], 'word': 'diamimo', 'end': words[first + 2]['end']},
+                 *words[first + 3:]]
+        return segments, heard, first
+
+    def test_domain_timing_defers_only_with_explicit_option_without_rewriting_speech(self):
+        segments, heard, _ = self.deferred_domain_fixture()
+        original = [row.copy() for row in heard]
+        with self.assertRaisesRegex(ValueError, 'pronunciation.*domain'):
+            align(segments, heard, 70)
+        actual = align(segments, heard, 70, defer_domain=True)
+        self.assertEqual(actual['domainEvidenceMethod'], DOMAIN_BOUNDARY_METHOD)
+        self.assertEqual(actual['deferredChecks'], ['domain_audio', 'visible_domain_cta'])
+        self.assertTrue(actual['reviewRequired'])
+        self.assertEqual(heard, original)
+        self.assertEqual(actual['segments'][8]['text'], segments[8]['text'])
+        self.assertEqual(actual['segments'][8]['end'], actual['segments'][9]['start'])
+        self.assertEqual(len(actual['phoneGroups']), 5)
+
+    def test_recorded_diamimo_window_locates_timing_without_certifying_domain_audio(self):
+        # Exact ASR timings from the 16 November normalized local take.
+        # This is a boundary regression, not a fresh decode or voice approval.
+        segments = [
+            {'id': 'tools', 'text': 'Les simulations restent indicatives.'},
+            {'id': 'domain', 'text': 'Retrouvez-nous sur notre site, jamm immo point com.'},
+            {'id': 'contact', 'text': 'Vous pouvez nous appeler ou nous écrire sur WhatsApp au même numéro.'},
+        ]
+        rows = [
+            ('indicatives.', 44.32, 44.96), ('Retrouvez', 45.48, 46), ('-nous', 46, 46.1),
+            ('sur', 46.1, 46.32), ('notre', 46.32, 46.48), ('site,', 46.48, 46.74),
+            ('diamimo', 46.94, 47.68), ('.com.', 47.68, 48.18), ('Vous', 48.36, 48.7),
+            ('pouvez', 48.7, 48.92), ('nous', 48.92, 49.1), ('appeler', 49.1, 49.5),
+            ('ou', 49.5, 49.76), ('nous', 49.76, 50),
+        ]
+        groups = [tokens(segment['text']) for segment in segments]
+        expected = [word for group in groups for word in group]
+        actual, stamps = [], []
+        for word, start, end in rows:
+            for token in tokens(word):
+                actual.append(token)
+                stamps.append((start, end))
+        matcher = difflib.SequenceMatcher(None, expected, actual, autojunk=False)
+        mapping = {block.a + i: block.b + i for block in matcher.get_matching_blocks() for i in range(block.size)}
+        self.assertTrue(bounded_domain_boundary(segments, 1, groups, len(groups[0]), mapping, actual, stamps))
+        self.assertNotIn('jamm', actual)
+        self.assertNotIn('point', actual)
+
+    def test_domain_timing_rejects_missing_competing_or_unbounded_anchors(self):
+        segments, heard, first = self.deferred_domain_fixture()
+        before, domain, com, contact, following = heard[:first], heard[first], heard[first + 1], heard[first + 2], heard[first + 3:]
+        invalid = (
+            [*before, domain, {**com, 'word': 'fr'}, contact, *following],
+            [*before, domain, {**com, 'word': 'com com'}, contact, *following],
+            [*before, {**domain, 'word': 'un deux trois quatre cinq'}, com, contact, *following],
+            [*before, domain, com, {**contact, 'word': 'indécis'}, *following],
+            [*before[:-1], {**before[-1], 'word': 'indécis'}, domain, com, contact, *following],
+        )
+        for words in invalid:
+            with self.subTest(words=words[first - 1:first + 3]), self.assertRaisesRegex(ValueError, 'pronunciation.*domain'):
+                align(segments, words, 70, defer_domain=True)
+        for update in ({'text': 'Retrouvez-nous sur notre site, autre point com.'}, {'id': 'other'}):
+            changed = [row if i != 8 else {**row, **update} for i, row in enumerate(segments)]
+            if update.get('id'):
+                # The explicit defer mechanism is bound to the domain scene.
+                with self.assertRaisesRegex(ValueError, 'Insufficient speech evidence: other'):
+                    align(changed, heard, 70, defer_domain=True)
+            else:
+                with self.assertRaisesRegex(ValueError, 'pronunciation.*domain'):
+                    align(changed, heard, 70, defer_domain=True)
+
+    def test_domain_deferral_preserves_phone_and_signature_validation(self):
+        segments, heard, _ = self.deferred_domain_fixture()
+        index = next(i for i, word in enumerate(heard) if word['word'] == 'seize')
+        changed = [*heard[:index], {**heard[index], 'word': 'quinze'}, *heard[index + 1:]]
+        with self.assertRaises(PhoneEvidenceError):
+            align(segments, changed, 70, defer_domain=True)
+        ending = len(tokens(segments[-1]['text']))
+        changed = heard[:-ending] + [{**row, 'word': 'murmure'} for row in heard[-ending:]]
+        with self.assertRaises(SignatureEvidenceError):
+            align(segments, changed, 70, defer_domain=True)
+
     def test_keeps_authored_steps_and_formats_the_full_number_in_digits(self):
         alignment = align(SEGMENTS, speech(SEGMENTS), 70)
         self.assertEqual([s['id'] for s in alignment['segments']], [s['id'] for s in SEGMENTS])
