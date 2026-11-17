@@ -193,7 +193,10 @@ def words_by_segment(segments, recognized_words, lag_samples, *, opening_hook=No
         previous = start
         text = text.strip()
         spoken_plus = text == '+'
-        if not spoken_plus and not normalized_words('', text):
+        # Domain punctuation may be a separate ASR row. Preserve its origin
+        # for the literal-URL guard; it still contributes no ordinary word.
+        domain_punctuation = bool(re.fullmatch(r'[.@/\\:-]+', text))
+        if not spoken_plus and not normalized_words('', text) and not domain_punctuation:
             continue
         start, end = start - offset, end - offset
         row = (text, start, end, probability)
@@ -203,6 +206,8 @@ def words_by_segment(segments, recognized_words, lag_samples, *, opening_hook=No
         while index + 1 < len(segments) and middle >= segments[index]['end']:
             index += 1
         segment = segments[index]
+        if domain_punctuation and segment['id'] != 'domain':
+            continue
         excluded = segment['id'] in EXCLUDED_SEGMENTS
         if not segment['start'] <= middle < segment['end']:
             raise ValueError('recognized word ambiguous at a scene boundary')
