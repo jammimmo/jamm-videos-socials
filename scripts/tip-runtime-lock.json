@@ -35,6 +35,28 @@
   },
   "asr": {
     "repository": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
-    "revision": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf"
+    "revision": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+    "files": {
+      "config.json": {
+        "algorithm": "git-sha1",
+        "sha": "0351d1d6870005e865747b781b5d7c23ea0459cd"
+      },
+      "model.bin": {
+        "algorithm": "sha256",
+        "sha": "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da"
+      },
+      "preprocessor_config.json": {
+        "algorithm": "git-sha1",
+        "sha": "931c77a740890c46365c7ae0c9d350ba3cca908f"
+      },
+      "tokenizer.json": {
+        "algorithm": "git-sha1",
+        "sha": "17456db595adc78a973f97d69d8cb50bc87c0b1c"
+      },
+      "vocabulary.json": {
+        "algorithm": "git-sha1",
+        "sha": "0adcd01e7c237205d593b707e66dd5d7bc785d2d"
+      }
+    }
   }
 }

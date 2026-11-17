@@ -6,7 +6,7 @@ import { assertTipSourceRuntime, canonicalTipRuntime, expectedTipRuntime, readTi
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const fixture = lock => ({ ...lock, platform: 'linux', architecture: 'x64', pythonIsolated: true,
-  asrRepository: lock.asr.repository, asrRevision: lock.asr.revision, asrFilesPresent: true, asrNativeReady: true });
+  asrRepository: lock.asr.repository, asrRevision: lock.asr.revision, asrFilesVerified: true, asrNativeImportsReady: true });
 
 test('the full wheel lock is hash-bound, exact and includes every measured package', async () => {
   const lock = await readTipRuntimeLock();
@@ -37,8 +37,8 @@ test('wrong host, interpreter, dependencies, encoder or ASR cache fail closed', 
   for (const change of [
     { platform: 'darwin' }, { architecture: 'arm64' }, { node: 'v22.21.0' }, { npm: '11.0.0' },
     { python: '3.11.8' }, { pythonIsolated: false }, { ffmpegSha256: 'a'.repeat(64) },
-    { ffprobeSha256: 'b'.repeat(64) }, { asrRevision: 'c'.repeat(40) }, { asrFilesPresent: false },
-    { asrNativeReady: false },
+    { ffprobeSha256: 'b'.repeat(64) }, { asrRevision: 'c'.repeat(40) }, { asrFilesVerified: false },
+    { asrNativeImportsReady: false },
     { pythonPackages: { ...lock.pythonPackages, av: '18.0.0' } },
     { pythonPackages: { ...lock.pythonPackages, injected: '1.0.0' } },
   ]) assert.throws(() => verifyTipRuntimeMeasurement(lock, { ...fixture(lock), ...change }, expected.sha256));

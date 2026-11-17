@@ -37,8 +37,8 @@ export function canonicalTipRuntime(lock, measured) {
   assert.deepEqual(sorted(measured.pythonPackages), sorted(lock.pythonPackages), 'Speech packages changed');
   assert.equal(measured.asrRepository, lock.asr.repository);
   assert.equal(measured.asrRevision, lock.asr.revision, 'Pinned ASR cache is unavailable');
-  assert.equal(measured.asrFilesPresent, true, 'Pinned ASR cache is incomplete');
-  assert.equal(measured.asrNativeReady, true, 'Native CPU int8 ASR is unavailable');
+  assert.equal(measured.asrFilesVerified, true, 'Pinned ASR cache bytes were not verified');
+  assert.equal(measured.asrNativeImportsReady, true, 'Native CPU int8 ASR modules are unavailable');
   return {
     contract: TIP_RUNTIME_CONTRACT, platform: measured.platform, architecture: measured.architecture,
     node: measured.node, npm: measured.npm, python: measured.python,
@@ -69,30 +69,11 @@ export async function collectTipRuntime(lock, env = process.env) {
   if (!python || !python.startsWith('/')) throw new Error('Use the absolute qualified Python interpreter');
   const command = async (tool, args) => (await execute(tool, args, {
     env: { ...env, HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', PYTHONNOUSERSITE: '1' },
-    timeout: 30_000, maxBuffer: 64 * 1024,
+    timeout: 90_000, maxBuffer: 64 * 1024,
   })).stdout.trim();
-  const probe = `import importlib.metadata as m,json,sys
-from pathlib import Path
-from huggingface_hub import snapshot_download
-import av,ctranslate2
-from faster_whisper import WhisperModel
-assert 'int8' in ctranslate2.get_supported_compute_types('cpu')
-sys.path.insert(0,sys.argv[3])
-from align_tip_v11 import ASR_REPO,ASR_REVISION
-p=json.loads(sys.argv[1])
-a=json.loads(sys.argv[2])
-assert ASR_REPO==a['repository'] and ASR_REVISION==a['revision']
-s=Path(snapshot_download(repo_id=ASR_REPO,revision=ASR_REVISION,local_files_only=True))
-print(json.dumps({
-    'python':'.'.join(map(str,sys.version_info[:3])),
-    'pythonIsolated':sys.prefix!=sys.base_prefix,
-    'pythonPackages':{k:m.version(k) for k in p},
-    'asrRepository':ASR_REPO,'asrRevision':s.name,'asrNativeReady':True,
-    'asrFilesPresent':all((s/f).is_file() for f in ['config.json','model.bin','tokenizer.json','vocabulary.json'])
-}))`;
   const [npm, pythonValue, ffmpeg, ffprobe] = await Promise.all([
     command('npm', ['--version']),
-    command(python, ['-I', '-c', probe, JSON.stringify(Object.keys(lock.pythonPackages)), JSON.stringify(lock.asr), resolve(root, 'scripts')]),
+    command(python, ['-I', resolve(root, 'scripts/probe_tip_runtime.py'), resolve(root, 'scripts/tip-runtime-lock.json'), resolve(root, 'scripts')]),
     command('which', ['ffmpeg']), command('which', ['ffprobe']),
   ]);
   const [ffmpegSha256, ffprobeSha256] = await Promise.all([
@@ -111,7 +92,7 @@ export async function expectedTipRuntime() {
   const lock = await readTipRuntimeLock();
   const runtime = canonicalTipRuntime(lock, { ...lock, platform: 'linux', architecture: 'x64',
     pythonIsolated: true, asrRepository: lock.asr.repository, asrRevision: lock.asr.revision,
-    asrFilesPresent: true, asrNativeReady: true });
+    asrFilesVerified: true, asrNativeImportsReady: true });
   return { contract: TIP_RUNTIME_CONTRACT, sha256: digest(JSON.stringify(runtime)), runtime };
 }
 

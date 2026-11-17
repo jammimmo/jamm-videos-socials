@@ -19,7 +19,8 @@ provider start. A release must deliberately update the lock and qualify the
 new tools together. It never changes the system Python or an existing venv.
 
 `tip-runtime.mjs measure` reads the actual host/interpreter, installed package
-versions, encoder hashes and the local exact-revision ASR cache. It emits a
+versions, encoder hashes and the exact-revision ASR cache bytes. The model is streamed through its pinned LFS
+SHA-256 and the JSON files through their pinned Git object hashes. It emits a
 canonical runtime digest with no file paths or credentials. The source
 controller recomputes this digest before the durable start and requires the
 source policy's `runtimeSha256` to match. A copied environment receipt or
@@ -35,9 +36,9 @@ The old source policy's digest must be replaced with this qualified digest in
 the existing bounded policy process; this source change performs no activation.
 
 The native libraries linked by the encoders, CPU instructions and graphics
-implementation are not completely frozen by this lock. The ASR cache is checked
-for its exact revision and required files, not rehashed as an independent model
-attestation. The output comparison therefore continues to require identical
+implementation are not completely frozen by this lock. The native probe verifies module imports and CPU int8 capability, not a full
+model startup. The source scorer owns its separately bounded model startup
+and keeps that one model resident for its recognition windows. The output comparison therefore continues to require identical
 decoded audio and pictures. Equal tools or a shared installer cannot by
 themselves establish an interchangeable render.
 
