@@ -25,12 +25,16 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22.20.0'
-      - name: Provision only codec and network isolation tools
+      - name: Verify the attested codec and isolation tools
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ffmpeg iproute2
+          sudo apt-get install -y --no-install-recommends --allow-downgrades ffmpeg=7:6.1.1-3ubuntu5 iproute2
+          for tool in ffmpeg ip unshare; do command -v "$tool" >/dev/null; done
+          ffmpeg_path=$(command -v ffmpeg)
+          test "$(ffmpeg -version | sed -n '1p')" = 'ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers'
+          test "$(sha256sum "$ffmpeg_path" | cut -d ' ' -f 1)" = ed16af623947494a72e284b6eb8ff225f2da22b38b5d5069c2fd4b4ba3384e41
           test "$(node --version)" = v22.20.0
           test "$(npm --version)" = 10.9.3
       - name: Isolate and measure twelve synthetic frames
