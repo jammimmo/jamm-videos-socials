@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock
 import wave
 
-from audit_tip_v11_speech import ASR_REVISION, SAMPLE_RATE, sha256
+from audit_tip_v11_speech import ASR_REVISION, SAMPLE_RATE, compare_french_segments, french_speech_outcome, sha256
 from score_tip_source import score_source
 from test_align_tip_v11 import SEGMENTS, speech
 
@@ -40,13 +40,15 @@ class SourceScoringTest(unittest.TestCase):
     def test_scores_exact_source_with_bound_pcm_draft_and_model(self):
         report = self.run_source()
         self.assertEqual(report['status'], 'matched')
-        self.assertEqual(report['contract'], 'tip-v11-fr-source-speech-v1')
+        self.assertEqual(report['contract'], 'tip-v11-fr-source-speech-v2')
         self.assertEqual(report['draft_sha256'], self.plan['draft_sha256'])
         self.assertEqual(report['source_script_sha256'], self.plan['source_script_sha256'])
         self.assertEqual(report['narration_wav_sha256'], sha256(self.wav))
         self.assertEqual(report['decoded_pcm_sha256'], sha256(self.data))
         self.assertEqual(report['model_revision'], ASR_REVISION)
-        self.assertEqual(len(report['segments']), 11)
+        self.assertEqual(len(report['segments']), 10)
+        self.assertNotIn('domain', [row['segment'] for row in report['segments']])
+        self.assertEqual(report['deferred_checks'], ['domain_audio', 'visible_domain_cta'])
         self.assertEqual(report['excluded_segments'], ['greeting', 'signature'])
         self.assertFalse(report['accent_evaluated'])
 
@@ -68,7 +70,7 @@ class SourceScoringTest(unittest.TestCase):
             with self.subTest(length=len(invalid)), self.assertRaises(ValueError):
                 self.run_source(wav=invalid)
 
-    def test_domain_alias_requiring_final_video_does_not_qualify_source(self):
+    def test_domain_alias_is_deferred_in_source_and_never_reported_as_matched(self):
         segments = [row if row['id'] != 'domain' else {
             **row, 'text': 'Retrouvez-nous sur notre site, jamm immo point com.',
         } for row in SEGMENTS]
@@ -80,6 +82,38 @@ class SourceScoringTest(unittest.TestCase):
             ('jamimo', rows[first][1], rows[first + 1][2], .95), ('.com', *rows[first + 3][1:]),
         ]
         report = self.run_source(rows)
-        self.assertEqual(report['status'], 'inconclusive')
-        domain = next(row for row in report['segments'] if row['segment'] == 'domain')
-        self.assertEqual(domain['reason'], 'visible_domain_required')
+        self.assertEqual(report['status'], 'matched')
+        self.assertEqual(report['deferred_checks'], ['domain_audio', 'visible_domain_cta'])
+        self.assertNotIn('domain', [row['segment'] for row in report['segments']])
+
+    def test_uncertain_domain_does_not_turn_into_final_speech_approval(self):
+        segments = [row if row['id'] != 'domain' else {
+            **row, 'text': 'Retrouvez-nous sur notre site, jamm immo point com.',
+        } for row in SEGMENTS]
+        self.plan = {**self.plan, 'segments': segments}
+        rows = [(row['word'], row['start'], row['end'], .95) for row in speech(segments)]
+        first = next(index for index in range(len(rows) - 3)
+                     if [word[0] for word in rows[index:index + 4]] == ['jamm', 'immo', 'point', 'com'])
+        rows[first:first + 4] = [('autre', rows[first][1], rows[first + 2][2], .95), rows[first + 3]]
+        source = self.run_source(rows)
+        self.assertEqual(source['status'], 'matched')
+        # The same bounded timing permits rendering. It never manufactures
+        # the missing spoken brand or authorizes a final MP4 on its own.
+        from align_tip_v11 import align
+        timed = align(segments, [{'word': word, 'start': start, 'end': end} for word, start, end, _ in rows],
+                      70, defer_domain=True)['segments']
+        result = french_speech_outcome(timed, compare_french_segments(timed, rows, 0))
+        self.assertEqual(result['status'], 'inconclusive')
+        self.assertEqual(next(row for row in result['segments'] if row['segment'] == 'domain')['status'],
+                         'inconclusive')
+
+    def test_missing_domain_boundary_is_held_even_before_render(self):
+        segments = [row if row['id'] != 'domain' else {
+            **row, 'text': 'Retrouvez-nous sur notre site, jamm immo point com.',
+        } for row in SEGMENTS]
+        self.plan = {**self.plan, 'segments': segments}
+        rows = [(row['word'], row['start'], row['end'], .95) for row in speech(segments)]
+        first = next(index for index in range(len(rows) - 3)
+                     if [word[0] for word in rows[index:index + 4]] == ['jamm', 'immo', 'point', 'com'])
+        rows[first:first + 4] = [('inaudible', rows[first][1], rows[first + 3][2], .95)]
+        self.assertEqual(self.run_source(rows)['reason'], 'website_evidence_unconfirmed')

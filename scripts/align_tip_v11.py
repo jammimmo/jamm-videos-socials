@@ -30,6 +30,8 @@ PHONE_WORDS = ['plus', *(word for group in NUMBER_WORDS.values() for word in gro
 PHONE_BOUNDARY_TOLERANCE_SECONDS = .10
 SCENE_PREROLL_SECONDS = .08
 AUDIBLE_WINDOW_SECONDS = .1
+DEFERRED_DOMAIN_CHECKS = ('domain_audio', 'visible_domain_cta')
+DOMAIN_BOUNDARY_METHOD = 'bounded-domain-anchors-final-mp4'
 
 
 class PhoneEvidenceError(ValueError):
@@ -144,7 +146,37 @@ def empty_phone_gap(segments, groups, index, offset, mapping, source_indices, wo
     return after, start, end, groups[index - 1][-3:], groups[index + 1][:2]
 
 
-def align(segments, words, duration, audible=None):
+def bounded_domain_boundary(segments, index, groups, offset, mapping, actual, stamps):
+    """Locate the fixed CTA, without claiming its website words were heard.
+
+    The standard prefix and the following contact sentence delimit at most
+    four words ending in com. This permits an uncertain brand transcription
+    to reach the final audio and visible-CTA checks, without inventing words
+    or borrowing an anchor from another scene.
+    """
+    group = groups[index]
+    if (index == 0 or index + 1 >= len(segments)
+        or group != tokens('Retrouvez-nous sur notre site, jamm immo point com.')
+        or segments[index - 1]['id'] not in ('tools', 'assistant')
+        or segments[index + 1]['id'] != 'contact'):
+        return False
+    prefix = [mapping.get(offset + n) for n in range(5)]
+    following = [mapping.get(offset + len(group) + n) for n in range(2)]
+    last = mapping.get(offset + len(group) - 1)
+    if (any(point is None for point in prefix + following) or last is None
+        or prefix != list(range(prefix[0], prefix[0] + 5))
+        or following != [last + 1, last + 2]
+        or not 1 <= last - prefix[-1] <= 4
+        or actual[prefix[-1] + 1:following[0]].count('com') != 1
+        or actual[last] != 'com'):
+        return False
+    # These are timing bounds only. The final report remains responsible
+    # for the complete spoken address and its actual visible rendering.
+    return (0 < stamps[last][1] - stamps[prefix[0]][0] <= 8
+            and 0 <= stamps[following[0]][0] - stamps[last][1] <= 1.25)
+
+
+def align(segments, words, duration, audible=None, *, defer_domain=False):
     if not math.isfinite(duration) or not 58.5 <= duration <= 119:
         raise ValueError('V11 narration must fit the 60–120 second master')
     if not words:
@@ -185,6 +217,7 @@ def align(segments, words, duration, audible=None):
     anchors = []
     phone_groups = []
     preceding_social_end = None
+    domain_deferred = False
     offset = 0
     for index, (segment, group) in enumerate(zip(segments, groups)):
         matched = [mapping[i] for i in range(offset, offset + len(group)) if i in mapping]
@@ -198,7 +231,10 @@ def align(segments, words, duration, audible=None):
             if first is None:
                 if identifier == 'phone':
                     raise PhoneEvidenceError(empty_phone_gap(segments, groups, index, offset, mapping, source_indices, words))
-                raise ValueError(f'Exact contact pronunciation not recognized: {identifier}')
+                if not defer_domain or not bounded_domain_boundary(
+                        segments, index, groups, offset, mapping, actual, stamps):
+                    raise ValueError(f'Exact contact pronunciation not recognized: {identifier}')
+                domain_deferred = True
             if identifier == 'phone':
                 cursor = first + 1  # skip the separately spoken international prefix “plus”
                 for number in NUMBER_WORDS.values():
@@ -264,12 +300,14 @@ def align(segments, words, duration, audible=None):
     return {'segments': timed_segments, 'captions': captions, 'durationInFrames': duration_in_frames,
             'method': WORD_ALIGNMENT_METHOD, 'reviewRequired': True,
             'phoneGroups': phone_groups,
+            **({'domainEvidenceMethod': DOMAIN_BOUNDARY_METHOD,
+                'deferredChecks': list(DEFERRED_DOMAIN_CHECKS)} if domain_deferred else {}),
             'listenFor': ['greeting and signature in Wolof', 'voice and accent']}
 
 
-def align_with_signature_retry(segments, words, duration, sound, recognize_tail):
+def align_with_signature_retry(segments, words, duration, sound, recognize_tail, *, defer_domain=False):
     try:
-        return align(segments, words, duration, sound)
+        return align(segments, words, duration, sound, defer_domain=defer_domain)
     except SignatureEvidenceError as error:
         boundary = error.preceding_end
         if boundary is None or not 1.2 <= duration - boundary <= 8 or segments[-1]['id'] != 'signature':
@@ -290,7 +328,7 @@ def align_with_signature_retry(segments, words, duration, sound, recognize_tail)
             raise
         original = [word for word in words if word['end'] <= boundary + .001]
         try:
-            alignment = align(segments, original + tail, duration, sound)
+            alignment = align(segments, original + tail, duration, sound, defer_domain=defer_domain)
         except SignatureEvidenceError as retry_error:
             retry_error.reason = 'signature_retry_insufficient'
             raise
@@ -335,9 +373,9 @@ def voiced_overlap(sound, start, end):
     return sum(max(0, min(end, right) - max(start, left)) for left, right in sound)
 
 
-def align_with_phone_retry(segments, words, duration, sound, recognize_tail, recognize_phone):
+def align_with_phone_retry(segments, words, duration, sound, recognize_tail, recognize_phone, *, defer_domain=False):
     try:
-        return align_with_signature_retry(segments, words, duration, sound, recognize_tail)
+        return align_with_signature_retry(segments, words, duration, sound, recognize_tail, defer_domain=defer_domain)
     except PhoneEvidenceError as error:
         if error.gap is None:
             raise
@@ -354,7 +392,7 @@ def align_with_phone_retry(segments, words, duration, sound, recognize_tail, rec
             or any(voiced_overlap(sound, word['start'], word['end']) <= 0 for word in focused)):
             raise
         merged = [*words[:index], *focused, *words[index:]]
-        alignment = align_with_signature_retry(segments, merged, duration, sound, recognize_tail)
+        alignment = align_with_signature_retry(segments, merged, duration, sound, recognize_tail, defer_domain=defer_domain)
         alignment['phoneEvidenceMethod'] = PHONE_WINDOW_EVIDENCE
         return alignment
 
@@ -390,6 +428,8 @@ def main():
     parser.add_argument('--output', required=True)
     parser.add_argument('--transcript', help='Premeasured local QA word timings')
     parser.add_argument('--failure-code-file', help='Write an allowlisted classification for a failed render')
+    parser.add_argument('--defer-domain-to-final', action='store_true',
+                        help='Locate a bounded standard domain CTA; final MP4 audio and visible checks remain required')
     args = parser.parse_args()
     with open(args.spec, encoding='utf8') as source:
         spec = json.load(source)
@@ -401,7 +441,7 @@ def main():
     if args.transcript:
         with open(args.transcript, encoding='utf8') as source:
             words = json.load(source)
-        alignment = align(spec['segments'], words, duration, sound)
+        alignment = align(spec['segments'], words, duration, sound, defer_domain=args.defer_domain_to_final)
         alignment['provenance'] = 'local-word-timings'
     else:
         from faster_whisper import WhisperModel, download_model
@@ -414,6 +454,7 @@ def main():
                 spec['segments'], words, duration, sound,
                 lambda boundary: recognize_signature_tail(model, args.wav, boundary),
                 lambda start, end: recognize_audio_window(model, args.wav, start, end),
+                defer_domain=args.defer_domain_to_final,
             )
         except ValueError as error:
             report_alignment_failure(error, args.failure_code_file)

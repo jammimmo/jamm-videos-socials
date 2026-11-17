@@ -9,7 +9,8 @@ from tempfile import TemporaryDirectory
 import wave
 
 from align_tip_v11 import (
-    ASR_REVISION, SIGNATURE_PREROLL_SECONDS, align_with_phone_retry, alignment_failure_diagnostics, audible_windows,
+    ASR_REVISION, DEFERRED_DOMAIN_CHECKS, SIGNATURE_PREROLL_SECONDS, align_with_phone_retry,
+    alignment_failure_diagnostics, audible_windows,
 )
 from audit_tip_v11 import pcm
 from audit_tip_v11_speech import (
@@ -43,10 +44,11 @@ def score_source(plan, wav, directory, recognize=recognize_with_timeout, recogni
     duration = len(raw) / (2 * SAMPLE_RATE)
     sound = list(audible_windows(raw, SAMPLE_RATE))
     report = {
-        'contract': 'tip-v11-fr-source-speech-v1', 'source': 'normalized_wav_pcm_s16le_mono_24khz',
+        'contract': 'tip-v11-fr-source-speech-v2', 'source': 'normalized_wav_pcm_s16le_mono_24khz',
         'draft_sha256': plan['draft_sha256'], 'source_script_sha256': plan['source_script_sha256'],
         'narration_wav_sha256': sha256(wav), 'decoded_pcm_sha256': sha256(raw), 'model_revision': ASR_REVISION,
         'status': 'inconclusive', 'segments': [], 'excluded_segments': list(EXCLUDED_SEGMENTS),
+        'deferred_checks': list(DEFERRED_DOMAIN_CHECKS),
         'accent_evaluated': False,
     }
     if not sound:
@@ -68,6 +70,7 @@ def score_source(plan, wav, directory, recognize=recognize_with_timeout, recogni
         segments = align_with_phone_retry(
             plan['segments'], timed_words(recognized), duration, sound,
             lambda boundary: alignment_window(boundary - SIGNATURE_PREROLL_SECONDS), alignment_window,
+            defer_domain=True,
         )['segments']
     except ValueError as error:
         return {**report, **alignment_failure_diagnostics(error)}
@@ -86,12 +89,12 @@ def score_source(plan, wav, directory, recognize=recognize_with_timeout, recogni
         )
     except ValueError:
         return {**report, 'reason': 'recognition_or_timing_inconclusive'}
-    # A final-video alias can depend on proven visible information. Source
-    # audio alone cannot satisfy that condition, even for known contact text.
-    for row in results:
-        if row.get('measurement', {}).get('visible_domain_required'):
-            row.update(status='inconclusive', reason='visible_domain_required')
-    return {**report, **french_speech_outcome(segments, results)}
+    # A source can be admitted to rendering before pixels exist. Do not
+    # certify the domain here: final MP4 audio and visible-CTA evidence must
+    # pass independently before automatic approval or publication.
+    checked_segments = [segment for segment in segments if segment['id'] != 'domain']
+    checked_results = [row for row in results if row['segment'] != 'domain']
+    return {**report, **french_speech_outcome(checked_segments, checked_results)}
 
 
 if __name__ == '__main__':
