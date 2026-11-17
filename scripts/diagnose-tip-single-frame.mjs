@@ -7,6 +7,7 @@ import { tmpdir, networkInterfaces } from 'node:os';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { admitTipCaptureRenderer } from './admit-tip-capture-renderer.mjs';
+import { openTipSwangleBrowser } from './open-tip-swangle-browser.mjs';
 import { buildTipV11Narration } from './tip-v11-contract.mjs';
 import { collectTipV11StaticFiles } from './tip-v11-render-manifest.mjs';
 import '../remotion.tip-v11.config.ts';
@@ -60,7 +61,7 @@ const binary = getExecutablePath({ type: 'ffmpeg', indent: false, logLevel: 'err
 const scratch = mkdtempSync(join(tmpdir(), 'jamm-one-frame-'));
 const { cancelSignal, cancel } = makeCancelSignal();
 const timer = setTimeout(cancel, 60_000);
-let browser, capture;
+let browser, capture, launchProof;
 const snapshot = async (page) => {
   const client = page._client();
   const response = await client.send('Runtime.evaluate', { expression: `JSON.stringify([document,...Array.from(document.querySelectorAll('iframe')).map(f=>f.contentDocument).filter(Boolean)].map(d=>({
@@ -113,7 +114,7 @@ const snapshot = async (page) => {
 try {
   const cached = await ensureBrowser({ onBrowserDownload() { throw new Error('Chromium must be prepared outside isolation'); } });
   assert.equal(cached.type, 'local-puppeteer-browser');
-  browser = await openBrowser('chrome', { browserExecutable: cached.path, chromiumOptions: { gl: 'angle' }, forceDeviceScaleFactor: 1, chromeMode: 'headless-shell', logLevel: 'error' });
+  ({ browser, launchProof } = await openTipSwangleBrowser({ openBrowser, rendererDir, browserExecutable: cached.path }));
   const publicDir = join(scratch, 'public');
   mkdirSync(publicDir);
   cpSync(join(root, 'public/tip-v11'), join(publicDir, 'tip-v11'), { recursive: true });
@@ -155,7 +156,7 @@ try {
   };
   const piped = [];
   await renderFrames({ serveUrl, composition, inputProps: props, puppeteerInstance: browser,
-    imageFormat: 'jpeg', jpegQuality: 80, chromiumOptions: { gl: 'angle' }, concurrency: 3,
+    imageFormat: 'jpeg', jpegQuality: 80, chromiumOptions: { gl: 'swangle' }, concurrency: 3,
     scale: 1, frameRange: [frame, frame], outputDir: null, cancelSignal,
     timeoutInMilliseconds: 20_000, logLevel: 'error',
     onStart() {}, onFrameUpdate() {}, onFrameBuffer(bytes, index) { piped.push({ frame: index, sha256: hash(bytes) }); } });
@@ -165,6 +166,8 @@ try {
   const browserVersion = (await browser.connection.send('Browser.getVersion')).value;
   assert.ok(gpu && gpu.devices?.length && gpu.auxAttributes, 'Actual graphics information unavailable');
   assert.ok(Object.keys(gpu.auxAttributes).some((key) => /gl.*renderer|glImplementationParts/iu.test(key)), 'Actual GL renderer/backend unavailable');
+  assert.match(gpu.auxAttributes.glRenderer ?? '', /swiftshader/iu, 'Requested swangle did not produce an observed SwiftShader renderer');
+  assert.doesNotMatch(gpu.auxAttributes.glRenderer, /disabled|llvmpipe/iu);
   const pixels = {};
   for (const [name, format, channels] of [['frame.jpg', 'yuv420p', 1.5], ['frame.png', 'rgba', 4]]) {
     const bytes = execFileSync(binary, ['-nostdin', '-v', 'error', '-i', join(out, name), '-frames:v', '1', '-an', '-c:v', 'rawvideo', '-pix_fmt', format, '-threads:v', '1', '-f', 'image2pipe', 'pipe:1'], { maxBuffer: width * height * channels + 1024, timeout: 15_000 });
@@ -174,7 +177,7 @@ try {
     pixels[name] = { format, bytes: bytes.length, sha256: hash(bytes), nonOpaquePixels };
   }
   const receipt = { schema: 'jamm-v11-single-frame-capture-v1', syntheticOnly: true, publishable: false,
-    sourceSha, admission, input, inputSha256: hash(JSON.stringify(input)), inventory, configSha256: hash(readFileSync(join(root, 'remotion.tip-v11.config.ts'))),
+    sourceSha, admission, diagnosticIntervention: { baselineRequestedGl: 'angle', requestedGl: 'swangle', launchProof }, input, inputSha256: hash(JSON.stringify(input)), inventory, configSha256: hash(readFileSync(join(root, 'remotion.tip-v11.config.ts'))),
     chromium: { path: cached.path, sha256: hash(readFileSync(cached.path)), browserVersion },
     bundledFfmpeg: { path: binary, sha256: hash(readFileSync(binary)) },
     observedGpu: gpu, capture, piped, pixels,
