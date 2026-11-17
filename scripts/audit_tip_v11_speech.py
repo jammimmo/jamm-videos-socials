@@ -274,6 +274,55 @@ def fixed_domain_alias(expected, raw_actual, rows):
     return [*FIXED_DOMAIN_WORDS[:-2], 'com'], index
 
 
+def fixed_company_domain_notation(expected, rows):
+    """Normalize only the company's literal URL spelling, preserving row trust.
+
+    A dot actually observed in .com is URL notation for ``point com``. The
+    two bounded single/double consonants identify the same fixed brand. They
+    are not phonetic aliases: no edit-distance/domain search is performed.
+    Every expanded token retains the probability of its original ASR row.
+    """
+    if tuple(expected[-4:]) != ('jamm', 'immo', 'point', 'com') or not rows:
+        return None
+    text, origins = '', []
+    for index, row in enumerate(rows):
+        part = ''.join(char for char in unicodedata.normalize('NFKD', row[0]).lower()
+                       if not unicodedata.category(char).startswith('M'))
+        if index:
+            text += ' '
+            origins.append(None)
+        text += part
+        origins.extend([index] * len(part))
+    pattern = (r'(?<![\w.@/-])(?P<first>jam{1,2})\s*(?P<second>im{1,2}o)'
+               r'(?:\s*(?P<dot>\.)\s*|\s+(?P<point>point)\s+)'
+               r'(?P<tld>com)[.!?,;:\s]*$')
+    match = re.search(pattern, text)
+    if match is None:
+        return None
+    def origin_probability(first, last):
+        indices = {origin for origin in origins[first:last] if origin is not None}
+        return min(rows[index][3] for index in indices) if indices else 0
+    tokens = []
+    for prefix in re.finditer(r'[^\W_]+', text[:match.start()]):
+        tokens.append((prefix.group(), origin_probability(*prefix.span())))
+    for word, group in (('jamm', 'first'), ('immo', 'second'),
+                        ('point', 'dot' if match.group('dot') else 'point'), ('com', 'tld')):
+        tokens.append((word, origin_probability(*match.span(group))))
+    actual = [word for word, _ in tokens]
+    uncertain = [word for word, probability in tokens if probability < MIN_WORD_PROBABILITY]
+    if protected_speech(uncertain):
+        return None
+    return {
+        'actual': actual,
+        'reported': [word if probability >= MIN_WORD_PROBABILITY else None for word, probability in tokens],
+        'raw_words': normalized_words('', text),
+        'uncertain_token_count': len(uncertain),
+        'raw_uncertain_token_count': sum(len(normalized_words('', row[0]))
+                                         for row in rows if row[3] < MIN_WORD_PROBABILITY),
+        'notation': 'dot' if match.group('dot') else 'point',
+    }
+
+
 def safe_socials_signature_boundary(segments, index, crossings, in_scene_rows):
     if (segments[index]['id'] != 'socials' or index + 1 >= len(segments)
         or segments[index + 1]['id'] != 'signature'
@@ -304,7 +353,38 @@ def fixed_socials_boundary_alias(expected, raw_actual, rows, crossing):
     return ['aussi', 'jamm', 'immo', *FIXED_SOCIALS_WORDS[4:]], index
 
 
-def complete_socials_before_excluded_cue(segments, index, crossings, rows, expected, raw_actual):
+def socials_onset_without_borrowing(segments, index, rows, previous_rows):
+    """Use the preceding French words, never its nominal scene rectangle."""
+    if not rows or index < 1 or not previous_rows:
+        return None
+    part, previous = segments[index], segments[index - 1]
+    first = rows[0]
+    if (previous['id'] in EXCLUDED_SEGMENTS or abs(previous['end'] - part['start']) > .001
+        or not 0 < part['start'] - first[1] <= MAX_PHONE_EDGE_SHIFT_SECONDS
+        or first[2] <= part['start'] or protected_speech(normalized_words('', first[0]))
+        or any(row[1] < part['start'] for row in rows[1:])
+        or any(row[3] < MIN_WORD_PROBABILITY or row[0] == '+' for row in previous_rows)
+        or any(left[2] > right[1] for left, right in zip(previous_rows, previous_rows[1:]))
+        or segment_words(previous['id'], previous_rows) != normalized_words(previous['id'], previous['text'])
+        or not previous_rows[-1][2] <= first[1]
+        or first[1] - previous_rows[-1][2] > MAX_PHONE_EDGE_SHIFT_SECONDS):
+        return None
+    # Every preceding word is still present once, in its own scene. In
+    # particular, a numeric/negative word cannot be clipped or borrowed to
+    # improve the following French sentence's score.
+    return {
+        'method': 'complete_preceding_french_words',
+        'previous_segment': previous['id'],
+        'previous_words_sha256': sha256(' '.join(segment_words(previous['id'], previous_rows)).encode()),
+        'previous_last_end_sample': round(previous_rows[-1][2] * SAMPLE_RATE),
+        'observed_first_start_sample': round(first[1] * SAMPLE_RATE),
+        'nominal_scene_start_sample': round(part['start'] * SAMPLE_RATE),
+        'previous_min_probability_milli': round(min(row[3] for row in previous_rows) * 1000),
+        'words_borrowed': False,
+    }
+
+
+def complete_socials_before_excluded_cue(segments, index, crossings, rows, expected, raw_actual, previous_rows=None):
     """Certify a fully observed French line, never the excluded crossing cue.
 
     Uncertain spelling in the excluded closing is irrelevant only when every
@@ -319,14 +399,16 @@ def complete_socials_before_excluded_cue(segments, index, crossings, rows, expec
         return None
     crossing, overlap_ids = crossings[0]
     crossing_words = normalized_words('', crossing[0])
+    onset = socials_onset_without_borrowing(segments, index, rows, previous_rows) if rows[0][1] < segment['start'] else None
     if (overlap_ids != ('socials', 'signature') or crossing in rows or len(crossing_words) != 1
         or protected_speech(crossing_words)
         or not crossing[1] < segment['end'] < crossing[2]
         or not 0 < crossing[2] - crossing[1] <= .75
         or segment['end'] - crossing[1] > .15 or crossing[2] - segment['end'] > .6
         or not rows[-1][2] <= crossing[1] <= rows[-1][2] + .75
-        or any(row[1] < segment['start'] or row[2] > segment['end']
-               or row[3] < MIN_WORD_PROBABILITY for row in rows)
+        or any((row[1] < segment['start'] and not (number == 0 and onset))
+               or row[2] > segment['end'] or row[3] < MIN_WORD_PROBABILITY
+               for number, row in enumerate(rows))
         or any(left[2] > right[1] for left, right in zip(rows, rows[1:]))):
         return None
     actual = canonical_fixed_brand_words('socials', expected, raw_actual, rows)
@@ -334,7 +416,7 @@ def complete_socials_before_excluded_cue(segments, index, crossings, rows, expec
     # All thirteen observed French words must remain, with no insertion.
     if actual != expected or len(actual) != len(raw_actual):
         return None
-    return actual, crossing
+    return actual, crossing, onset
 
 
 def exact_adjacent_split(left, right, rows, original_split, expected_left, expected_right):
@@ -438,15 +520,21 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
         ) if index in ambiguous_boundary else None
         complete_socials = complete_socials_before_excluded_cue(
             segments, index, boundary_crossings.get(index, []), observed[index], expected, raw_actual,
+            observed[index - 1] if index else None,
         ) if index in ambiguous_boundary else None
         socials_alias = fixed_socials_boundary_alias(expected, raw_actual, observed[index], crossing)
         domain_alias = fixed_domain_alias(expected, raw_actual, observed[index]) if index not in ambiguous_boundary else None
+        domain_notation = fixed_company_domain_notation(expected, observed[index]) if identity == 'domain' else None
         if complete_socials:
-            actual, _ = complete_socials
+            actual = complete_socials[0]
             alias_kind = 'fixed_socials_complete_boundary'
         elif socials_alias:
             actual, alias_index = socials_alias
             alias_kind = 'fixed_socials_boundary'
+        elif domain_notation:
+            actual = domain_notation['actual']
+            if actual != domain_notation['raw_words']:
+                alias_kind = 'fixed_company_domain_notation'
         elif domain_alias:
             actual, alias_index = domain_alias
             alias_kind = 'fixed_domain_jamimo'
@@ -456,9 +544,12 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
             actual = canonical_fixed_brand_words(identity, expected, raw_actual, observed[index])
             if actual != raw_actual:
                 alias_kind = 'fixed_jamm_immo'
-        uncertain_actual, unsafe_uncertainty = observed_words_with_uncertainty(
-            identity, expected, raw_actual, actual, observed[index], alias_kind,
-        )
+        if domain_notation:
+            uncertain_actual, unsafe_uncertainty = domain_notation['reported'], False
+        else:
+            uncertain_actual, unsafe_uncertainty = observed_words_with_uncertainty(
+                identity, expected, raw_actual, actual, observed[index], alias_kind,
+            )
         reported = bounded_observed_words(uncertain_actual) if uncertain_actual is not None else None
         # A standalone sign can be numeric formatting. It needs the focused
         # phone check and acoustic evidence before it can count as speech.
@@ -470,7 +561,12 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
                   and protected_speech(reported) == protected_speech(expected)
                   and all(word[0] != '+' for word in observed[index]))
         boundary_verified = alias_kind in ('fixed_socials_boundary', 'fixed_socials_complete_boundary')
-        matched = scored and (index not in ambiguous_boundary or boundary_verified)
+        # A wrong company domain/TLD is never an ordinary 1-in-9 word edit.
+        canonical_point_omission = (tuple(expected) == FIXED_DOMAIN_WORDS
+            and tuple(raw_actual) == tuple(word for word in FIXED_DOMAIN_WORDS if word != 'point'))
+        domain_verified = (identity != 'domain' or domain_notation is not None
+                           or domain_alias is not None or canonical_point_omission)
+        matched = scored and domain_verified and (index not in ambiguous_boundary or boundary_verified)
         item = {'segment': identity, 'status': 'matched' if matched else 'inconclusive',
                 'expected_token_count': len(expected), 'observed_token_count': len(actual),
                 'expected_sha256': sha256(' '.join(expected).encode()),
@@ -478,7 +574,16 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
         if reported is not None and all(word is not None for word in reported):
             item['observed_sha256'] = sha256(' '.join(reported).encode())
         if matched and alias_kind:
-            if alias_kind == 'fixed_domain_jamimo':
+            if alias_kind == 'fixed_company_domain_notation':
+                item['measurement'] = {
+                    'method': 'fixed_company_domain_url_notation',
+                    'raw_observed_sha256': sha256(' '.join(domain_notation['raw_words']).encode()),
+                    'notation': domain_notation['notation'],
+                    'uncertain_token_count': domain_notation['uncertain_token_count'],
+                    'raw_uncertain_token_count': domain_notation['raw_uncertain_token_count'],
+                    'visible_domain_required': True,
+                }
+            elif alias_kind == 'fixed_domain_jamimo':
                 item['measurement'] = {
                     'method': 'fixed_domain_jamimo_phonetic_spelling',
                     'raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
@@ -495,6 +600,8 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
                     'excluded_cue_used_as_french': False,
                     'french_min_probability_milli': round(min(word[3] for word in observed[index]) * 1000),
                 }
+                if complete_socials[2]:
+                    item['measurement']['onset_boundary'] = complete_socials[2]
             elif alias_kind == 'fixed_socials_boundary':
                 crossing_tokens = normalized_words('', crossing[0])
                 item['measurement'] = {

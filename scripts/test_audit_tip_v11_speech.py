@@ -92,7 +92,6 @@ class V11FinalSpeechTest(unittest.TestCase):
 
         rejected = [
             words[:4] + [(' zéro', 3.3, 3.7, .95)] + words[5:],
-            words[:6] + [(' Jam Imo point com', 5.1, 6.0, .9)] + words[7:],
             words[:7] + [(' 221', 7.2, 7.5, .92)] + words[8:],
             words[:11] + [(' 48.', 9.3, 10.8, .96)] + words[12:],
         ]

@@ -53,3 +53,11 @@ Avec `reviewedNarration.source=private-attempt`, le moteur demande le WAV à Est
 Sans champ `source`, le contrat continue à lire `approved-narrations/v11/sha256/<sha256>.wav` dans le checkout épinglé. Ce chemin est réservé à un enregistrement dont la diffusion dans le dépôt public est autorisée.
 
 Le moteur vérifie les octets avant tout traitement. Une source absente ou différente arrête cette demande. Le manifeste conserve `voice.source=reviewed-bundle`, la provenance `voice.model=reviewed-source-pcm-v1` et l’égalité entre `reviewed_narration_sha256` et `raw_wav_sha256`. Les mesures du MP4 et la décision de publication restent des étapes distinctes.
+
+### Notation de l’URL fixe et début de la phrase sociale
+
+Le comparateur reconnaît explicitement la notation du seul domaine officiel : `jammimmo.com` ou les mots `Jamm Immo point com`, avec une ou deux consonnes dans les deux groupes du nom. Il ne cherche pas de nom approchant. Un autre nom, TLD, sous-domaine ou suffixe d’URL est refusé même si une seule modification ordinaire aurait respecté le score. Le point observé dans `.com` est une notation, pas un mot ajouté au son. Le cas historique exact sans «point» conserve son omission comptée.
+
+Chaque mot normalisé conserve la confiance de sa ligne ASR d’origine : un `jamimo` incertain produit deux tokens incertains `null`, pas deux mots certains. Le seuil0,6, les85% par scène,92% globaux et les gardes numériques/négations restent identiques. Le reçu de notation conserve l’empreinte des mots bruts et le nombre de tokens incertains avant/après. Cette normalisation peut donc maintenir un refus ; elle ne certifie pas l’accent ni l’URL à l’écran.
+
+Un premier mot social peut commencer au plus750ms avant la limite visuelle de sa scène seulement si la scène française précédente est observée entièrement, dans l’ordre, avec des mots tous confiants et sans chevauchement réel. Le dernier mot précédent doit finir avant le premier mot social ; aucun mot numérique ou négatif ne peut être coupé ou emprunté. Les13mots sociaux restent entièrement observés, une seule fois, avant le cue de clôture exclu et selon les bornes existantes. Des observations partielles du numéro précédent ne suffisent pas. Ce contrôle réutilise les mots du même décodage, sans appel ASR supplémentaire ni changement des horodatages bruts.
