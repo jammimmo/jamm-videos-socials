@@ -1,62 +1,61 @@
-name: Check tip renderer
+name: Full synthetic V11 parity hosted
 
 on:
-  pull_request:
-    branches:
-      - main
-      - 'feature/tip-v11-*'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-jobs:
-  check:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: 22.20.0
-          cache: npm
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: '3.11.14'
-      - name: Install FFmpeg for narration runtime tests
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ffmpeg
-      - name: Run renderer source checks
-        env:
-          TIP_PARITY_EXPECTED_SHA: ${{ github.sha }}
-        run: bash scripts/check-tip-runner-parity.sh --checks-only
+concurrency:
+  group: full-v11-parity-hosted
+  cancel-in-progress: false
 
-  offline-render-smoke:
-    name: Offline Remotion smoke
-    if: github.base_ref == 'main'
-    permissions:
-      contents: read
+jobs:
+  fixture:
+    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/qa/v11-full-parity-hosted-20261117'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          repository: jammimmo/jamm-videos-socials
+          ref: d60f33ff22a2fdc433ab58d4fb02932eb312da0c
+          path: parity-renderer
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: 22.20.0
-          cache: npm
+          node-version: '22.20.0'
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.11.14'
-      - name: Install local network isolation tools
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends iproute2
-      - name: Render and audit the non-publishable fixture without outbound network
+      - name: Verify exact preconditions before the locked user runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends --allow-downgrades ffmpeg=7:6.1.1-3ubuntu5 iproute2
+          test "$(dpkg-query -W -f='${Version}' ffmpeg)" = '7:6.1.1-3ubuntu5'
+          for tool in ffmpeg ffprobe ip unshare; do command -v "$tool" >/dev/null; done
+          test "$(node --version)" = v22.20.0
+          test "$(npm --version)" = 10.9.3
+          python -I -c 'import sys; assert sys.version_info[:3] == (3,11,14)'
+          test "$(ffmpeg -version | sed -n '1p')" = 'ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers'
+          test "$(sha256sum "$(command -v ffmpeg)" | cut -d ' ' -f 1)" = ed16af623947494a72e284b6eb8ff225f2da22b38b5d5069c2fd4b4ba3384e41
+          test "$(sha256sum "$(command -v ffprobe)" | cut -d ' ' -f 1)" = 272f6ebc634a63d9c8b4ca68e964119d980f25154e5aa2c35e5487da48e9a58f
+      - name: Execute one full nonpublishable V11 fixture with the unchanged isolation wrapper
+        working-directory: parity-renderer
+        shell: bash
         env:
-          TIP_PARITY_EXPECTED_SHA: ${{ github.sha }}
-        run: bash scripts/check-tip-runner-parity.sh "$RUNNER_TEMP/tip-runner-parity.json"
+          TIP_PARITY_EXPECTED_SHA: d60f33ff22a2fdc433ab58d4fb02932eb312da0c
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/full-v11-parity"
+          bash scripts/check-tip-runner-parity.sh "$RUNNER_TEMP/full-v11-parity/receipt.json" 2>&1 | tee "$RUNNER_TEMP/full-v11-parity/fixture.log"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: tip-runner-parity-hosted
-          path: ${{ runner.temp }}/tip-runner-parity.json
+          name: full-v11-parity-hosted
+          path: |
+            ${{ runner.temp }}/full-v11-parity/receipt.json
+            ${{ runner.temp }}/full-v11-parity/fixture.log
           if-no-files-found: error
           retention-days: 7
