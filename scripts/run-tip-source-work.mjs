@@ -10,6 +10,7 @@ import { normalizeTipV11Narration } from './render-tip-v11.mjs';
 import { qualifyTipSource, validSourceJob, validateTipSourceJob } from './qualify-tip-source.mjs';
 import { updateTipSourceAttempt } from './tip-source-attempt.mjs';
 import { TIP_DELIVERY_ORIGIN } from './tip-v11-reviewed-narration.mjs';
+import { assertTipSourceRuntime } from './tip-runtime.mjs';
 
 const execute = promisify(execFile);
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -58,6 +59,12 @@ export async function runTipSourceWork(event, env, dependencies = {}) {
     if (!env.GEMINI_API_KEY || !env.RUNNER_TEMP) throw new Error();
   } catch {
     return { status: 'rejected', stage: 'dispatch' };
+  }
+  try {
+    await (dependencies.verifyRuntime ?? assertTipSourceRuntime)(work.source.profile.runtimeSha256, env);
+  } catch {
+    // A missing tool/cache never spends a durable start or a paid voice take.
+    return { status: 'temporarily_unavailable', stage: 'runtime' };
   }
   const update = dependencies.updateAttempt ?? updateTipSourceAttempt;
   const started = await update(work.sourceJob, 'start', null, env);

@@ -36,6 +36,10 @@ test('one acknowledged source start calls the exact Ngor voice once and qualifie
   const calls = [];
   try {
     const result = await runTipSourceWork(event, { ...env, RUNNER_TEMP: scratchRoot }, {
+      verifyRuntime: async (expected, actualEnv) => {
+        assert.equal(expected, source.profile.runtimeSha256); assert.equal(actualEnv.RUNNER_TEMP, scratchRoot);
+        calls.push('runtime');
+      },
       updateAttempt: async (identity, action, reason) => {
         assert.deepEqual(identity, sourceJob); assert.equal(reason, null); calls.push(action);
         return { status: 'confirmed' };
@@ -57,7 +61,7 @@ test('one acknowledged source start calls the exact Ngor voice once and qualifie
       },
     });
     assert.equal(result.status, 'confirmed');
-    assert.deepEqual(calls, ['start', 'voice', 'normalize', 'score', 'qualify']);
+    assert.deepEqual(calls, ['runtime', 'start', 'voice', 'normalize', 'score', 'qualify']);
     assert.deepEqual(await readdir(scratchRoot), []);
   } finally { await rm(scratchRoot, { recursive: true, force: true }); }
 });
@@ -65,6 +69,7 @@ test('one acknowledged source start calls the exact Ngor voice once and qualifie
 test('repeated workflow cannot call TTS without its own confirmed durable start', async () => {
   const { event, env } = fixture();
   const result = await runTipSourceWork(event, { ...env, RUNNER_TEMP: tmpdir() }, {
+    verifyRuntime: async () => {},
     updateAttempt: async () => ({ status: 'rejected' }),
     generateSpeech: () => assert.fail('Duplicate start must not call TTS'),
   });
@@ -77,6 +82,7 @@ test('a held speech score records its reason and does not upload or regenerate v
   const calls = [];
   try {
     const result = await runTipSourceWork(event, { ...env, RUNNER_TEMP: scratchRoot }, {
+      verifyRuntime: async () => {},
       updateAttempt: async (_job, action, reason) => { calls.push([action, reason]); return { status: 'confirmed' }; },
       generateSpeech: async () => { calls.push('voice'); return wav.subarray(44); },
       normalize: async (_root, _raw, normalized) => writeFile(normalized, wav),
@@ -87,4 +93,14 @@ test('a held speech score records its reason and does not upload or regenerate v
     assert.deepEqual(calls, [['start', null], 'voice', ['failed', 'source_evidence_inconclusive']]);
     assert.deepEqual(await readdir(scratchRoot), []);
   } finally { await rm(scratchRoot, { recursive: true, force: true }); }
+});
+
+test('an unmeasured or changed runtime cannot claim a provider start or call TTS', async () => {
+  const { event, env } = fixture();
+  const result = await runTipSourceWork(event, { ...env, RUNNER_TEMP: tmpdir() }, {
+    verifyRuntime: async () => { throw new Error('wrong package or encoder'); },
+    updateAttempt: () => assert.fail('Runtime drift must precede the durable start'),
+    generateSpeech: () => assert.fail('Runtime drift must not spend a take'),
+  });
+  assert.deepEqual(result, { status: 'temporarily_unavailable', stage: 'runtime' });
 });
