@@ -1,4 +1,4 @@
-name: Bounded synthetic codec parity hosted
+name: Bounded synthetic CPU codec parity hosted
 
 on:
   workflow_dispatch:
@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: jammimmo/jamm-videos-socials
-          ref: 49c9e51bd92cff4f28b7eca35411d287628ec9af
+          ref: b33308174b39c138b6504030c3707a28699640f8
           path: codec-renderer
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -37,11 +37,11 @@ jobs:
           test "$(sha256sum "$ffmpeg_path" | cut -d ' ' -f 1)" = ed16af623947494a72e284b6eb8ff225f2da22b38b5d5069c2fd4b4ba3384e41
           test "$(node --version)" = v22.20.0
           test "$(npm --version)" = 10.9.3
-      - name: Isolate and measure twelve synthetic frames
+      - name: Measure pre-encoder pixels and four CPU codec modes
         working-directory: codec-renderer
         shell: bash
         env:
-          TIP_PARITY_EXPECTED_SHA: 49c9e51bd92cff4f28b7eca35411d287628ec9af
+          TIP_PARITY_EXPECTED_SHA: b33308174b39c138b6504030c3707a28699640f8
         run: |
           set -euo pipefail
           mkdir "$RUNNER_TEMP/codec-parity-receipts"
