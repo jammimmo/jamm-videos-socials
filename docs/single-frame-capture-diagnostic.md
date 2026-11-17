@@ -34,7 +34,14 @@ onFrameBuffer bytes for frame60. No x264 is spawned.
 Immediately call the same original task on that same page for PNG, with
 omitBackground=false. This deliberately avoids takeFrame's PNG-specific
 transparent background mutation. Read DOM/font/background snapshots before and
-after and require equality; require all observed document fonts loaded. Restore
+after and require equality. Record every FontFace family/style/weight/status,
+require the bundled Poppins600/700/800 faces loaded and reject any error/unloaded
+face. For every visible direct text run record actual text and computed font and
+check FontFaceSet.check for that text. Because check can still accept fallback,
+also use DOM/CSS CDP to record actual per-node platform font families, custom-font
+identity and glyph counts. Text requesting Poppins must obtain all measured
+glyphs from custom Poppins. Preserve these full before/after snapshots; DOM hashes
+alone do not replace the font evidence. Restore
 the in-process task and CDP wrappers in finally. No node_modules file is edited.
 
 Decode the saved PNG as raw RGBA using actual bundled FFmpeg, verify exact length
