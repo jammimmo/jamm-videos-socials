@@ -39,6 +39,32 @@ export function readTipSourceDispatch(event, env) {
   return { source, sourceJob: structuredClone(payload.sourceJob), identity, plan };
 }
 
+class ScoreError extends Error {
+  constructor(reason, exitCode) {
+    super(reason);
+    this.exitCode = exitCode;
+  }
+}
+
+export async function readScoreReport(report, exitCode) {
+  let bytes;
+  try {
+    bytes = await readFile(report, 'utf8');
+  } catch {
+    throw new ScoreError('score_report_unavailable', exitCode);
+  }
+  let speech;
+  try {
+    speech = JSON.parse(bytes);
+  } catch {
+    throw new ScoreError('score_report_invalid', exitCode);
+  }
+  if (speech?.contract !== 'tip-v11-fr-source-speech-v2' || speech.status !== (exitCode === 0 ? 'matched' : 'inconclusive')) {
+    throw new ScoreError('score_protocol_invalid', exitCode);
+  }
+  return speech;
+}
+
 export async function score(draft, wav, report, env) {
   let exitCode = 0;
   try {
@@ -47,19 +73,19 @@ export async function score(draft, wav, report, env) {
     });
   } catch (error) {
     // Exit 1 writes an inconclusive report, including recognizer failures. Exit 2 has no usable report.
-    if (error.code !== 1) throw error;
+    if (error.code !== 1) {
+      const code = Number.isInteger(error.code) && error.code >= 0 && error.code <= 255 ? error.code : undefined;
+      throw new ScoreError('score_process_failed', code);
+    }
     exitCode = 1;
   }
-  const speech = JSON.parse(await readFile(report, 'utf8'));
-  if (speech?.contract !== 'tip-v11-fr-source-speech-v2' || speech.status !== (exitCode === 0 ? 'matched' : 'inconclusive')) {
-    throw new Error('Invalid source measurement protocol');
-  }
-  return speech;
+  return readScoreReport(report, exitCode);
 }
 
 const measuredReasons = new Set([
   'no_audible_source', 'ordered_words_unconfirmed', 'recognition_or_timing_inconclusive',
-  'signature_evidence_insufficient', 'phone_evidence_unconfirmed', 'website_evidence_unconfirmed',
+  'signature_boundary_unconfirmed', 'signature_tail_too_quiet', 'signature_closing_unrecognized',
+  'signature_retry_insufficient', 'signature_evidence_insufficient', 'phone_evidence_unconfirmed', 'website_evidence_unconfirmed',
   'script_evidence_unconfirmed', 'alignment_evidence_invalid',
 ]);
 
@@ -79,7 +105,7 @@ function measuredDiagnostic(speech) {
 async function measureSource(measure, draft, wav, scratch, env) {
   for (let attempt = 1; attempt <= 2; attempt++) {
     let transient = false;
-    let reason = 'measurement_error';
+    let reason = 'score_protocol_invalid';
     try {
       const speech = await measure(draft, wav, resolve(scratch, 'speech-' + attempt + '.json'), env);
       if (speech?.status === 'matched') return { speech };
@@ -96,8 +122,11 @@ async function measureSource(measure, draft, wav, scratch, env) {
         if (runtimeReasons.includes(speech.reason)) reason = speech.reason;
         transient = reason === 'recognizer_timeout';
       }
-    } catch {
-      // An unclassified tool or protocol error can also be a permanent input failure.
+    } catch (error) {
+      reason = error instanceof ScoreError ? error.message : 'measurement_error';
+      const diagnostic = { stage: 'measurement_unavailable', reason, measurementAttempts: attempt };
+      if (error instanceof ScoreError && error.exitCode !== undefined) diagnostic.exitCode = error.exitCode;
+      return { diagnostic };
     }
     if (!transient || attempt === 2) {
       return { diagnostic: { stage: 'measurement_unavailable', reason, measurementAttempts: attempt } };

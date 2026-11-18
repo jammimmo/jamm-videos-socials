@@ -106,7 +106,7 @@ test('an unmeasured or changed runtime cannot claim a provider start or call TTS
 });
 
 test('scorer CLI maps a Python report to exit 0 or 1, and rejects an unusable measurement', async () => {
-  const { score } = await import('./run-tip-source-work.mjs');
+  const { score, readScoreReport } = await import('./run-tip-source-work.mjs');
   const { source, speech, wav } = fixture();
   const scratch = await mkdtemp(join(tmpdir(), 'jamm-score-protocol-'));
   try {
@@ -122,7 +122,13 @@ test('scorer CLI maps a Python report to exit 0 or 1, and rejects an unusable me
       assert.equal((await score(draft, audio, join(scratch, status + '.json'), env)).status, status);
     }
     await writeFile(env.REPORT_FIXTURE, 'invalid');
-    await assert.rejects(score(draft, audio, join(scratch, 'error.json'), env));
+    await assert.rejects(score(draft, audio, join(scratch, 'error.json'), env), { message: 'score_process_failed', exitCode: 2 });
+    await assert.rejects(readScoreReport(join(scratch, 'absent.json'), 1), { message: 'score_report_unavailable', exitCode: 1 });
+    await assert.rejects(readScoreReport(env.REPORT_FIXTURE, 0), { message: 'score_report_invalid', exitCode: 0 });
+    await writeFile(env.REPORT_FIXTURE, JSON.stringify({ status: 'matched', contract: 'PRIVATE' }));
+    await assert.rejects(score(draft, audio, join(scratch, 'protocol.json'), env), { message: 'score_protocol_invalid', exitCode: 0 });
+    await writeFile(env.REPORT_FIXTURE, JSON.stringify(speech));
+    await assert.rejects(readScoreReport(env.REPORT_FIXTURE, 1), { message: 'score_protocol_invalid', exitCode: 1 });
   } finally { await rm(scratch, { recursive: true, force: true }); }
 });
 
@@ -135,6 +141,8 @@ test('only a reported recognizer timeout retries once on the same normalized WAV
       [[timeout, speech], 'confirmed'],
       [[timeout, timeout], 'measurement_unavailable'],
       [[{ status: 'inconclusive', reason: 'ordered_words_unconfirmed', observed_words: ['PRIVATE'], recognizer_diagnostics: [{ outcome: 'timeout' }] }], 'measured_inconclusive'],
+      ...['signature_boundary_unconfirmed', 'signature_tail_too_quiet', 'signature_closing_unrecognized',
+        'signature_retry_insufficient'].map(reason => [[{ status: 'inconclusive', reason, matched_words: 2, expected_words: 10 }], 'measured_inconclusive']),
       [[{ status: 'inconclusive', reason: 'recognizer_unavailable' }], 'measurement_unavailable'],
       [[new Error('PRIVATE')], 'measurement_unavailable'],
       [[], 'normalization_failed'],
@@ -152,7 +160,13 @@ test('only a reported recognizer timeout retries once on the same normalized WAV
         qualify: async () => { calls.push('qualify'); return { status: 'confirmed' }; },
       });
       assert.equal(result.diagnostic?.stage ?? result.status, stage);
-      if (stage === 'measured_inconclusive') assert.equal(result.diagnostic.incompleteRecognizerCall, true);
+      if (stage === 'measured_inconclusive') {
+        assert.equal(result.diagnostic.reason, reports[0].reason);
+        assert.equal(result.diagnostic.incompleteRecognizerCall, !!reports[0].recognizer_diagnostics);
+        assert.equal(result.diagnostic.matched_words, reports[0].matched_words);
+        assert.equal(result.diagnostic.expected_words, reports[0].expected_words);
+        assert.equal(result.diagnostic.measurementAttempts, 1);
+      }
       assert.deepEqual(calls, ['start', 'voice', 'normalize', stage === 'confirmed' ? 'qualify' : 'failed']);
       assert.equal(paths.length, reports.length);
       assert.ok(new Set(paths).size <= 1);
@@ -160,5 +174,46 @@ test('only a reported recognizer timeout retries once on the same normalized WAV
       assert.doesNotMatch(JSON.stringify(result.diagnostic ?? {}), /PRIVATE/);
       assert.deepEqual(await readdir(scratch), []);
     }
+  } finally { await rm(scratch, { recursive: true, force: true }); }
+});
+
+
+test('real scoring CLI preserves a measured signature failure through the runner', async () => {
+  const { event, env } = fixture();
+  const scratch = await mkdtemp(join(tmpdir(), 'jamm-signature-boundary-'));
+  try {
+    const python = join(scratch, 'synthetic-recognizer');
+    // Exercise the real Python source scorer and JS report transport, replacing only recognition.
+    await writeFile(python, `#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
+from score_tip_source import score_source
+from test_align_tip_v11 import speech
+plan = json.loads(sys.stdin.buffer.readline())
+audio = sys.stdin.buffer.read()
+words = speech(plan['segments'])
+cut = next(i for i, word in enumerate(words) if word['word'] == 'conseils')
+rows = [(word['word'] if i < cut else 'murmure', word['start'], word['end'], .95) for i, word in enumerate(words)]
+with TemporaryDirectory() as directory:
+    print(json.dumps(score_source(plan, audio, Path(directory), lambda _: rows, lambda _: [])))
+`, { mode: 0o700 });
+    const pcm = Buffer.alloc(70 * 48_000);
+    for (let i = 0; i < pcm.length; i += 2) pcm.writeInt16LE(800, i);
+    const actions = [];
+    const result = await runTipSourceWork(event, { ...process.env, ...env, RUNNER_TEMP: scratch,
+      TIP_SOURCE_PYTHON: python, PYTHONDONTWRITEBYTECODE: '1' }, {
+      verifyRuntime: async () => {},
+      updateAttempt: async (_job, action) => { actions.push(action); return { status: 'confirmed' }; },
+      generateSpeech: async () => pcm,
+      normalize: async (_root, raw, normalized) => writeFile(normalized, await readFile(raw)),
+      qualify: async () => assert.fail('Negative speech must not qualify'),
+    });
+    assert.deepEqual(actions, ['start', 'failed']);
+    assert.equal(result.diagnostic.stage, 'measured_inconclusive');
+    assert.equal(result.diagnostic.reason, 'signature_boundary_unconfirmed');
+    assert.equal(result.diagnostic.measurementAttempts, 1);
+    assert.ok(Number.isInteger(result.diagnostic.expected_words));
   } finally { await rm(scratch, { recursive: true, force: true }); }
 });
