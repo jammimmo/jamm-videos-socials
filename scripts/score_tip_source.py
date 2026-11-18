@@ -11,7 +11,7 @@ from time import monotonic
 import wave
 
 from align_tip_v11 import (
-    ASR_REVISION, DEFERRED_DOMAIN_CHECKS, SIGNATURE_PREROLL_SECONDS, align_with_phone_retry,
+    AlignmentFailure, ASR_REVISION, DEFERRED_DOMAIN_CHECKS, SIGNATURE_PREROLL_SECONDS, align_with_phone_retry,
     alignment_failure_diagnostics, audible_windows,
 )
 from audit_tip_v11 import pcm
@@ -93,7 +93,15 @@ def extract_pcm(wav):
 def timed_words(rows, offset=0):
     if len(rows) > MAX_RECOGNIZED_WORDS:
         raise ValueError('Too many recognized words')
-    return [{'word': word, 'start': start + offset, 'end': end + offset} for word, start, end, _ in rows]
+    words = []
+    for index, row in enumerate(rows):
+        if (not isinstance(row, (list, tuple)) or len(row) != 4 or not isinstance(row[0], str)
+                or type(row[1]) not in (float, int) or type(row[2]) not in (float, int)):
+            raise AlignmentFailure('Invalid recognizer row', 'word_row_invalid', 'recognizer_output_invalid',
+                                   row_index=index, row_count=len(rows))
+        word, start, end, _ = row
+        words.append({'word': word, 'start': start + offset, 'end': end + offset})
+    return words
 
 
 def score_source(plan, wav, directory, recognize=None, recognize_window=None):
@@ -125,7 +133,8 @@ def _score_source(plan, wav, directory, recognize, recognize_window, *, startup=
         'recognizer_diagnostics': diagnostics,
     }
     if not sound:
-        return {**report, 'reason': 'no_audible_source'}
+        return {**report, 'reason': 'no_audible_source', 'alignment_code': 'no_audible_windows',
+                'duration_ms': round(duration * 1000)}
     source_path = directory / 'source.wav'
     source_path.write_bytes(wav)
 

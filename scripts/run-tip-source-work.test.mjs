@@ -3,9 +3,14 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { readTipSourceDispatch, runTipSourceWork } from './run-tip-source-work.mjs';
+import { readTipSourceDispatch, runTipSourceWork as run } from './run-tip-source-work.mjs';
 import { machineSourceFixture } from './fixtures/machine-source-work.mjs';
 import { TIP_DELIVERY_ORIGIN } from './tip-v11-reviewed-narration.mjs';
+
+// No fixture may request a live GitHub identity, including on a hosted runner.
+const runTipSourceWork = (event, env, dependencies) => run(event, env, {
+  uploadCapsule: async () => ({ status: 'confirmed' }), ...dependencies,
+});
 
 function fixture() {
   const { job: source, speech, wav } = machineSourceFixture();
@@ -215,5 +220,61 @@ with TemporaryDirectory() as directory:
     assert.equal(result.diagnostic.reason, 'signature_boundary_unconfirmed');
     assert.equal(result.diagnostic.measurementAttempts, 1);
     assert.ok(Number.isInteger(result.diagnostic.expected_words));
+  } finally { await rm(scratch, { recursive: true, force: true }); }
+});
+
+test('captures the exact complete WAV before failure and cleanup without repeating the paid start', async () => {
+  const { event, sourceJob, env, wav } = fixture();
+  const scratch = await mkdtemp(join(tmpdir(), 'jamm-capture-fixture-'));
+  const normalized = Buffer.from(wav);
+  normalized.writeInt16LE(912, 44);
+  const speech = { status: 'inconclusive', reason: 'alignment_evidence_invalid', alignment_code: 'timestamp_overrun',
+    duration_ms: 60660, span_ms: NaN, row_index: 34, row_count: 126, observed_words_count: 1e9, secret: sourceJob.claimToken,
+    recognized_words: ['PRIVATE'], transcript: 'SECRET', segments: [{ status: 'matched', text: 'SECRET' }] };
+  try {
+    for (const [kind, diagnosticStage, mode] of [
+      ['normalized', 'measured_inconclusive', 'held'], ['normalized', 'measured_inconclusive', 'lost'],
+      ['normalized', 'measurement_unavailable', 'bad-rows'], ['raw', 'normalization_failed', 'no-normalized'],
+      ['raw', 'normalization_failed', 'partial-normalized'], ['normalized', 'normalization_failed', 'duration'],
+      ['normalized', 'source_delivery_unconfirmed', 'delivery'], [null, undefined, 'voice'],
+    ]) {
+      const steps = [];
+      let captured;
+      const result = await runTipSourceWork(event, { ...env, RUNNER_TEMP: scratch }, {
+        verifyRuntime: async () => {},
+        updateAttempt: async (_job, action) => { steps.push(action); return { status: 'confirmed' }; },
+        generateSpeech: async () => { steps.push('tts'); if (mode === 'voice') throw Error('PRIVATE'); return wav.subarray(44); },
+        normalize: async (_root, _raw, path) => {
+          if (mode === 'no-normalized') throw Error('PRIVATE');
+          await writeFile(path, mode === 'partial-normalized' ? normalized.subarray(0, 18) : normalized);
+          if (mode === 'partial-normalized' || mode === 'duration') throw Error('PRIVATE');
+        },
+        score: async () => mode === 'delivery' ? { status: 'matched' } : mode === 'bad-rows'
+          ? { ...speech, reason: 'recognizer_output_invalid', alignment_code: 'word_row_invalid' } : speech,
+        qualify: async () => ({ status: 'temporarily_unavailable' }),
+        uploadCapsule: async (job, audio, kind, diagnostic) => {
+          steps.push('upload'); captured = { job, audio, kind, diagnostic };
+          if (mode === 'lost') throw Error('PRIVATE');
+          return { status: 'confirmed', wavSha256: 'a'.repeat(64) };
+        },
+      });
+      assert.deepEqual(steps, ['start', 'tts', ...(kind ? ['upload'] : []), 'failed']);
+      assert.equal(result.status, 'incomplete');
+      assert.equal(result.capsule.status, mode === 'voice' ? 'no_audio' : mode === 'lost' ? 'temporarily_unavailable' : 'confirmed');
+      assert.equal(result.diagnostic?.stage, diagnosticStage);
+      if (kind) {
+        assert.deepEqual(captured.job, sourceJob);
+        assert.deepEqual(captured.audio, kind === 'raw' ? wav : normalized);
+        assert.equal(captured.kind, kind);
+        assert.deepEqual(captured.diagnostic, result.diagnostic);
+        assert.doesNotMatch(JSON.stringify(captured.diagnostic), /PRIVATE|SECRET|transcript|recognized_words|claimToken|span_ms|observed_words_count/);
+        if (mode === 'held' || mode === 'lost' || mode === 'bad-rows') {
+          assert.equal(captured.diagnostic.alignment_code, mode === 'bad-rows' ? 'word_row_invalid' : 'timestamp_overrun');
+          assert.equal(captured.diagnostic.row_index, 34);
+          assert.equal(captured.diagnostic.duration_ms, 60660);
+        }
+      }
+      assert.deepEqual(await readdir(scratch), []);
+    }
   } finally { await rm(scratch, { recursive: true, force: true }); }
 });

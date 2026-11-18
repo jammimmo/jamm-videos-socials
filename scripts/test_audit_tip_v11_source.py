@@ -12,7 +12,7 @@ import wave
 from audit_tip_v11_speech import ASR_REVISION, SAMPLE_RATE, compare_french_segments, french_speech_outcome, sha256
 from score_tip_source import score_source
 from tip_source_asr_session import SourceAsrSession, serve
-from test_align_tip_v11 import SEGMENTS, phone_gap, speech
+from test_align_tip_v11 import SEGMENTS, phone_gap, speech, tokens
 
 
 def make_wav(data):
@@ -60,6 +60,42 @@ class SourceScoringTest(unittest.TestCase):
         self.assertEqual(diagnostic['window_duration_ms'], 70_000)
         self.assertEqual(diagnostic['outcome'], 'completed')
         self.assertGreater(diagnostic['recognized_row_count'], 0)
+
+    def test_pre_alignment_diagnostics_at_65183_ms(self):
+        duration = 65.183
+        samples = struct.pack('<h', 800) * round(duration * SAMPLE_RATE)
+        rows = [(row['word'], round(row['start'] * duration / 70, 2), round(row['end'] * duration / 70, 2), .95)
+                for row in speech(SEGMENTS)]
+        self.assertEqual(self.run_source(rows, make_wav(samples))['status'], 'matched')
+        greeting_count = len(tokens(SEGMENTS[0]['text']))
+        fixtures = [
+            ([], samples, 'no_word_timestamps', {'row_count': 0}),
+            ([('SECRET',)], samples, 'word_row_invalid', {'row_count': 1, 'row_index': 0}),
+            ([('SECRET', 0, float('nan'), .95)], samples, 'timestamp_nonfinite', {'row_index': 0}),
+            ([rows[0], ('SECRET', 0, 1, .95)], samples, 'timestamp_regression', {'row_index': 1}),
+            ([('SECRET', .5, .3, .95)], samples, 'timestamp_reversed', {'span_ms': 200}),
+            ([*rows[:-1], ('SECRET', rows[-1][1], duration + .12, .95)], samples,
+             'timestamp_overrun', {'row_index': len(rows) - 1, 'span_ms': 120}),
+            ([('?', 0, .25, .95)], samples, 'no_recognized_tokens', {'row_count': 1}),
+            (rows, bytes(3 * 2 * SAMPLE_RATE) + samples[3 * 2 * SAMPLE_RATE:], 'leading_silence', {'span_ms': 3000}),
+            (rows, samples[:60 * 2 * SAMPLE_RATE] + bytes(len(samples) - 60 * 2 * SAMPLE_RATE),
+             'trailing_silence', {'span_ms': 5183}),
+            (rows, samples[:20 * SAMPLE_RATE] + bytes(8 * SAMPLE_RATE) + samples[28 * SAMPLE_RATE:],
+             'interior_pause', {'span_ms': 4000}),
+            ([('SECRET' if i < greeting_count else word, start, end, p)
+              for i, (word, start, end, p) in enumerate(rows)], samples, 'segment_coverage_low',
+             {'segment_index': 0, 'matched_words': 0, 'expected_words': greeting_count}),
+        ]
+        for observed, audio, code, metrics in fixtures:
+            with self.subTest(code=code):
+                report = self.run_source(observed, make_wav(audio))
+                self.assertEqual(report['status'], 'inconclusive')
+                expected_reason = 'recognizer_output_invalid' if code == 'word_row_invalid' else 'alignment_evidence_invalid'
+                self.assertEqual(report['reason'], expected_reason)
+                self.assertEqual(report['alignment_code'], code)
+                self.assertEqual(report['segments'], [])
+                self.assertEqual({key: report[key] for key in metrics}, metrics)
+                self.assertNotIn('SECRET', json.dumps(report))
 
     def test_classifies_full_decode_timeout_without_exposing_exception_or_transcript(self):
         failure = subprocess.TimeoutExpired(['sensitive-command-path'], 150,
