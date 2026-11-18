@@ -129,7 +129,10 @@ def observed_words_with_uncertainty(identity, expected, raw_actual, actual, rows
     reported = [None if row[3] < MIN_WORD_PROBABILITY else word
                 for words, row in zip(token_rows, rows) for word in words]
     if actual != raw_actual:
-        if alias_kind == 'fixed_domain_jamimo':
+        if alias_kind == 'fixed_socials_fused_brand':
+            # The fused alias requires every original row to be confident.
+            return (actual, False) if not uncertain else (None, True)
+        elif alias_kind == 'fixed_domain_jamimo':
             if reported[5] not in ('jamimo', None):
                 return None, True
             reported[5:6] = ['jamm', 'immo']
@@ -254,6 +257,22 @@ def canonical_fixed_brand_words(identity, expected, actual, rows):
         or first[2] > second[1] or min(first[3], second[3]) < MIN_WORD_PROBABILITY):
         return actual
     return actual[:index] + ['jamm', 'immo'] + actual[index + 2:]
+
+
+def fixed_fused_brand_index(segment, expected, actual, rows):
+    """Recognize one literal Jamimo row within the complete timed socials line."""
+    index = FIXED_BRAND_WORD_INDEX['socials']
+    if (segment['id'] != 'socials' or tuple(expected) != FIXED_SOCIALS_WORDS
+        or actual != [*expected[:index], 'jamimo', *expected[index + 2:]]
+        or len(rows) != len(actual) or rows[index][0].lower() != 'jamimo'):
+        return None
+    previous_end = segment['start']
+    for token, (text, start, end, probability) in zip(actual, rows):
+        if (normalized_words('', text) != [token] or probability < MIN_WORD_PROBABILITY
+            or not previous_end <= start < end <= segment['end']):
+            return None
+        previous_end = end
+    return index
 
 
 def exact_row_token_index(identity, rows, expected_tokens):
@@ -597,9 +616,14 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
         elif index in ambiguous_boundary:
             actual = raw_actual
         else:
-            actual = canonical_fixed_brand_words(identity, expected, raw_actual, observed[index])
-            if actual != raw_actual:
-                alias_kind = 'fixed_jamm_immo'
+            fused_index = fixed_fused_brand_index(segment, expected, raw_actual, observed[index])
+            if fused_index is not None:
+                actual = [*raw_actual[:fused_index], 'jamm', 'immo', *raw_actual[fused_index + 1:]]
+                alias_kind = 'fixed_socials_fused_brand'
+            else:
+                actual = canonical_fixed_brand_words(identity, expected, raw_actual, observed[index])
+                if actual != raw_actual:
+                    alias_kind = 'fixed_jamm_immo'
         if domain_notation:
             uncertain_actual, unsafe_uncertainty = domain_notation['reported'], False
         else:

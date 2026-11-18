@@ -376,8 +376,32 @@ class V11AlignmentTest(unittest.TestCase):
         self.assertEqual([w['word'] for w in fixed[2:4]], ['jamm', 'immo'])
         self.assertEqual([(w['start'], w['end']) for w in fixed], [(w['start'], w['end']) for w in tail])
         focused = Mock(return_value=tail)
-        self.assertEqual(align_with_signature_retry(SEGMENTS, full, duration, sound, focused)['method'],
-                         'french-v11-word-anchors-signature-retry')
+        result = align_with_signature_retry(SEGMENTS, full, duration, sound, focused)
+        self.assertEqual(result['method'], 'french-v11-word-anchors-signature-retry')
+        def signature_start(alignment):
+            return alignment['segments'][-1]['start']
+        self.assertAlmostEqual(signature_start(result), 57.12)
+        self.assertAlmostEqual(result['segments'][-2]['end'], 57.12)
+        social_caption = next(c for c in result['captions'] if c['text'].endswith('prochains conseils.'))
+        self.assertAlmostEqual(social_caption['end'], 57.12)
+        self.assertAlmostEqual(signature_start(align(SEGMENTS, body + fixed, duration, sound)), 56.94)
+        # A wrong/missing terminal anchor, an intervening token, a different scene, a fully consumed
+        # opening, or overlap beyond the measured crop cannot extend the preceding scene.
+        wrong_scene = [*SEGMENTS[:-2], {**SEGMENTS[-2], 'id': 'other'}, SEGMENTS[-1]]
+        ambiguous_body = [{**body[0], 'word': 'prochains'}, {**body[1], 'word': 'conseils'}, *body[2:]]
+        for label, segments, prior, focused_rows in [
+            ('unanchored', SEGMENTS, [*body[:-2], {**body[-2], 'word': 'ailleurs'}, body[-1]], fixed),
+            ('intervening', SEGMENTS, [*body, {**body[-1], 'word': 'autre', 'start': 57.01}], fixed),
+            ('wrong scene', wrong_scene, body, fixed),
+            ('opening too early', SEGMENTS, body, [{**fixed[0], 'start': 57.00}, *fixed[1:]]),
+            ('opening swallowed', SEGMENTS, body, [{**fixed[0], 'end': 57.12}, *fixed[1:]]),
+            ('duplicate prior anchor', SEGMENTS, ambiguous_body, fixed),
+        ]:
+            with self.subTest(clamp=label):
+                ordinary = align(segments, prior + focused_rows, duration, sound)
+                guarded = align(segments, prior + focused_rows, duration, sound, signature_boundary=57.12)
+                self.assertAlmostEqual(signature_start(guarded), signature_start(ordinary))
+                self.assertLess(signature_start(guarded), 57.12)
         focused.assert_called_once()
         self.assertEqual([w['word'] for w in tail[2:4]], [' Jam', ' Imo,'])
 

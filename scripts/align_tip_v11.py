@@ -197,7 +197,7 @@ def bounded_domain_boundary(segments, index, groups, offset, mapping, actual, st
             and 0 <= stamps[following[0]][0] - stamps[last][1] <= 1.25)
 
 
-def align(segments, words, duration, audible=None, *, defer_domain=False):
+def align(segments, words, duration, audible=None, *, defer_domain=False, signature_boundary=None):
     if not math.isfinite(duration) or not 58.5 <= duration <= 119:
         raise AlignmentFailure('V11 narration must fit the 60–120 second master', 'duration_invalid', duration_ms=milliseconds(duration))
     if not words:
@@ -308,13 +308,24 @@ def align(segments, words, duration, audible=None, *, defer_domain=False):
     duration_in_frames = max(1801, math.ceil((duration + .6) * 30))
     end_of_video = duration_in_frames / 30
     scene_starts = [0]
-    for (_, _, _, left_last, exact_end), (_, right_start, right_first, _, _) in zip(anchors, anchors[1:]):
+    for scene, (left_anchor, right_anchor) in enumerate(zip(anchors, anchors[1:])):
+        _, _, _, left_last, exact_end = left_anchor
+        _, right_start, right_first, _, _ = right_anchor
         start = max(0, right_start - SCENE_PREROLL_SECONDS)
         if left_last is not None:
             left_end = stamps[left_last][1]
             # Preroll belongs in the gap before the next line.
             if right_first == left_last + 1 and left_end <= right_start:
                 start = max(start, left_end)
+            elif (left_end == signature_boundary and exact_end and right_first == left_last + 1
+                  and segments[scene]['id'] == 'socials' and segments[scene + 1]['id'] == 'signature'
+                  and groups[scene][-2:] == ['prochains', 'conseils'] and groups[scene + 1][:2] == ['a', 'bientot']
+                  and 0 < left_end - right_start <= SIGNATURE_PREROLL_SECONDS + .001
+                  and stamps[right_first][1] > left_end + .05
+                  and sum(pair == ('prochains', 'conseils') for pair in zip(actual, actual[1:])) == 1):
+                # The focused opening word can start at the crop's preroll.
+                # Keep the independently anchored final word of the prior scene whole.
+                start = left_end
             elif exact_end and audible is not None:
                 pause_cut = quiet_scene_cut(sound, left_end, right_start)
                 if pause_cut is not None:
@@ -417,7 +428,8 @@ def align_with_signature_retry(segments, words, duration, sound, recognize_tail,
             if normalized_tail is None:
                 raise
             try:
-                alignment = align(segments, original + normalized_tail, duration, sound, defer_domain=defer_domain)
+                alignment = align(segments, original + normalized_tail, duration, sound, defer_domain=defer_domain,
+                                  signature_boundary=boundary)
             except SignatureEvidenceError as normalized_error:
                 normalized_error.reason = 'signature_retry_insufficient'
                 raise

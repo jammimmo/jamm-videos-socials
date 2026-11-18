@@ -415,6 +415,52 @@ class V11FinalSpeechTest(unittest.TestCase):
         self.assertEqual(mixed_language['reason'], 'mixed_language_boundary')
         self.assertNotIn('measurement', mixed_language)
 
+    def test_fused_brand_requires_the_entire_confident_timed_socials_line(self):
+        socials = {'id': 'socials', 'start': 1, 'end': 5,
+                   'text': 'Suivez aussi Jamm Immo sur nos réseaux sociaux pour retrouver nos prochains conseils.'}
+        signature = {'id': 'signature', 'start': 5, 'end': 8, 'text': 'À bientôt !'}
+        raw = 'suivez aussi Jamimo sur nos réseaux sociaux pour retrouver nos prochains conseils'.split()
+        rows = [(word, 1.08 + i * .3, 1.34 + i * .3, .99) for i, word in enumerate(raw)]
+        [row] = compare_french_segments([socials, signature], rows, 0)
+        expected = 'suivez aussi jamm immo sur nos reseaux sociaux pour retrouver nos prochains conseils'.split()
+        self.assertEqual((row['status'], row['observed_words'], row['observed_token_count']),
+                         ('matched', expected, 13))
+        self.assertEqual(row['expected_sha256'], row['observed_sha256'])
+        self.assertEqual(row['measurement'], {
+            'method': 'fixed_jamm_immo_phonetic_spelling',
+            'raw_observed_sha256': sha256(b'suivez aussi jamimo sur nos reseaux sociaux pour retrouver nos prochains conseils'),
+        })
+
+        def change(index, word=None, start=None, end=None, probability=None):
+            overrides = (word, start, end, probability)
+            updated = tuple(old if new is None else new for old, new in zip(rows[index], overrides))
+            return [*rows[:index], updated, *rows[index + 1:]]
+
+        cases = {
+            'wrong company': change(2, word='Jamimu'),
+            'nonliteral row': change(2, word='@Jamimo'),
+            'missing opening word': rows[1:],
+            'different context': change(7, word='voir'),
+            'additional word': [*rows, ('vite', 4.7, 4.8, .99)],
+            'low brand confidence': change(2, probability=.599),
+            'low context confidence': change(8, probability=.599),
+            'overlapping context rows': change(4, start=rows[3][2] - .01),
+            'crosses the opening cut': change(0, start=.99),
+            'two words in one row': [('suivez aussi', rows[0][1], rows[1][2], .99), *rows[2:]],
+            'ambiguous excluded boundary': [*rows, ('Kër', 4.98, 5.2, .96)],
+        }
+        for label, observed in cases.items():
+            with self.subTest(label=label):
+                [held] = compare_french_segments([socials, signature], observed, 0)
+                self.assertEqual(held['status'], 'inconclusive')
+                self.assertNotIn('measurement', held)
+        for scene, observations in [({**socials, 'id': 'services'}, rows),
+                                    ({**socials, 'text': socials['text'].replace('aussi ', '')}, [rows[0], *rows[2:]])]:
+            with self.subTest(scene=scene):
+                [held] = compare_french_segments([scene, signature], observations, 0)
+                self.assertEqual(held['status'], 'inconclusive')
+                self.assertNotIn('measurement', held)
+
     def test_services_can_recheck_the_exact_preserved_pcm_when_only_brand_spelling_differs(self):
         services = {'id': 'services', 'text': 'Jamm Immo vous accompagne.', 'start': 0, 'end': 2}
         global_words = [(' Jam', .04, .38, .58), (' Imo', .38, .64, .83),
