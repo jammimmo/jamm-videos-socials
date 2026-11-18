@@ -353,6 +353,37 @@ def align(segments, words, duration, audible=None, *, defer_domain=False):
             'listenFor': ['greeting and signature in Wolof', 'voice and accent']}
 
 
+def canonical_signature_brand(tail, sound, duration):
+    """Canonicalize two timed rows only within the fixed French closing phrase."""
+    words = [tokens(row['word']) for row in tail]
+    pairs = [i for i in range(len(tail) - 1)
+             if words[i] in (['jam'], ['jamm']) and words[i + 1] in (['imo'], ['immo'])]
+    if len(pairs) != 1:
+        return None
+    i = pairs[0]
+    first, second = tail[i:i + 2]
+    if ([token for group in words[:i] for token in group] != ['a', 'bientot']
+        or words[i:i + 2] == [['jamm'], ['immo']]
+        or tokens(first['word'] + ' ' + second['word']) != ['jamm', 'immo']
+        or not 0 <= second['start'] - first['end'] <= .101):
+        return None
+
+    # Keep distinct time ownership, including the farewell before the brand.
+    # The focused decoder may start up to one preroll before the scene boundary.
+    previous_end = 0
+    for row in tail:
+        if not previous_end <= row['start'] < row['end'] <= duration + .1:
+            return None
+        previous_end = row['end']
+    # An isolated French ending or words hypothesized over silence do not
+    # establish continuation. This does not certify the Wolof words.
+    continuation = [row for row, group in zip(tail[i + 2:], words[i + 2:]) if group]
+    if (len(continuation) < 2 or voiced_overlap(sound, second['end'], continuation[-1]['end']) < .9
+        or any(voiced_overlap(sound, row['start'], row['end']) <= 0 for row in continuation)):
+        return None
+    return [*tail[:i], {**first, 'word': 'jamm'}, {**second, 'word': 'immo'}, *tail[i + 2:]]
+
+
 def align_with_signature_retry(segments, words, duration, sound, recognize_tail, *, defer_domain=False):
     try:
         return align(segments, words, duration, sound, defer_domain=defer_domain)
@@ -379,7 +410,17 @@ def align_with_signature_retry(segments, words, duration, sound, recognize_tail,
             alignment = align(segments, original + tail, duration, sound, defer_domain=defer_domain)
         except SignatureEvidenceError as retry_error:
             retry_error.reason = 'signature_retry_insufficient'
-            raise
+            # The closing gate tokenizes the joined words; align tokenizes each
+            # timed row separately. Recheck this one known split spelling on
+            # the same focused decode, without borrowing full-pass words.
+            normalized_tail = canonical_signature_brand(tail, sound, duration)
+            if normalized_tail is None:
+                raise
+            try:
+                alignment = align(segments, original + normalized_tail, duration, sound, defer_domain=defer_domain)
+            except SignatureEvidenceError as normalized_error:
+                normalized_error.reason = 'signature_retry_insufficient'
+                raise
         alignment['method'] = SIGNATURE_RETRY_ALIGNMENT_METHOD
         return alignment
 

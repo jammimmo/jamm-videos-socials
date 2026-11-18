@@ -10,7 +10,7 @@ from unittest.mock import Mock
 from align_tip_v11 import (
     DOMAIN_BOUNDARY_METHOD, PHONE_WINDOW_EVIDENCE, PhoneEvidenceError, SignatureEvidenceError, align, align_with_phone_retry,
     align_with_signature_retry, recognize_words, report_alignment_failure, tokens,
-    alignment_failure_diagnostics, bounded_domain_boundary,
+    alignment_failure_diagnostics, bounded_domain_boundary, canonical_signature_brand,
 )
 
 
@@ -356,6 +356,52 @@ class V11AlignmentTest(unittest.TestCase):
             align_with_signature_retry(SEGMENTS, body + unclear, 70, sound, recognize_tail)
         self.assertEqual(rejected.exception.reason, 'signature_closing_unrecognized')
         recognize_tail.assert_called_once()
+
+    def test_split_signature_brand_uses_one_focused_decode_and_preserves_each_timestamp(self):
+        # Observed closing timestamps; neutral words stand in for unconfirmed
+        # ASR output beyond the brand. No private transcription is necessary.
+        specs = [(' À', 57.02, 57.70), (' bientôt !', 57.70, 58.08),
+                 (' Jam', 58.50, 58.86), (' Imo,', 58.86, 59.16),
+                 (' suite', 59.64, 60.18), (' du', 60.44, 60.60), (' son', 60.60, 60.98)]
+        tail = [{'word': word, 'start': start, 'end': end} for word, start, end in specs]
+        body = speech(SEGMENTS)[:-len(tokens(SEGMENTS[-1]['text']))]
+        scale = 57.12 / body[-1]['end']
+        body = [{**w, 'start': w['start'] * scale, 'end': w['end'] * scale} for w in body]
+        full = [*body, {**tail[0], 'start': 57.12}, tail[1]]
+        duration = 61.337
+        sound = [(0, 59.20), (59.60, 60.20), (60.40, 61.00)]
+        with self.assertRaises(SignatureEvidenceError):
+            align(SEGMENTS, body + tail, duration, sound)
+        fixed = canonical_signature_brand(tail, sound, duration)
+        self.assertEqual([w['word'] for w in fixed[2:4]], ['jamm', 'immo'])
+        self.assertEqual([(w['start'], w['end']) for w in fixed], [(w['start'], w['end']) for w in tail])
+        focused = Mock(return_value=tail)
+        self.assertEqual(align_with_signature_retry(SEGMENTS, full, duration, sound, focused)['method'],
+                         'french-v11-word-anchors-signature-retry')
+        focused.assert_called_once()
+        self.assertEqual([w['word'] for w in tail[2:4]], [' Jam', ' Imo,'])
+
+        def change(index, **fields):
+            return [*tail[:index], {**tail[index], **fields}, *tail[index + 1:]]
+        negatives = {
+            'amputated': (tail[:4], sound),
+            'one continuation row': (tail[:5], sound),
+            'isolated brand': (tail[2:], sound),
+            'brand before farewell': ([*tail[2:4], *tail[:2], *tail[4:]], sound),
+            'reversed brand': (change(2, word=' Imo')[:3] + change(3, word=' Jam')[3:], sound),
+            'large gap': (change(2, end=58.65), sound),
+            'closed sentence': (change(2, word=' Jam!'), sound),
+            'repeated pair': ([*tail, *tail[2:4]], sound),
+            'overlap': (change(3, start=58.84), sound),
+            'reused time': (change(3, start=58.50, end=58.86), sound),
+            'silent after brand': (tail, [(0, 59.16)]),
+            'silent under continuation': (tail, [(0, 59.20), (59.21, 59.63), (59.64, 60.23), (60.61, 61.15)]),
+        }
+        for name, (observed, audible) in negatives.items():
+            with self.subTest(name=name):
+                self.assertIsNone(canonical_signature_brand(observed, audible, duration))
+                with self.assertRaises(ValueError):
+                    align_with_signature_retry(SEGMENTS, full, duration, audible, lambda _: observed)
 
     def test_partial_retry_is_reported_without_changing_the_failed_result(self):
         words = speech(SEGMENTS)
