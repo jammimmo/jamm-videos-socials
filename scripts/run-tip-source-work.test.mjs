@@ -104,3 +104,61 @@ test('an unmeasured or changed runtime cannot claim a provider start or call TTS
   });
   assert.deepEqual(result, { status: 'temporarily_unavailable', stage: 'runtime' });
 });
+
+test('scorer CLI maps a Python report to exit 0 or 1, and rejects an unusable measurement', async () => {
+  const { score } = await import('./run-tip-source-work.mjs');
+  const { source, speech, wav } = fixture();
+  const scratch = await mkdtemp(join(tmpdir(), 'jamm-score-protocol-'));
+  try {
+    const draft = join(scratch, 'draft.json'), audio = join(scratch, 'normalized.wav');
+    await writeFile(draft, JSON.stringify(source.draft));
+    await writeFile(audio, wav);
+    // Supply only the Python recognizer boundary. Invoke the real Node scoring CLI.
+    const python = join(scratch, 'python-fixture');
+    await writeFile(python, '#!/bin/sh\ncat >/dev/null\ncat "$REPORT_FIXTURE"\n', { mode: 0o700 });
+    const env = { ...process.env, TIP_SOURCE_PYTHON: python, REPORT_FIXTURE: join(scratch, 'fixture.json') };
+    for (const status of ['matched', 'inconclusive']) {
+      await writeFile(env.REPORT_FIXTURE, JSON.stringify({ ...speech, status }));
+      assert.equal((await score(draft, audio, join(scratch, status + '.json'), env)).status, status);
+    }
+    await writeFile(env.REPORT_FIXTURE, 'invalid');
+    await assert.rejects(score(draft, audio, join(scratch, 'error.json'), env));
+  } finally { await rm(scratch, { recursive: true, force: true }); }
+});
+
+test('only a reported recognizer timeout retries once on the same normalized WAV', async () => {
+  const { event, env, wav, speech } = fixture();
+  const scratch = await mkdtemp(join(tmpdir(), 'jamm-measure-retry-'));
+  const timeout = { status: 'inconclusive', reason: 'recognizer_timeout' };
+  try {
+    for (const [reports, stage] of [
+      [[timeout, speech], 'confirmed'],
+      [[timeout, timeout], 'measurement_unavailable'],
+      [[{ status: 'inconclusive', reason: 'ordered_words_unconfirmed', observed_words: ['PRIVATE'], recognizer_diagnostics: [{ outcome: 'timeout' }] }], 'measured_inconclusive'],
+      [[{ status: 'inconclusive', reason: 'recognizer_unavailable' }], 'measurement_unavailable'],
+      [[new Error('PRIVATE')], 'measurement_unavailable'],
+      [[], 'normalization_failed'],
+    ]) {
+      const calls = [], paths = [], files = [];
+      const result = await runTipSourceWork(event, { ...env, RUNNER_TEMP: scratch }, {
+        verifyRuntime: async () => {},
+        updateAttempt: async (_job, action, reason) => { calls.push(action); if (action === 'failed') assert.equal(reason, 'source_evidence_inconclusive'); return { status: 'confirmed' }; },
+        generateSpeech: async () => { calls.push('voice'); return wav.subarray(44); },
+        normalize: async (_root, _raw, path) => { calls.push('normalize'); if (!reports.length) throw Error('PRIVATE'); await writeFile(path, wav); },
+        score: async (_draft, path, reportPath) => {
+          paths.push(path); files.push(reportPath); assert.deepEqual(await readFile(path), wav);
+          const report = reports[paths.length - 1]; if (report instanceof Error) throw report; return report;
+        },
+        qualify: async () => { calls.push('qualify'); return { status: 'confirmed' }; },
+      });
+      assert.equal(result.diagnostic?.stage ?? result.status, stage);
+      if (stage === 'measured_inconclusive') assert.equal(result.diagnostic.incompleteRecognizerCall, true);
+      assert.deepEqual(calls, ['start', 'voice', 'normalize', stage === 'confirmed' ? 'qualify' : 'failed']);
+      assert.equal(paths.length, reports.length);
+      assert.ok(new Set(paths).size <= 1);
+      assert.equal(new Set(files).size, files.length);
+      assert.doesNotMatch(JSON.stringify(result.diagnostic ?? {}), /PRIVATE/);
+      assert.deepEqual(await readdir(scratch), []);
+    }
+  } finally { await rm(scratch, { recursive: true, force: true }); }
+});
