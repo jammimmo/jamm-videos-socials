@@ -197,7 +197,7 @@ def bounded_domain_boundary(segments, index, groups, offset, mapping, actual, st
             and 0 <= stamps[following[0]][0] - stamps[last][1] <= 1.25)
 
 
-def align(segments, words, duration, audible=None, *, defer_domain=False):
+def align(segments, words, duration, audible=None, *, defer_domain=False, signature_boundary=None):
     if not math.isfinite(duration) or not 58.5 <= duration <= 119:
         raise AlignmentFailure('V11 narration must fit the 60–120 second master', 'duration_invalid', duration_ms=milliseconds(duration))
     if not words:
@@ -308,13 +308,24 @@ def align(segments, words, duration, audible=None, *, defer_domain=False):
     duration_in_frames = max(1801, math.ceil((duration + .6) * 30))
     end_of_video = duration_in_frames / 30
     scene_starts = [0]
-    for (_, _, _, left_last, exact_end), (_, right_start, right_first, _, _) in zip(anchors, anchors[1:]):
+    for scene, (left_anchor, right_anchor) in enumerate(zip(anchors, anchors[1:])):
+        _, _, _, left_last, exact_end = left_anchor
+        _, right_start, right_first, _, _ = right_anchor
         start = max(0, right_start - SCENE_PREROLL_SECONDS)
         if left_last is not None:
             left_end = stamps[left_last][1]
             # Preroll belongs in the gap before the next line.
             if right_first == left_last + 1 and left_end <= right_start:
                 start = max(start, left_end)
+            elif (left_end == signature_boundary and exact_end and right_first == left_last + 1
+                  and segments[scene]['id'] == 'socials' and segments[scene + 1]['id'] == 'signature'
+                  and groups[scene][-2:] == ['prochains', 'conseils'] and groups[scene + 1][:2] == ['a', 'bientot']
+                  and 0 < left_end - right_start <= SIGNATURE_PREROLL_SECONDS + .001
+                  and stamps[right_first][1] > left_end + .05
+                  and sum(pair == ('prochains', 'conseils') for pair in zip(actual, actual[1:])) == 1):
+                # The focused opening word can start at the crop's preroll.
+                # Keep the independently anchored final word of the prior scene whole.
+                start = left_end
             elif exact_end and audible is not None:
                 pause_cut = quiet_scene_cut(sound, left_end, right_start)
                 if pause_cut is not None:
@@ -353,6 +364,37 @@ def align(segments, words, duration, audible=None, *, defer_domain=False):
             'listenFor': ['greeting and signature in Wolof', 'voice and accent']}
 
 
+def canonical_signature_brand(tail, sound, duration):
+    """Canonicalize two timed rows only within the fixed French closing phrase."""
+    words = [tokens(row['word']) for row in tail]
+    pairs = [i for i in range(len(tail) - 1)
+             if words[i] in (['jam'], ['jamm']) and words[i + 1] in (['imo'], ['immo'])]
+    if len(pairs) != 1:
+        return None
+    i = pairs[0]
+    first, second = tail[i:i + 2]
+    if ([token for group in words[:i] for token in group] != ['a', 'bientot']
+        or words[i:i + 2] == [['jamm'], ['immo']]
+        or tokens(first['word'] + ' ' + second['word']) != ['jamm', 'immo']
+        or not 0 <= second['start'] - first['end'] <= .101):
+        return None
+
+    # Keep distinct time ownership, including the farewell before the brand.
+    # The focused decoder may start up to one preroll before the scene boundary.
+    previous_end = 0
+    for row in tail:
+        if not previous_end <= row['start'] < row['end'] <= duration + .1:
+            return None
+        previous_end = row['end']
+    # An isolated French ending or words hypothesized over silence do not
+    # establish continuation. This does not certify the Wolof words.
+    continuation = [row for row, group in zip(tail[i + 2:], words[i + 2:]) if group]
+    if (len(continuation) < 2 or voiced_overlap(sound, second['end'], continuation[-1]['end']) < .9
+        or any(voiced_overlap(sound, row['start'], row['end']) <= 0 for row in continuation)):
+        return None
+    return [*tail[:i], {**first, 'word': 'jamm'}, {**second, 'word': 'immo'}, *tail[i + 2:]]
+
+
 def align_with_signature_retry(segments, words, duration, sound, recognize_tail, *, defer_domain=False):
     try:
         return align(segments, words, duration, sound, defer_domain=defer_domain)
@@ -379,7 +421,18 @@ def align_with_signature_retry(segments, words, duration, sound, recognize_tail,
             alignment = align(segments, original + tail, duration, sound, defer_domain=defer_domain)
         except SignatureEvidenceError as retry_error:
             retry_error.reason = 'signature_retry_insufficient'
-            raise
+            # The closing gate tokenizes the joined words; align tokenizes each
+            # timed row separately. Recheck this one known split spelling on
+            # the same focused decode, without borrowing full-pass words.
+            normalized_tail = canonical_signature_brand(tail, sound, duration)
+            if normalized_tail is None:
+                raise
+            try:
+                alignment = align(segments, original + normalized_tail, duration, sound, defer_domain=defer_domain,
+                                  signature_boundary=boundary)
+            except SignatureEvidenceError as normalized_error:
+                normalized_error.reason = 'signature_retry_insufficient'
+                raise
         alignment['method'] = SIGNATURE_RETRY_ALIGNMENT_METHOD
         return alignment
 
