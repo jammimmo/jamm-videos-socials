@@ -129,8 +129,8 @@ def observed_words_with_uncertainty(identity, expected, raw_actual, actual, rows
     reported = [None if row[3] < MIN_WORD_PROBABILITY else word
                 for words, row in zip(token_rows, rows) for word in words]
     if actual != raw_actual:
-        if alias_kind == 'fixed_socials_fused_brand':
-            # The fused alias requires every original row to be confident.
+        if alias_kind in ('fixed_socials_fused_brand', 'centre_ville_spelling'):
+            # These single-row spelling corrections require every row to be confident.
             return (actual, False) if not uncertain else (None, True)
         elif alias_kind == 'fixed_domain_jamimo':
             if reported[5] not in ('jamimo', None):
@@ -273,6 +273,26 @@ def fixed_fused_brand_index(segment, expected, actual, rows):
             return None
         previous_end = end
     return index
+
+
+def observed_centre_ville_spelling(segment, expected, actual, rows):
+    """Retain a single compound spelling when every other French word agrees."""
+    if (segment['id'] not in ('hook', 'step1', 'step2', 'step3', 'takeaway')
+        or actual.count('centreville') != 1):
+        return None
+    index = actual.index('centreville')
+    expanded = [*actual[:index], 'centre', 'ville', *actual[index + 1:]]
+    if expanded != expected:
+        return None
+    previous_end = segment['start']
+    single_row = False
+    for text, start, end, probability in rows:
+        if not previous_end <= start < end <= segment['end'] or probability < MIN_WORD_PROBABILITY:
+            return None
+        if re.fullmatch(r'[-‐‑–—]?centreville[.,!?]?', text, re.I):
+            single_row = True
+        previous_end = end
+    return expanded if single_row else None
 
 
 def exact_row_token_index(identity, rows, expected_tokens):
@@ -615,6 +635,9 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
             alias_kind = 'fixed_domain_jamimo'
         elif index in ambiguous_boundary:
             actual = raw_actual
+        elif (spelling := observed_centre_ville_spelling(segment, expected, raw_actual, observed[index])) is not None:
+            actual = spelling
+            alias_kind = 'centre_ville_spelling'
         else:
             fused_index = fixed_fused_brand_index(segment, expected, raw_actual, observed[index])
             if fused_index is not None:
@@ -695,7 +718,8 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
                 }
             else:
                 item['measurement'] = {
-                    'method': 'fixed_jamm_immo_phonetic_spelling',
+                    'method': ('french_centre_ville_spelling' if alias_kind == 'centre_ville_spelling'
+                               else 'fixed_jamm_immo_phonetic_spelling'),
                     'raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
                 }
         if index in ambiguous_boundary and not boundary_verified:
