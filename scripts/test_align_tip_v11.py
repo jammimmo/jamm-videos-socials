@@ -385,6 +385,12 @@ class V11AlignmentTest(unittest.TestCase):
         social_caption = next(c for c in result['captions'] if c['text'].endswith('prochains conseils.'))
         self.assertAlmostEqual(social_caption['end'], 57.12)
         self.assertAlmostEqual(signature_start(align(SEGMENTS, body + fixed, duration, sound)), 56.94)
+        # A raw retry can pass on À, bientôt and dal alone. The same measured
+        # prior-word endpoint still owns the cut when no brand repair ran.
+        raw_tail = [*tail[:-1], {**tail[-1], 'word': 'dal'}]
+        raw_retry = align_with_signature_retry(SEGMENTS, full, duration, sound, Mock(return_value=raw_tail))
+        self.assertAlmostEqual(signature_start(raw_retry), 57.12)
+        self.assertAlmostEqual(raw_retry['segments'][-2]['end'], 57.12)
         # A wrong/missing terminal anchor, an intervening token, a different scene, a fully consumed
         # opening, or overlap beyond the measured crop cannot extend the preceding scene.
         wrong_scene = [*SEGMENTS[:-2], {**SEGMENTS[-2], 'id': 'other'}, SEGMENTS[-1]]

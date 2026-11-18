@@ -461,6 +461,40 @@ class V11FinalSpeechTest(unittest.TestCase):
                 self.assertEqual(held['status'], 'inconclusive')
                 self.assertNotIn('measurement', held)
 
+    def test_centre_ville_spelling_requires_one_confident_row_in_an_exact_french_body_sentence(self):
+        greeting = {'id': 'greeting', 'text': 'Salam.', 'start': 0, 'end': 1}
+        scene = {'id': 'hook', 'text': 'À Dakar centre ville on vérifie.', 'start': 1, 'end': 5}
+        words = [('À', 1.02, 1.20, .99), ('Dakar', 1.20, 1.60, .99),
+                 ('-Centreville.', 1.60, 2.10, .836), ('on', 2.3, 2.45, .99), ('vérifie.', 2.5, 3.1, .99)]
+        for identifier in ('hook', 'step1', 'step2', 'step3', 'takeaway'):
+            [matched] = compare_french_segments([greeting, {**scene, 'id': identifier}], words, 0)
+            self.assertEqual(matched['status'], 'matched')
+            self.assertEqual(matched['observed_words'], ['a', 'dakar', 'centre', 'ville', 'on', 'verifie'])
+            self.assertEqual(matched['measurement'], {
+                'method': 'french_centre_ville_spelling', 'raw_observed_sha256': sha256(b'a dakar centreville on verifie'),
+            })
+
+        cases = {
+            'uncertain compound': (scene, [*words[:2], (*words[2][:3], .59), *words[3:]]),
+            'uncertain neighbor': (scene, [(*words[0][:3], .59), *words[1:]]),
+            'changed neighbor': (scene, [words[0], ('Lyon', *words[1][1:]), *words[2:]]),
+            'missing neighbor': (scene, [words[0], *words[2:]]),
+            'overlap': (scene, [*words[:2], (words[2][0], 1.59, *words[2][2:]), *words[3:]]),
+            'crosses excluded boundary': (scene, [('À', .98, *words[0][2:]), *words[1:]]),
+            'compound shares a row': (scene, [words[0], ('Dakar-Centreville.', 1.20, 2.10, .99), *words[3:]]),
+            'unrelated compound': ({**scene, 'text': 'À Dakar sur tout on vérifie.'},
+                                   [*words[:2], ('surtout', *words[2][1:]), *words[3:]]),
+            'numeric compound': ({**scene, 'text': 'À Dakar vingt huit on vérifie.'},
+                                 [*words[:2], ('vingthuit', *words[2][1:]), *words[3:]]),
+            'protected neighbor missing': ({**scene, 'text': 'À Dakar centre ville on ne vérifie.'}, words),
+            'fixed French scene': ({**scene, 'id': 'socials'}, words),
+        }
+        for label, (source, observed) in cases.items():
+            with self.subTest(label=label):
+                [held] = compare_french_segments([greeting, source], observed, 0)
+                self.assertEqual(held['status'], 'inconclusive')
+                self.assertNotIn('measurement', held)
+
     def test_services_can_recheck_the_exact_preserved_pcm_when_only_brand_spelling_differs(self):
         services = {'id': 'services', 'text': 'Jamm Immo vous accompagne.', 'start': 0, 'end': 2}
         global_words = [(' Jam', .04, .38, .58), (' Imo', .38, .64, .83),

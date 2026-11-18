@@ -418,7 +418,8 @@ def align_with_signature_retry(segments, words, duration, sound, recognize_tail,
             raise
         original = [word for word in words if word['end'] <= boundary + .001]
         try:
-            alignment = align(segments, original + tail, duration, sound, defer_domain=defer_domain)
+            alignment = align(segments, original + tail, duration, sound, defer_domain=defer_domain,
+                              signature_boundary=boundary)
         except SignatureEvidenceError as retry_error:
             retry_error.reason = 'signature_retry_insufficient'
             # The closing gate tokenizes the joined words; align tokenizes each
