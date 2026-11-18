@@ -10,7 +10,7 @@ from unittest.mock import Mock
 from align_tip_v11 import (
     DOMAIN_BOUNDARY_METHOD, PHONE_WINDOW_EVIDENCE, PhoneEvidenceError, SignatureEvidenceError, align, align_with_phone_retry,
     align_with_signature_retry, recognize_words, report_alignment_failure, tokens,
-    bounded_domain_boundary,
+    alignment_failure_diagnostics, bounded_domain_boundary,
 )
 
 
@@ -52,6 +52,29 @@ def phone_gap():
 
 
 class V11AlignmentTest(unittest.TestCase):
+    def test_pre_alignment_codes_for_invalid_plan_audio_and_coverage(self):
+        words = speech(SEGMENTS)
+        sound = [(0, 70)]
+        cases = [
+            (SEGMENTS, words, 4, sound, 'duration_invalid', {'duration_ms': 4000}),
+            (SEGMENTS, words, 70, [], 'no_audible_windows', {'row_count': len(words)}),
+            ([{'id': 'SECRET', 'text': '?!'}], words, 70, sound, 'empty_segment', {'segment_index': 0}),
+            (SEGMENTS, [{**w, 'word': 'SECRET'} for w in words], 70, sound,
+             'script_coverage_low', {'ratio_permille': 0}),
+            (SEGMENTS, [{**w, 'start': 0, 'end': .1} for w in words], 70, sound,
+             'scene_too_short', {'segment_index': 0, 'span_ms': 0}),
+        ]
+        for segments, rows, duration, windows, code, metrics in cases:
+            with self.subTest(code=code), self.assertRaises(ValueError) as rejected:
+                align(segments, rows, duration, windows)
+            diagnostic = alignment_failure_diagnostics(rejected.exception)
+            self.assertEqual(diagnostic['alignment_code'], code)
+            self.assertEqual({key: diagnostic[key] for key in metrics}, metrics)
+            self.assertNotIn('SECRET', str(diagnostic))
+        self.assertEqual(alignment_failure_diagnostics(ValueError('SECRET')), {
+            'reason': 'alignment_evidence_invalid', 'alignment_code': 'unclassified_value_error',
+        })
+
     def deferred_domain_fixture(self):
         segments = [row if row['id'] != 'domain' else {
             **row, 'text': 'Retrouvez-nous sur notre site, jamm immo point com.',
@@ -342,7 +365,8 @@ class V11AlignmentTest(unittest.TestCase):
         with self.assertRaises(SignatureEvidenceError) as rejected:
             align_with_signature_retry(SEGMENTS, body + ending[:2], 70, sound, lambda _: ending[2:4])
         self.assertEqual(rejected.exception.diagnostics(), {
-            'reason': 'signature_retry_insufficient', 'matched_words': 2, 'expected_words': 10,
+            'reason': 'signature_retry_insufficient', 'alignment_code': 'signature_retry_insufficient',
+            'matched_words': 2, 'expected_words': 10,
         })
 
     def test_failure_marker_contains_only_a_predefined_code(self):

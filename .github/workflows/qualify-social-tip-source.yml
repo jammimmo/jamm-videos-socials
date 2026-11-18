@@ -2,7 +2,7 @@ name: Qualify Jamm Immo advice source
 
 on:
   repository_dispatch:
-    types: [qualify-jamm-tip-source]
+    types: [qualify-jamm-tip-source, inspect-jamm-tip-source]
 
 concurrency:
   group: advice-source-${{ github.event.client_payload.sourceJob.id || github.run_id }}
@@ -31,16 +31,24 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.11.14'
-      - name: Prepare narration and speech tools before claiming a paid take
+      - name: Prepare the pinned speech runtime
         run: bash scripts/prepare-tip-runtime.sh --install
       - name: Verify source workflow contracts
+        if: github.event.action == 'qualify-jamm-tip-source'
         run: |
           npm run lint
-          node --import tsx --test scripts/tip-source-attempt.test.mjs scripts/run-tip-source-work.test.mjs
+          node --import tsx --test scripts/tip-source-attempt.test.mjs scripts/run-tip-source-work.test.mjs scripts/source-failure-capsule.test.mjs scripts/inspect-tip-source.test.mjs
           python -m unittest discover -s scripts -p test_audit_tip_v11_source.py
       - name: Generate and qualify one acknowledged source attempt
+        if: github.event.action == 'qualify-jamm-tip-source'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           HF_HUB_OFFLINE: '1'
           TRANSFORMERS_OFFLINE: '1'
         run: node --import tsx scripts/run-tip-source-work.mjs
+      - name: Remeasure a private failed source
+        if: github.event.action == 'inspect-jamm-tip-source'
+        env:
+          HF_HUB_OFFLINE: '1'
+          TRANSFORMERS_OFFLINE: '1'
+        run: node scripts/inspect-tip-source.mjs

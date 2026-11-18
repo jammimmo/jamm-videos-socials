@@ -44,6 +44,17 @@ export async function requestTipSourceAttemptOidc(jsonBytes, env, fetchToken = f
   return requestGithubOidc(`urn:jammimmo:tip-v11:machine-source-attempt:${sha256(jsonBytes)}`, env, fetchToken);
 }
 
+export async function requestTipSourceCapsuleWriteOidc(body, env, fetchToken = fetch) {
+  return requestGithubOidc(`urn:jammimmo:tip-v11:source-failure-capsule-write:${sha256(body)}`, env, fetchToken);
+}
+
+export async function requestTipSourceCapsuleReadOidc(jobId, attempt, wavSha256, env, fetchToken = fetch) {
+  if (typeof jobId !== 'string' || !UUID.test(jobId) || ![1, 2, 3].includes(attempt)
+    || typeof wavSha256 !== 'string' || !SHA256.test(wavSha256)) throw new Error('Invalid source capsule binding');
+  const binding = sha256(JSON.stringify([jobId, attempt, wavSha256]));
+  return requestGithubOidc(`urn:jammimmo:tip-v11:source-failure-capsule-read:${binding}`, env, fetchToken);
+}
+
 async function requestGithubOidc(audience, env, fetchToken) {
   const url = new URL(env.ACTIONS_ID_TOKEN_REQUEST_URL);
   const bearer = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;

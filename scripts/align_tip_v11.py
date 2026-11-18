@@ -34,32 +34,53 @@ DEFERRED_DOMAIN_CHECKS = ('domain_audio', 'visible_domain_cta')
 DOMAIN_BOUNDARY_METHOD = 'bounded-domain-anchors-final-mp4'
 
 
-class PhoneEvidenceError(ValueError):
-    def __init__(self, gap):
-        super().__init__('Exact contact pronunciation not recognized: phone')
+class AlignmentFailure(ValueError):
+    """Only fixed call-site codes and bounded integer measurements leave the aligner."""
+
+    def __init__(self, message, code, reason='alignment_evidence_invalid', **metrics):
+        super().__init__(message)
+        self.code = code
+        self.reason = reason
+        self.metrics = {key: min(360_000, max(0, value)) for key, value in metrics.items()
+                        if type(value) is int}
+
+    def diagnostics(self):
+        return {'reason': self.reason, 'alignment_code': self.code, **self.metrics}
+
+
+def milliseconds(seconds):
+    if math.isfinite(seconds):
+        return round(max(0, min(360, seconds)) * 1000)
+    return None
+
+
+class PhoneEvidenceError(AlignmentFailure):
+    def __init__(self, gap, **metrics):
+        super().__init__('Exact contact pronunciation not recognized: phone', 'phone_gap_unconfirmed',
+                         'phone_evidence_unconfirmed', **metrics)
         self.gap = gap
 
 
-class SignatureEvidenceError(ValueError):
+class SignatureEvidenceError(AlignmentFailure):
     def __init__(self, preceding_end, matched_words, expected_words):
-        super().__init__('Insufficient speech evidence: signature')
+        super().__init__('Insufficient speech evidence: signature', 'signature_evidence_insufficient',
+                         'signature_evidence_insufficient', matched_words=matched_words, expected_words=expected_words)
         self.preceding_end = preceding_end
-        self.matched_words = matched_words
-        self.expected_words = expected_words
-        self.reason = 'signature_evidence_insufficient'
 
     def diagnostics(self):
-        return {'reason': self.reason, 'matched_words': self.matched_words, 'expected_words': self.expected_words}
+        return {**super().diagnostics(), 'alignment_code': self.reason}
 
 
 def alignment_failure_diagnostics(error):
-    if isinstance(error, SignatureEvidenceError):
+    if isinstance(error, AlignmentFailure):
         return error.diagnostics()
-    return {'reason': {
-        'Exact contact pronunciation not recognized: phone': 'phone_evidence_unconfirmed',
-        'Exact contact pronunciation not recognized: domain': 'website_evidence_unconfirmed',
-        'French speech differs substantially from the approved script': 'script_evidence_unconfirmed',
-    }.get(str(error), 'alignment_evidence_invalid')}
+    # The command-line failure marker historically accepts plain ValueError too.
+    reason, code = {
+        'Exact contact pronunciation not recognized: phone': ('phone_evidence_unconfirmed', 'phone_gap_unconfirmed'),
+        'Exact contact pronunciation not recognized: domain': ('website_evidence_unconfirmed', 'domain_unconfirmed'),
+        'French speech differs substantially from the approved script': ('script_evidence_unconfirmed', 'script_coverage_low'),
+    }.get(str(error), ('alignment_evidence_invalid', 'unclassified_value_error'))
+    return {'reason': reason, 'alignment_code': code}
 
 
 def report_alignment_failure(error, code_path=None):
@@ -178,9 +199,9 @@ def bounded_domain_boundary(segments, index, groups, offset, mapping, actual, st
 
 def align(segments, words, duration, audible=None, *, defer_domain=False):
     if not math.isfinite(duration) or not 58.5 <= duration <= 119:
-        raise ValueError('V11 narration must fit the 60–120 second master')
+        raise AlignmentFailure('V11 narration must fit the 60–120 second master', 'duration_invalid', duration_ms=milliseconds(duration))
     if not words:
-        raise ValueError('No French word timestamps')
+        raise AlignmentFailure('No French word timestamps', 'no_word_timestamps', row_count=0)
 
     actual = []
     stamps = []
@@ -188,8 +209,16 @@ def align(segments, words, duration, audible=None, *, defer_domain=False):
     previous = 0
     for index, word in enumerate(words):
         start, end = word['start'], word['end']
-        if not all(math.isfinite(v) for v in [start, end]) or not previous <= start <= end <= duration + .1:
-            raise ValueError('Invalid narration timestamps')
+        if not all(math.isfinite(v) for v in (start, end)):
+            raise AlignmentFailure('Invalid narration timestamps', 'timestamp_nonfinite', row_index=index)
+        if not previous <= start <= end <= duration + .1:
+            if start < previous:
+                code, difference = 'timestamp_regression', previous - start
+            elif end < start:
+                code, difference = 'timestamp_reversed', start - end
+            else:
+                code, difference = 'timestamp_overrun', end - duration
+            raise AlignmentFailure('Invalid narration timestamps', code, row_index=index, span_ms=milliseconds(difference))
         previous = start
         recognized = tokens(word['word'])
         if recognized == ['jamm', 'immo'] and index + 1 < len(words) and re.match(r'^\s*\.\s*com\b', words[index + 1]['word'], re.I):
@@ -199,18 +228,31 @@ def align(segments, words, duration, audible=None, *, defer_domain=False):
             stamps.append((start, end))
             source_indices.append(index)
     sound = stamps if audible is None else audible
-    if not stamps or not sound or sound[0][0] > 2.5 or duration - sound[-1][1] > 2.5:
-        raise ValueError('V11 narration starts or ends with excessive silence')
-    if any(right[0] - left[1] > 3.25 for left, right in zip(sound, sound[1:])):
-        raise ValueError('V11 narration contains a long pause')
+    silence_message = 'V11 narration starts or ends with excessive silence'
+    if not stamps:
+        raise AlignmentFailure(silence_message, 'no_recognized_tokens', row_count=len(words))
+    if not sound:
+        raise AlignmentFailure(silence_message, 'no_audible_windows', row_count=len(words))
+    if sound[0][0] > 2.5:
+        raise AlignmentFailure(silence_message, 'leading_silence', span_ms=milliseconds(sound[0][0]))
+    tail = duration - sound[-1][1]
+    if tail > 2.5:
+        raise AlignmentFailure(silence_message, 'trailing_silence', span_ms=milliseconds(tail))
+    for left, right in zip(sound, sound[1:]):
+        gap = right[0] - left[1]
+        if gap > 3.25:
+            raise AlignmentFailure('V11 narration contains a long pause', 'interior_pause', span_ms=milliseconds(gap))
 
     groups = [tokens(segment['text']) for segment in segments]
-    if any(not group for group in groups):
-        raise ValueError('Empty narration segment')
+    for index, group in enumerate(groups):
+        if not group:
+            raise AlignmentFailure('Empty narration segment', 'empty_segment', segment_index=index)
     expected = [token for group in groups for token in group]
     matcher = difflib.SequenceMatcher(None, expected, actual, autojunk=False)
     if matcher.ratio() < .76:
-        raise ValueError('French speech differs substantially from the approved script')
+        raise AlignmentFailure('French speech differs substantially from the approved script', 'script_coverage_low',
+                               'script_evidence_unconfirmed', expected_words=len(expected), observed_words_count=len(actual),
+                               ratio_permille=round(matcher.ratio() * 1000))
     mapping = {block.a + i: block.b + i for block in matcher.get_matching_blocks()
                for i in range(block.size)}
 
@@ -230,10 +272,13 @@ def align(segments, words, duration, audible=None, *, defer_domain=False):
             first = next((i for i in range(start, end) if actual[i:i + len(required)] == required), None)
             if first is None:
                 if identifier == 'phone':
-                    raise PhoneEvidenceError(empty_phone_gap(segments, groups, index, offset, mapping, source_indices, words))
+                    raise PhoneEvidenceError(empty_phone_gap(segments, groups, index, offset, mapping, source_indices, words),
+                                             segment_index=index, matched_words=len(matched), expected_words=len(group))
                 if not defer_domain or not bounded_domain_boundary(
                         segments, index, groups, offset, mapping, actual, stamps):
-                    raise ValueError(f'Exact contact pronunciation not recognized: {identifier}')
+                    raise AlignmentFailure(f'Exact contact pronunciation not recognized: {identifier}', 'domain_unconfirmed',
+                                           'website_evidence_unconfirmed', segment_index=index, matched_words=len(matched),
+                                           expected_words=len(group))
                 domain_deferred = True
             if identifier == 'phone':
                 cursor = first + 1  # skip the separately spoken international prefix “plus”
@@ -244,9 +289,10 @@ def align(segments, words, duration, audible=None, *, defer_domain=False):
         elif coverage < (.25 if identifier in ('greeting', 'signature') else .68):
             if identifier == 'signature':
                 raise SignatureEvidenceError(preceding_social_end, len(matched), len(group))
-            raise ValueError(f'Insufficient speech evidence: {identifier}')
+            raise AlignmentFailure(f'Insufficient speech evidence: {identifier}', 'segment_coverage_low',
+                                   segment_index=index, matched_words=len(matched), expected_words=len(group))
         if not matched:
-            raise ValueError(f'No speech anchors: {identifier}')
+            raise AlignmentFailure(f'No speech anchors: {identifier}', 'no_segment_anchors', segment_index=index)
         preceding_social_end = None
         if identifier == 'socials' and group[-2:] == ['prochains', 'conseils']:
             previous = mapping.get(offset + len(group) - 2)
@@ -276,9 +322,10 @@ def align(segments, words, duration, audible=None, *, defer_domain=False):
         scene_starts.append(start)
     scene_ends = [*scene_starts[1:], end_of_video]
     timed_segments, captions = [], []
-    for segment, anchor, start, end in zip(segments, anchors, scene_starts, scene_ends):
+    for scene, (segment, anchor, start, end) in enumerate(zip(segments, anchors, scene_starts, scene_ends)):
         if end - start < .65:
-            raise ValueError(f'Unusable scene timing: {segment["id"]}')
+            raise AlignmentFailure(f'Unusable scene timing: {segment["id"]}', 'scene_too_short',
+                                   segment_index=scene, span_ms=milliseconds(end - start))
         timed_segments.append({**segment, 'start': start, 'end': end})
         if 'caption' in segment:
             captions.append({'text': segment['caption'], 'start': start, 'end': end})
@@ -292,9 +339,10 @@ def align(segments, words, duration, audible=None, *, defer_domain=False):
             estimate = start + (end - start) * i / len(chunks)
             when = stamps[measured][0] if measured is not None else estimate
             chunk_starts.append(min(end - .18 * (len(chunks) - i), max(chunk_starts[-1] + .18, when)))
-        for chunk, left, right in zip(chunks, chunk_starts, [*chunk_starts[1:], end]):
+        for index, (chunk, left, right) in enumerate(zip(chunks, chunk_starts, [*chunk_starts[1:], end])):
             if right - left < .15:
-                raise ValueError(f'Unusable caption timing: {segment["id"]}')
+                raise AlignmentFailure(f'Unusable caption timing: {segment["id"]}', 'caption_too_short',
+                                       segment_index=scene, chunk_index=index, span_ms=milliseconds(right - left))
             captions.append({'text': chunk, 'start': left, 'end': right})
 
     return {'segments': timed_segments, 'captions': captions, 'durationInFrames': duration_in_frames,
@@ -381,15 +429,24 @@ def align_with_phone_retry(segments, words, duration, sound, recognize_tail, rec
             raise
         index, start, end, contact, socials = error.gap
         if not sound or voiced_overlap(sound, start, end) < .9:
+            error.code = 'phone_gap_quiet'
             raise
         # End at the proven next sentence, so the decoder does not have to
         # interpret a cut-off word from that sentence as part of the number.
         clip_start, clip_end = max(0, start - .44), end
         focused = timed_phone_window(recognize_phone(clip_start, clip_end), clip_start, clip_end, contact, socials)
         tolerance = PHONE_BOUNDARY_TOLERANCE_SECONDS
-        if (not focused or focused[0]['start'] < start - tolerance
-            or focused[-1]['end'] > end + tolerance
-            or any(voiced_overlap(sound, word['start'], word['end']) <= 0 for word in focused)):
+        if not focused:
+            error.code = 'phone_window_unconfirmed'
+            raise
+        if focused[0]['start'] < start - tolerance:
+            error.code = 'phone_window_early'
+            raise
+        if focused[-1]['end'] > end + tolerance:
+            error.code = 'phone_window_late'
+            raise
+        if any(voiced_overlap(sound, word['start'], word['end']) <= 0 for word in focused):
+            error.code = 'phone_window_unvoiced'
             raise
         merged = [*words[:index], *focused, *words[index:]]
         alignment = align_with_signature_retry(segments, merged, duration, sound, recognize_tail, defer_domain=defer_domain)
