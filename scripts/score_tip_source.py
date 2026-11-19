@@ -164,12 +164,17 @@ def _score_source(plan, wav, directory, recognize, recognize_window, *, startup=
         if startup is not None:
             measured(lambda _: startup(), 'model_load')(source_path)
         recognized = measured(recognize, 'full_audio', 0)(source_path)
-        segments = align_with_phone_retry(
+        alignment = align_with_phone_retry(
             plan['segments'], timed_words(recognized), duration, sound,
             lambda boundary: alignment_window(boundary - SIGNATURE_PREROLL_SECONDS, stage='alignment_signature'), alignment_window,
             defer_domain=True,
+            opening_pcm=raw,
             recognize_greeting=lambda boundary: alignment_window(0, boundary, stage='alignment_greeting'),
-        )['segments']
+        )
+        segments = alignment['segments']
+        if 'greetingPositionEvidence' in alignment:
+            report['greeting_position'] = {'method': alignment['greetingEvidenceMethod'],
+                                           **alignment['greetingPositionEvidence']}
     except SourceRecognitionError as error:
         return {**report, 'reason': error.reason}
     except ValueError as error:

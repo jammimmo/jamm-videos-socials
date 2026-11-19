@@ -555,6 +555,17 @@ class GreetingWindowTests(unittest.TestCase):
         self.assertEqual(result['greetingEvidenceMethod'], 'french-v11-pinned-greeting-window')
         self.assertEqual(self.focus[1]['word'], 'Alekoum')
 
+    def test_unproven_position_leaves_the_original_lexical_route_available(self):
+        from unittest.mock import patch
+
+        with patch('align_tip_v11.greeting_speech_samples', return_value=0):
+            args = (SEGMENTS, self.full, 70, self.sound, Mock(), Mock())
+            raw = bytes(70 * 24000 * 2)
+            result = align_with_phone_retry(*args, opening_pcm=raw, recognize_greeting=lambda _: self.focus)
+            self.assertEqual(result, self.run_alignment(lambda _: self.focus))
+            with self.assertRaises(ValueError):
+                align_with_phone_retry(*args, opening_pcm=raw, recognize_greeting=lambda _: [])
+
     def test_focused_invalid_anchors_and_measurements_do_not_recover(self):
         for index, replacement in [(2, {'word': 'autre'}), (0, {'probability': .10}),
                                    (3, {'probability': float('nan')}), (3, {'end': 2.37}),
@@ -669,3 +680,61 @@ class CorroboratedSignatureTests(unittest.TestCase):
         self.body[0]['word'], self.body[1]['word'] = 'prochains', 'conseils'
         with self.assertRaises(ValueError):
             self.compare(self.full, self.focus)
+
+
+class GreetingPositionTests(unittest.TestCase):
+    def setUp(self):
+        from unittest.mock import patch
+
+        suffix = speech(SEGMENTS)[4:]
+        shift = 2.36 - suffix[0]['start']
+        self.hook = [{**w, 'start': w['start'] + shift, 'end': w['end'] + shift,
+                      'probability': .99} for w in suffix]
+        self.prefix = {'word': 'bonjour', 'start': .24, 'end': .64, 'probability': .52}
+        self.words = [self.prefix, *self.hook]
+        self.sound = [(.16, 1.44), (1.65, 2.17), *((w['start'], w['end']) for w in self.hook)]
+        self.pcm = (1200).to_bytes(2, 'little', signed=True) * (70 * 24000)
+        self.recrop = Mock(return_value=[])
+        self.vad = self.enterContext(patch('align_tip_v11.greeting_speech_samples', return_value=16384))
+
+    def run_position(self, words, segments=SEGMENTS):
+        return align_with_phone_retry(segments, words, 70, self.sound, Mock(return_value=[]),
+                                      Mock(return_value=[]), recognize_greeting=self.recrop,
+                                      opening_pcm=self.pcm)
+
+    def test_opaque_prefix_ends_at_unique_french_hook_without_changing_later_scenes(self):
+        reference_opening = [{**w, 'probability': .99} for w in speech(SEGMENTS)[:4]]
+        control = align(SEGMENTS, [*reference_opening, *self.hook], 70, self.sound)
+        original = [dict(w) for w in self.words]
+        result = self.run_position(self.words)
+        self.assertEqual(result['greetingEvidenceMethod'], 'french-v11-pcm-vad-before-hook-v1')
+        evidence = result['greetingPositionEvidence']
+        self.assertEqual((evidence['end_sample'], evidence['speech_samples_16k']), (round(2.36 * 24000), 16384))
+        self.assertEqual(result['phoneGroups'], control['phoneGroups'])
+        self.assertEqual(result['segments'][2:], control['segments'][2:])
+        self.assertEqual(result['captions'][0]['text'], SEGMENTS[0]['text'])
+        self.assertEqual(sum(c['text'] == SEGMENTS[0]['text'] for c in result['captions']), 1)
+        self.assertEqual(self.words, original)
+        self.recrop.assert_not_called()
+
+    def test_ambiguous_hook_and_protected_or_crossing_prefix_fail(self):
+        def alter(i, **changes):
+            return [*self.words[:i], {**self.words[i], **changes}, *self.words[i + 1:]]
+        duplicate = [*self.words[:4], *[{**w, 'word': self.hook[i]['word']}
+                     for i, w in enumerate(self.words[4:7])], *self.words[7:]]
+        cases = [(alter(1, word='autre'), SEGMENTS), (alter(2, probability=.59), SEGMENTS),
+                 (alter(0, end=2.5), SEGMENTS), (alter(0, word='221'), SEGMENTS),
+                 (alter(0, word='sans'), SEGMENTS), (duplicate, SEGMENTS),
+                 (self.words, [{**SEGMENTS[0], 'text': 'Bonne journée !'}, *SEGMENTS[1:]])]
+        for words, segments in cases:
+            with self.subTest(prefix=words[0], hook=words[1:4], literal=segments[0]), self.assertRaises(ValueError):
+                self.run_position(words, segments)
+
+    def test_clean_greeting_uses_existing_measurement_without_vad(self):
+        words = speech(SEGMENTS)
+        sound = [(w['start'], w['end']) for w in words]
+        actual = align_with_phone_retry(SEGMENTS, words, 70, sound, Mock(), Mock(),
+                                       recognize_greeting=self.recrop, opening_pcm=self.pcm)
+        self.assertEqual(actual, align(SEGMENTS, words, 70, sound))
+        self.vad.assert_not_called()
+        self.recrop.assert_not_called()

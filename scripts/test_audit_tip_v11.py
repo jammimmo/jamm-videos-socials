@@ -7,6 +7,7 @@ import unittest
 import wave
 
 from align_tip_v11 import ASR_REVISION, GREETING_WINDOW_EVIDENCE, PHONE_WINDOW_EVIDENCE, align, align_with_signature_retry, tokens
+from align_tip_v11 import GREETING_POSITION_EVIDENCE, GREETING_VAD_SHA256
 from audit_tip_v11 import (
     AUDIO_PRESERVATION_WINDOW, CAPTION_SCENES, SAMPLE_RATE, bind_manifest, measure_audio,
     measure_audio_preservation, normalized_ocr_text, sha256, verify_alignment,
@@ -221,6 +222,25 @@ class V11FinalEvidenceTest(unittest.TestCase):
                         {'provenance': 'local-word-timings'}, {'reviewRequired': False}):
             with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, 'alignment identity'):
                 verify_alignment(json.dumps(alignment | changes))
+
+    def test_positional_caption_requires_exact_unscored_source_interval(self):
+        rows = speech(SEGMENTS)
+        alignment = align(SEGMENTS, rows, 70) | {'provenance': ASR_REVISION, 'greetingEvidenceMethod': GREETING_POSITION_EVIDENCE}
+        onset = alignment['segments'][1]['start']
+        end_sample = int(onset * SAMPLE_RATE)
+        evidence = {'end_sample': end_sample, 'speech_samples_16k': 16384,
+                    'prefix_pcm_sha256': sha256(self.voice[:end_sample].tobytes()), 'vad_sha256': GREETING_VAD_SHA256,
+                    'words_evaluated': False}
+        alignment['greetingPositionEvidence'] = evidence
+        self.assertEqual(verify_alignment(json.dumps(alignment), self.voice), alignment)
+        with self.assertRaisesRegex(ValueError, 'different narration samples'):
+            verify_alignment(json.dumps(alignment), array.array('h', [0]) * end_sample)
+        for changes in ({'end_sample': evidence['end_sample'] - 1}, {'words_evaluated': True},
+                        {'speech_samples_16k': 9216}, {'speech_samples_16k': 16383}, {'vad_sha256': 'b' * 64}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                verify_alignment(json.dumps(alignment | {'greetingPositionEvidence': evidence | changes}))
+        with self.assertRaises(ValueError):
+            verify_alignment(json.dumps(alignment | {'greetingEvidenceMethod': GREETING_WINDOW_EVIDENCE}))
 
     def test_focused_phone_marker_requires_the_pinned_decoder_and_same_review_contract(self):
         alignment = align(SEGMENTS, speech(SEGMENTS), 70) | {
