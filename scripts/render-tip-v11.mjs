@@ -20,9 +20,9 @@ const PCM_SAMPLE_RATE = 24_000;
 
 class TipNarrationDurationError extends Error {}
 
-function run(command, args, cwd) {
+function run(command, args, cwd, env) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { cwd, stdio: 'inherit' });
+    const child = spawn(command, args, { cwd, env, stdio: 'inherit' });
     child.once('error', reject);
     child.once('close', (code) => code === 0 ? resolvePromise() : reject(new Error(`${command} failed (${code})`)));
   });
@@ -123,10 +123,14 @@ export async function normalizeTipV11Narration(root, raw, normalizedPath, option
 }
 
 export async function renderTipV11(spec, {
-  root, assistantEnabled = false, localNarration, localWordTimings,
+  root, assistantEnabled = false, localNarration, localWordTimings, fixtureDiagnosticPath,
 } = {}) {
   if (!root) throw new Error('Renderer root is required');
   if (localWordTimings && !localNarration) throw new Error('Local word timings require local narration');
+  if (fixtureDiagnosticPath && (!localNarration || !localWordTimings
+    || process.env.OFFLINE_SMOKE_NETWORK_ISOLATED !== '1')) {
+    throw new Error('Picture diagnostics require the isolated synthetic fixture');
+  }
   if (spec.reviewedNarration && (localNarration || assistantEnabled)) throw new Error('Reviewed V11 narration requires the approved standard scenes');
   const plan = buildTipV11Narration(spec, { assistantEnabled });
   const outDir = resolve(root, 'out/batch');
@@ -192,11 +196,18 @@ export async function renderTipV11(spec, {
   await writeFile(propsPath, JSON.stringify(props), { mode: 0o600 });
   let captionGeometry;
   try {
-    await run(resolve(root, 'node_modules/.bin/remotion'), [
+    const cli = resolve(root, 'node_modules/.bin/remotion');
+    const diagnosticArgs = fixtureDiagnosticPath ? [
+      '--require', resolve(root, 'scripts/trace-tip-picture-fixture.cjs'), cli,
+    ] : [];
+    await run(fixtureDiagnosticPath ? process.execPath : cli, [
+      ...diagnosticArgs,
       'render', 'src/index.ts', 'TipV11Fr', outFile, `--props=${propsPath}`,
       '--config=remotion.tip-v11.config.ts', '--codec=h264', '--audio-codec=aac',
       '--image-format=jpeg', '--concurrency=3', '--log=error',
-    ], root);
+    ], root, fixtureDiagnosticPath ? {
+      ...process.env, TIP_FIXTURE_DIAGNOSTIC_PATH: fixtureDiagnosticPath,
+    } : undefined);
     captionGeometry = await summarizeCaptionGeometry(props, geometryDirectory);
   } finally {
     await rm(geometryDirectory, { recursive: true, force: true }).catch(() => {

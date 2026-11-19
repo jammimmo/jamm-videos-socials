@@ -9,6 +9,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildTipV11Narration } from './tip-v11-contract.mjs';
 import { decodedTipMediaFingerprints } from './tip-decoded-media-fingerprint.mjs';
+import { decodedTipFrameHashes } from './tip-decoded-frame-hashes.mjs';
 import { renderTipV11 } from './render-tip-v11.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -118,9 +119,12 @@ async function main() {
       writeFile(transcript, `${JSON.stringify(deterministicTranscript(plan, durationSeconds))}\n`, { mode: 0o600 }),
     ]);
 
+    const fixtureDiagnosticPath = join(scratch, 'picture-diagnostic.ndjson');
+    const startedRendering = performance.now();
     const video = await renderTipV11(fixture, {
-      root, localNarration: narration, localWordTimings: transcript,
+      root, localNarration: narration, localWordTimings: transcript, fixtureDiagnosticPath,
     });
+    const renderPipelineMs = Math.round(performance.now() - startedRendering);
     const output = join(root, 'out', 'batch');
     const [alignment, manifest, media, props, videoStat] = await Promise.all([
       readFile(join(output, `${fixture.id}.alignment.json`), 'utf8').then(JSON.parse),
@@ -189,6 +193,43 @@ async function main() {
       assert.ok(hasIdr, 'Each video keyframe must start a closed GOP');
     }
 
+    const trace = (await readFile(fixtureDiagnosticPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    const backends = trace.filter(entry => entry.stage === 'backend');
+    assert.ok(backends.length);
+    for (const { implementation, renderer, flags } of backends) {
+      assert.match(implementation ?? '', /angle=swiftshader/iu);
+      assert.match(renderer ?? '', /swiftshader/iu);
+      assert.deepEqual(flags.filter(flag => flag.startsWith('--use-gl=')), ['--use-gl=angle']);
+      assert.deepEqual(flags.filter(flag => flag.startsWith('--use-angle=')), ['--use-angle=swiftshader']);
+      assert.ok(!flags.includes('--disable-gpu'));
+    }
+    const encoders = trace.filter(entry => entry.stage === 'encoder');
+    assert.ok(encoders.length);
+    for (const { codecSha256, x264Parameters, videoThreads } of encoders) {
+      assert.match(codecSha256 ?? '', /^[a-f0-9]{64}$/u);
+      assert.equal(x264Parameters, 'open-gop=0:keyint=90:scenecut=0:asm=0');
+      assert.equal(videoThreads, '1');
+    }
+    const captured = new Map();
+    for (const entry of trace.filter(event => event.stage === 'preencode')) {
+      assert.match(entry.sha256, /^[a-f0-9]{64}$/u);
+      assert.ok(!captured.has(entry.frame) || captured.get(entry.frame) === entry.sha256,
+        `Inconsistent capture after retry for frame ${entry.frame}`);
+      captured.set(entry.frame, entry.sha256);
+    }
+    const startedFrameAudit = performance.now();
+    const frameHashes = decodedTipFrameHashes(video, props.durationInFrames, media.width, media.height);
+    const frameAuditMs = Math.round(performance.now() - startedFrameAudit);
+    assert.equal(captured.size, frameHashes.length);
+    for (const entry of [...backends, ...encoders]) {
+      process.stdout.write(`V11_PICTURE_DIAGNOSTIC ${JSON.stringify(entry)}\n`);
+    }
+    process.stdout.write(`V11_PICTURE_DIAGNOSTIC ${JSON.stringify({ stage: 'timing', renderPipelineMs, frameAuditMs })}\n`);
+    for (const { frame, sha256 } of frameHashes) {
+      const capture = captured.get(frame);
+      assert.ok(capture, `Missing JPEG fingerprint for frame ${frame}`);
+      process.stdout.write(`V11_PICTURE_SHA256 ${frame} ${capture} ${sha256}\n`);
+    }
     receipt = {
       status: 'passed', scope: 'non-publishable-offline-remotion-smoke',
       renderer: 'TipV11Fr', voiceSource: manifest.voice.source,
