@@ -947,5 +947,61 @@ class V11FinalSpeechTest(unittest.TestCase):
             measure.assert_called_once()
 
 
+class FullAudioSocialsCreditTest(unittest.TestCase):
+    def setUp(self):
+        # Reuse the PCM, original row times and real measurement entry point of
+        # the single-point regression without rediscovering its TestCase.
+        from test_audit_tip_v11_social_recovery import UntimedSocialsTest
+        self.fixture = UntimedSocialsTest()
+        self.fixture.setUp()
+
+    def focused(self, delta=-480):
+        from copy import deepcopy
+        rows = deepcopy(self.fixture.crop)
+        point = rows[1][1] + delta / 24000
+        rows[0][2] = point
+        rows[1][1] = rows[1][2] = point
+        # This low-confidence observation is corroboration of the time span.
+        # It supplies neither of the two credited brand words.
+        return [*rows[:2], [' Jamimo', point, rows[3][2], .32359], *rows[4:]]
+
+    def test_full_audio_supplies_twelve_words_while_shifted_point_costs_one_edit(self):
+        from audit_tip_v11_speech import FIXED_SOCIALS_WORDS, timed_rows_digest
+        crop = self.focused()
+        result, reads = self.fixture.measure(crop=crop)
+        self.assertEqual((result['status'], reads), ('matched', 1))
+        social = result['segments'][1]
+        self.assertEqual(social['observed_words'], [FIXED_SOCIALS_WORDS[0], None, *FIXED_SOCIALS_WORDS[2:]])
+        proof = social['measurement']
+        self.assertEqual((proof['method'], proof['credited_words_source'], proof['edit_count']),
+                         ('fixed_socials_untimed_word_scored_as_edit', 'full_audio', 1))
+        self.assertEqual((proof['focused_point_sample'] - proof['point_sample'], proof['point_delta_samples']),
+                         (-480, -480))
+        self.assertEqual(proof['focused_timed_rows_sha256'], timed_rows_digest(crop))
+        self.assertEqual(proof['full_timed_rows_sha256'], timed_rows_digest(self.fixture.full))
+
+    def test_corroboration_is_limited_to_the_same_point_brand_span_and_exact_suffix(self):
+        from copy import deepcopy
+        for name, row, col, replacement in [
+            ('wrong fused word', 2, 0, ' Jamina'), ('wrong suffix', 4, 0, ' autres'),
+            ('weak suffix', 4, 3, .599), ('shifted sur', 3, 1, self.focused()[3][1] + 481 / 24000), ('fused span misses Imo', 2, 2, .74),
+            ('second point', 4, 2, self.focused()[4][1]),
+        ]:
+            with self.subTest(case=name):
+                crop = self.focused()
+                crop[row][col] = replacement
+                result, _ = self.fixture.measure(crop=crop)
+                self.assertNotEqual(result['status'], 'matched')
+        self.assertNotEqual(self.fixture.measure(crop=self.focused(-481))[0]['status'], 'matched')
+        first, last = [round(v * 24000) for v in self.fixture.full[4][1:3]]
+        muted = self.fixture.decoded[:first * 2] + bytes(2 * (last - first)) + self.fixture.decoded[last * 2:]
+        self.assertNotEqual(self.fixture.measure(crop=self.focused(), pcm=muted)[0]['status'], 'matched')
+        for i in [3, 4, 6]:
+            full = deepcopy(self.fixture.full)
+            full[i][3] = .599
+            with self.subTest(weak_full_row=i):
+                self.assertNotEqual(self.fixture.measure(full=full, crop=self.focused())[0]['status'], 'matched')
+
+
 if __name__ == '__main__':
     unittest.main()

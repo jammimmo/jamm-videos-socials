@@ -585,3 +585,75 @@ class GreetingWindowTests(unittest.TestCase):
         callback = Mock()
         self.assertEqual(self.run_alignment(callback, words, sound), align(SEGMENTS, words, 70, sound))
         callback.assert_not_called()
+
+
+class CorroboratedSignatureTests(unittest.TestCase):
+    def setUp(self):
+        # Two observations of a synthetic closing use 9c1's measured times
+        # and confidences. Neither continuation token is a credited script word.
+        body = speech(SEGMENTS)[:-len(tokens(SEGMENTS[-1]['text']))]
+        scale = 56.72 / body[-1]['end']
+        self.body = [{**w, 'start': w['start'] * scale, 'end': w['end'] * scale,
+                      'probability': .999} for w in body]
+        self.segments = [*SEGMENTS[:-1], {**SEGMENTS[-1], 'text': 'À bientôt ! Jamm Immo ! Kër gu baax, xel mu dal !'}]
+        self.duration = 62.409
+        self.sound = [(0, 62.02)]
+        self.full, self.focus = [
+            [{'word': word, 'start': start / 24000, 'end': end / 24000, 'probability': p}
+             for word, start, end, p in zip(words, starts, ends, confidence)]
+            for words, starts, ends, confidence in [
+                ([' A', ' bientôt', ' Djam', ' Imo', ' suite', ' finale'],
+                 [1361280,1380480,1391520,1419360,1428960,1457280],
+                 [1380480,1391520,1419360,1428960,1457280,1488480],
+                 [.074,.999,.917,.998,.541,.7]),
+                ([' A', ' bientôt.', ' Djam', ' Imo,', ' suite', ' finale.'],
+                 [1358880,1381440,1404480,1419840,1440480,1465920],
+                 [1381440,1391040,1419840,1427520,1456800,1488480],
+                 [.534,.998,.699,.685,.720,.754]),
+            ]
+        ]
+
+    def compare(self, full, focus, sound=None, segments=None):
+        callback = Mock(return_value=focus)
+        result = align_with_signature_retry(self.segments if segments is None else segments, self.body + full, self.duration,
+                                            self.sound if sound is None else sound, callback)
+        callback.assert_called_once_with(self.body[-1]['end'])
+        return result
+
+    def test_corroborated_canonical_djam_imo_closing_preserves_source_rows_and_script(self):
+        originals = [[dict(row) for row in rows] for rows in (self.full, self.focus)]
+        result = self.compare(self.full, self.focus)
+        self.assertEqual(result['segments'][-1]['text'], self.segments[-1]['text'])
+        self.assertEqual(result['segments'][-1]['id'], 'signature')
+        self.assertEqual([self.full, self.focus], originals)
+
+    def test_corroboration_cannot_be_borrowed_from_another_decode_or_a_wrong_brand(self):
+        for which in range(2):
+            for index, change in [(2, {'word': 'Djan'}), (3, {'word': 'Imu'}),
+                                  (2, {'probability': .599}), (3, {'probability': float('nan')}),
+                                  (3, {'probability': None}), (1, {'word': 'après'}),
+                                  (3, {'start': 58.8}), (2, {'end': 58.89})]:
+                with self.subTest(which=which, index=index, change=change):
+                    captures = [[dict(row) for row in rows] for rows in (self.full, self.focus)]
+                    captures[which][index].update(change)
+                    with self.assertRaises(ValueError):
+                        self.compare(*captures)
+
+    def test_not_a_general_brand_alias_and_never_evidence_over_silence(self):
+        changed = [*SEGMENTS[:-1], {**SEGMENTS[-1], 'text': 'À bientôt Jamm Immo salut les amis du jour !'}]
+        with self.assertRaises(ValueError):
+            self.compare(self.full, self.focus, segments=changed)
+        for sound in [[(0,58.), (59.6,62.02)], [(0,59.54)]]:
+            with self.assertRaises(ValueError):
+                self.compare(self.full, self.focus, sound=sound)
+
+    def test_disjoint_brand_windows_or_duplicate_socials_boundary_do_not_corroborate(self):
+        shifted = [dict(r) for r in self.focus]
+        shifted[2].update(start=59.6, end=59.8)
+        shifted[3].update(start=59.8, end=60.)
+        shifted[4].update(start=60.05, end=60.75)
+        with self.assertRaises(ValueError):
+            self.compare(self.full, shifted)
+        self.body[0]['word'], self.body[1]['word'] = 'prochains', 'conseils'
+        with self.assertRaises(ValueError):
+            self.compare(self.full, self.focus)

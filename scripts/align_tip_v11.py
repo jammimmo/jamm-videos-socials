@@ -26,10 +26,11 @@ ASR_REVISION = '0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf'
 WORD_ALIGNMENT_METHOD = 'french-v11-word-anchors'
 SIGNATURE_RETRY_ALIGNMENT_METHOD = 'french-v11-word-anchors-signature-retry'
 SIGNATURE_PREROLL_SECONDS = .10
+FIXED_SIGNATURE_TEXT = 'À bientôt ! Jamm Immo ! Kër gu baax, xel mu dal !'
 GREETING_WINDOW_EVIDENCE = 'french-v11-pinned-greeting-window'
 GREETING_WORDS = ['salam', 'alikoum', 'nanga', 'def']
 MAX_GREETING_SECONDS = 4
-MIN_GREETING_ANCHOR_PROBABILITY = .60
+MIN_ALIGNMENT_ANCHOR_PROBABILITY = .60
 PHONE_WINDOW_EVIDENCE = 'french-v11-pinned-phone-window'
 PHONE_WORDS = ['plus', *(word for group in NUMBER_WORDS.values() for word in group.split())]
 PHONE_BOUNDARY_TOLERANCE_SECONDS = .10
@@ -369,19 +370,28 @@ def align(segments, words, duration, audible=None, *, defer_domain=False, signat
             'listenFor': ['greeting and signature in Wolof', 'voice and accent']}
 
 
-def canonical_signature_brand(tail, sound, duration):
+def canonical_signature_brand(tail, sound, duration, *, dakar=False):
     """Canonicalize two timed rows only within the fixed French closing phrase."""
     words = [tokens(row['word']) for row in tail]
+    first_forms = (['djam'], ['jam'], ['jamm']) if dakar else (['jam'], ['jamm'])
     pairs = [i for i in range(len(tail) - 1)
-             if words[i] in (['jam'], ['jamm']) and words[i + 1] in (['imo'], ['immo'])]
+             if words[i] in first_forms and words[i + 1] in (['imo'], ['immo'])]
     if len(pairs) != 1:
         return None
     i = pairs[0]
     first, second = tail[i:i + 2]
     if ([token for group in words[:i] for token in group] != ['a', 'bientot']
         or words[i:i + 2] == [['jamm'], ['immo']]
-        or tokens(first['word'] + ' ' + second['word']) != ['jamm', 'immo']
         or not 0 <= second['start'] - first['end'] <= .101):
+        return None
+    if dakar:
+        if (i != 2 or words[:2] != [['a'], ['bientot']]
+            or not re.fullmatch(r'djam[.,!?]?', first['word'].strip(), re.I)
+            or not re.fullmatch(r'imo[.,!?]?', second['word'].strip(), re.I)
+            or not supported_anchor_rows(tail[:4], sound, duration, weak_first=True)
+            or sum(left == ['a'] and right == ['bientot'] for left, right in zip(words, words[1:])) != 1):
+            return None
+    elif tokens(first['word'] + ' ' + second['word']) != ['jamm', 'immo']:
         return None
 
     # Keep distinct time ownership, including the farewell before the brand.
@@ -398,6 +408,26 @@ def canonical_signature_brand(tail, sound, duration):
         or any(voiced_overlap(sound, row['start'], row['end']) <= 0 for row in continuation)):
         return None
     return [*tail[:i], {**first, 'word': 'jamm'}, {**second, 'word': 'immo'}, *tail[i + 2:]]
+
+
+def corroborated_dakar_signature(segments, words, split, focused, boundary, sound, duration):
+    """Only the two French brand rows receive canonical spelling, on one measured tail."""
+    if (segments[-1]['text'] != FIXED_SIGNATURE_TEXT or segments[-2]['id'] != 'socials'
+        or not 0 < split < len(words) or words[split - 1]['end'] != boundary
+        or words[split]['start'] < boundary):
+        return None
+    observed = [token for row in words for token in tokens(row['word'])]
+    if sum(pair == ('prochains', 'conseils') for pair in zip(observed, observed[1:])) != 1:
+        return None
+    full = canonical_signature_brand(words[split:], sound, duration, dakar=True)
+    window = canonical_signature_brand(focused, sound, duration, dakar=True)
+    if full is None or window is None:
+        return None
+    # Each pair is recognized in its entirety on the same recording. Require
+    # corresponding brand rows to overlap in source time across the two decodes.
+    if any(max(a['start'], b['start']) >= min(a['end'], b['end']) for a, b in zip(full[2:4], window[2:4])):
+        return None
+    return window
 
 
 def align_with_signature_retry(segments, words, duration, sound, recognize_tail, *, defer_domain=False):
@@ -443,6 +473,8 @@ def align_with_signature_retry(segments, words, duration, sound, recognize_tail,
             # timed row separately. Recheck this one known split spelling on
             # the same focused decode, without borrowing full-pass words.
             normalized_tail = canonical_signature_brand(tail, sound, duration)
+            if normalized_tail is None:
+                normalized_tail = corroborated_dakar_signature(segments, words, split, tail, boundary, sound, duration)
             if normalized_tail is None:
                 raise
             try:
@@ -492,7 +524,7 @@ def voiced_overlap(sound, start, end):
     return sum(max(0, min(end, right) - max(start, left)) for left, right in sound)
 
 
-def supported_opening_rows(rows, sound, end, *, weak_first=False):
+def supported_anchor_rows(rows, sound, end, *, weak_first=False):
     previous = 0
     for index, row in enumerate(rows):
         if not isinstance(row, dict) or not isinstance(row.get('word'), str):
@@ -500,7 +532,7 @@ def supported_opening_rows(rows, sound, end, *, weak_first=False):
         start, last, probability = (row.get(key) for key in ('start', 'end', 'probability'))
         if (any(type(v) not in (int, float) or not math.isfinite(v) for v in (start, last, probability))
             or not previous <= start < last <= end or not 0 <= probability <= 1
-            or (not weak_first or index != 0) and probability < MIN_GREETING_ANCHOR_PROBABILITY
+            or (not weak_first or index != 0) and probability < MIN_ALIGNMENT_ANCHOR_PROBABILITY
             or voiced_overlap(sound, start, last) <= 0):
             return False
         previous = last
@@ -512,7 +544,7 @@ def missing_greeting_boundary(segments, words, duration, sound):
         or tokens(segments[0]['text']) != GREETING_WORDS or len(words) < 3 or not sound):
         return None
     hook = tokens(segments[1]['text'])[:3]
-    if (len(hook) != 3 or not supported_opening_rows(words[:3], sound, duration, weak_first=True)
+    if (len(hook) != 3 or not supported_anchor_rows(words[:3], sound, duration, weak_first=True)
         or [tokens(row['word']) for row in words[:3]] != [[word] for word in hook]
         or not 0 < words[0]['start'] <= MAX_GREETING_SECONDS):
         return None
@@ -525,7 +557,7 @@ def missing_greeting_boundary(segments, words, duration, sound):
 
 
 def measured_greeting(rows, boundary, sound):
-    if not isinstance(rows, list) or not 3 <= len(rows) <= 4 or not supported_opening_rows(rows, sound, boundary):
+    if not isinstance(rows, list) or not 3 <= len(rows) <= 4 or not supported_anchor_rows(rows, sound, boundary):
         return False
     groups = [tokens(row['word']) for row in rows]
     if any(len(group) != 1 for group in groups[:-1]) or (len(groups[-1]) != 1 and groups[-1] != ['nanga', 'def']):
