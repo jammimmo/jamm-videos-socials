@@ -4,17 +4,76 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { normalizeTipV11Narration } from './render-tip-v11.mjs';
-import { NORMALIZED_NARRATION_PROCESSING, readStagedPrivateReviewedNarration, stagePrivateReviewedNarration } from './tip-v11-reviewed-narration.mjs';
+import { normalizeTipV11Narration, padShortNgorNarration } from './render-tip-v11.mjs';
+import { NORMALIZED_NARRATION_PROCESSING, readStagedPrivateReviewedNarration, reviewedPcmData, stagePrivateReviewedNarration } from './tip-v11-reviewed-narration.mjs';
 
-function wav() {
-  const bytes = Buffer.alloc(44 + 60 * 48_000);
+function wav(samples = 60 * 24_000) {
+  const bytes = Buffer.alloc(44 + samples * 2);
   bytes.write('RIFF'); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVEfmt ', 8);
   bytes.writeUInt32LE(16, 16); bytes.writeUInt16LE(1, 20); bytes.writeUInt16LE(1, 22);
   bytes.writeUInt32LE(24_000, 24); bytes.writeUInt32LE(48_000, 28); bytes.writeUInt16LE(2, 32);
   bytes.writeUInt16LE(16, 34); bytes.write('data', 36); bytes.writeUInt32LE(bytes.length - 44, 40);
   return bytes;
 }
+
+test('Ngor tail padding preserves RIFF metadata and the original PCM through the last sample', () => {
+  const target = 58.5 * 24_000;
+  for (const missing of [60_001, 60_000, 1, 0, -1]) {
+    const original = wav(target - missing);
+    original.fill(0x2a, 44);
+    const metadata = Buffer.from([0x4a, 0x55, 0x4e, 0x4b, 3, 0, 0, 0, 7, 8, 9, 0]);
+    const tail = Buffer.from('LIST\x04\x00\x00\x00INFO', 'latin1');
+    const bytes = Buffer.concat([original.subarray(0, 36), metadata, original.subarray(36), tail]);
+    bytes.writeUInt32LE(bytes.length - 8, 4);
+    const before = Buffer.from(bytes);
+    const measured = padShortNgorNarration(bytes);
+    const expectedPadding = missing > 0 && missing <= 60_000 ? missing : 0;
+    assert.equal(measured.paddingSamples, expectedPadding);
+    assert.equal(measured.normalizedSeconds, (target - missing + expectedPadding) / 24_000);
+    assert.deepEqual(bytes, before);
+    if (!expectedPadding) {
+      assert.equal(measured.wav, bytes);
+      continue;
+    }
+    const { offset, length } = reviewedPcmData(measured.wav);
+    assert.equal(length, target * 2);
+    assert.deepEqual(measured.wav.subarray(8, offset - 4), bytes.subarray(8, offset - 4));
+    assert.deepEqual(measured.wav.subarray(offset, offset + length - expectedPadding * 2), original.subarray(44));
+    assert.deepEqual(measured.wav.subarray(offset + length - expectedPadding * 2, offset + length), Buffer.alloc(expectedPadding * 2));
+    assert.deepEqual(measured.wav.subarray(offset + length), tail);
+    assert.equal(padShortNgorNarration(measured.wav).wav, measured.wav);
+  }
+  const truncated = wav(target - 1).subarray(0, -2);
+  assert.throws(() => padShortNgorNarration(truncated), /Invalid normalized/);
+  truncated.writeUInt32LE(truncated.length - 8, 4);
+  assert.throws(() => padShortNgorNarration(truncated), /Invalid normalized/);
+});
+
+test('58.4 seconds of fresh Ngor PCM use one tempo pass and the padded WAV is reused exactly', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'jamm-ngor-padding-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const raw = join(directory, 'raw.wav');
+  const normalized = join(directory, 'normalized.wav');
+  const reused = join(directory, 'reused.wav');
+  const bytes = wav(58.4 * 24_000);
+  for (let i = 44; i < bytes.length; i += 2) bytes.writeInt16LE(i % 48 < 24 ? 3_000 : -3_000, i);
+  await writeFile(raw, bytes);
+  await assert.rejects(normalizeTipV11Narration(directory, raw, reused, {}), /cannot fit/);
+  await assert.rejects(normalizeTipV11Narration(directory, raw, reused, { alreadyNormalized: true, exactTourV8: true }),
+    /Invalid normalized source narration/);
+  const result = await normalizeTipV11Narration(directory, raw, normalized, { exactTourV8: true });
+  assert.equal(result.rawSeconds, 58.4);
+  assert.equal(result.tempo, 1.03);
+  assert.equal(result.normalizedSeconds, 58.5);
+  assert.ok(result.paddingSamples > 0 && result.paddingSamples <= 60_000);
+  const output = await readFile(normalized);
+  const { offset, length } = reviewedPcmData(output);
+  assert.equal(length, 1_404_000 * 2);
+  assert.deepEqual(output.subarray(offset + length - result.paddingSamples * 2, offset + length), Buffer.alloc(result.paddingSamples * 2));
+  const second = await normalizeTipV11Narration(directory, normalized, reused, { alreadyNormalized: true, exactTourV8: true });
+  assert.equal(second.tempo, 1);
+  assert.deepEqual(await readFile(reused), output);
+});
 const delivery = { jobId: '27ab1a67-94d2-4500-8a4c-67c13b21bd42', callbackToken: 'a'.repeat(64),
   callbackUrl: 'https://jammimmo-estate-flow.jammimmo221admin.workers.dev/api/tour/callback?attempt=d8bba724-d36b-47e0-81e4-9c9cb5e7bc4e' };
 

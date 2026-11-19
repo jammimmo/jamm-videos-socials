@@ -29,29 +29,33 @@ export function parseReviewedNarration(value, actualRendererSha) {
     ...(privateAttempt && { source: 'private-attempt' }) };
 }
 
-export function isReviewedPcm(wav) {
+export function reviewedPcmData(wav) {
   if (wav.length < 44 || wav.toString('ascii', 0, 4) !== 'RIFF'
-    || wav.readUInt32LE(4) !== wav.length - 8 || wav.toString('ascii', 8, 12) !== 'WAVE') return false;
+    || wav.readUInt32LE(4) !== wav.length - 8 || wav.toString('ascii', 8, 12) !== 'WAVE') return null;
   let validFormat = false;
-  let validData = false;
+  let data = null;
   let offset = 12;
   while (offset + 8 <= wav.length) {
     const type = wav.toString('ascii', offset, offset + 4);
     const length = wav.readUInt32LE(offset + 4);
     const body = offset + 8;
-    if (body + length > wav.length) return false;
+    if (body + length > wav.length) return null;
     if (type === 'fmt ') {
       if (validFormat || length < 16 || wav.readUInt16LE(body) !== 1 || wav.readUInt16LE(body + 2) !== 1
         || wav.readUInt32LE(body + 4) !== 24_000 || wav.readUInt32LE(body + 8) !== 48_000
-        || wav.readUInt16LE(body + 12) !== 2 || wav.readUInt16LE(body + 14) !== 16) return false;
+        || wav.readUInt16LE(body + 12) !== 2 || wav.readUInt16LE(body + 14) !== 16) return null;
       validFormat = true;
     } else if (type === 'data') {
-      if (!validFormat || validData || length < 2 || length % 2 !== 0) return false;
-      validData = true;
+      if (!validFormat || data || length < 2 || length % 2 !== 0) return null;
+      data = { offset: body, length };
     }
     offset = body + length + length % 2;
   }
-  return validFormat && validData && offset === wav.length;
+  return offset === wav.length ? data : null;
+}
+
+export function isReviewedPcm(wav) {
+  return reviewedPcmData(wav) !== null;
 }
 
 function verifyReviewedWav(bytes, pin) {
