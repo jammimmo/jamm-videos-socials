@@ -61,6 +61,28 @@ class SourceScoringTest(unittest.TestCase):
         self.assertEqual(diagnostic['outcome'], 'completed')
         self.assertGreater(diagnostic['recognized_row_count'], 0)
 
+    def test_inspection_never_changes_receipt_outcome_and_capped_rows_keep_their_commitment(self):
+        ordinary = self.run_source()
+        self.assertNotIn('inspection_evidence', ordinary)
+        rows = [(w['word'], w['start'], w['end'], .95) for w in speech(self.plan['segments'])]
+        def run(nonce):
+            with TemporaryDirectory() as folder:
+                return score_source(self.plan, self.wav, Path(folder), lambda _: rows, lambda _: [],
+                                    inspection_nonce=nonce, inspection_attempt=1)
+        full = run('a' * 32)
+        self.assertEqual(full['segments'], ordinary['segments'])
+        original = full['inspection_evidence']
+        with patch('tip_source_inspection.MAX_TRACE_BYTES', 99):
+            limited = run('b' * 32)['inspection_evidence']
+        self.assertTrue(limited['truncated'])
+        self.assertEqual(original['scenes'], limited['scenes'])
+        a, b = original['calls'][0], limited['calls'][0]
+        self.assertEqual(a['streamDigest'], b['streamDigest'])
+        self.assertNotEqual(a['rows'][0][4], b['rows'][0][4])
+        self.assertEqual(b['omittedRows'], b['rowCount'] - len(b['rows']))
+        self.assertGreater(b['omittedRows'], 0)
+        self.assertEqual(b['pcmSha256'], original['pcmSha256'])
+
     def test_scores_a_single_corresponding_fixed_socials_point_as_an_edit_only(self):
         from align_tip_v11 import align, audible_windows
         from audit_tip_v11_speech import FIXED_SOCIALS_WORDS

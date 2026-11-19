@@ -55,6 +55,7 @@ export function buildSourceScoringInput(input) {
 function main() {
   const { values } = parseArgs({ options: {
     draft: { type: 'string' }, wav: { type: 'string' }, report: { type: 'string' },
+    'inspection-nonce': { type: 'string' }, 'inspection-attempt': { type: 'string' },
   } });
   if (!values.draft || !values.wav || !values.report) {
     throw new Error('Usage: node scripts/score-tip-source.mjs --draft draft.json --wav normalized.wav --report source-speech.json');
@@ -63,16 +64,23 @@ function main() {
     .decode(readLocalFile(values.draft, DRAFT_LIMIT))));
   const wav = readLocalFile(values.wav, WAV_LIMIT);
   if (!isReviewedPcm(wav)) throw new Error('Expected a complete 24 kHz mono PCM16 WAV');
+  const inspectionArgs = [];
+  if (values['inspection-nonce'] !== undefined || values['inspection-attempt'] !== undefined) {
+    if (!/^[0-9a-f]{32}$/.test(values['inspection-nonce']) || !['1', '2'].includes(values['inspection-attempt'])) {
+      throw new Error('Invalid private inspection options');
+    }
+    inspectionArgs.push('--inspect-trace', values['inspection-nonce'], values['inspection-attempt']);
+  }
   const scored = spawnSync(process.env.TIP_SOURCE_PYTHON || 'python3', [
-    fileURLToPath(new URL('./score_tip_source.py', import.meta.url)),
+    fileURLToPath(new URL('./score_tip_source.py', import.meta.url)), ...inspectionArgs,
   ], {
     input: Buffer.concat([Buffer.from(`${JSON.stringify(input)}\n`), wav]),
-    encoding: 'utf8', maxBuffer: 128 * 1024, timeout: 360_000,
+    encoding: 'utf8', maxBuffer: inspectionArgs.length ? 1024 * 1024 : 128 * 1024, timeout: 360_000,
     env: { ...process.env, HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1' },
   });
   if (scored.status !== 0) throw new Error('V11 source scoring could not read or process this WAV');
   const result = JSON.parse(scored.stdout);
-  writeFileSync(values.report, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+  writeFileSync(values.report, `${JSON.stringify(result, null, inspectionArgs.length ? undefined : 2)}\n`, { mode: 0o600, flag: 'wx' });
   return result.status === 'matched' ? 0 : 1;
 }
 

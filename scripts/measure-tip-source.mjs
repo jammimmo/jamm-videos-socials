@@ -34,10 +34,12 @@ export async function readScoreReport(report, exitCode) {
   return speech;
 }
 
-export async function score(draft, wav, report, env) {
+export async function score(draft, wav, report, env, inspection) {
   let exitCode = 0;
   try {
-    await execute(process.execPath, ['scripts/score-tip-source.mjs', '--draft', draft, '--wav', wav, '--report', report], {
+    const args = ['scripts/score-tip-source.mjs', '--draft', draft, '--wav', wav, '--report', report];
+    if (inspection) args.push('--inspection-nonce', inspection.nonce, '--inspection-attempt', String(inspection.attempt));
+    await execute(process.execPath, args, {
       cwd: root, env: { ...env, HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1' }, timeout: 370_000, maxBuffer: 128 * 1024,
     });
   } catch (error) {

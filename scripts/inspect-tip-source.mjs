@@ -1,9 +1,11 @@
+import { randomBytes } from 'node:crypto';
 import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { measureSource, score } from './measure-tip-source.mjs';
 import { exactKeys, fetchFailureCapsule, validCapsuleIdentity } from './source-failure-capsule.mjs';
 import { assertTipSourceRuntime } from './tip-runtime.mjs';
+import { inspectionLogLines, projectInspection } from './tip-source-inspection.mjs';
 
 function readInspectDispatch(event, env) {
   const p = event?.client_payload;
@@ -49,17 +51,23 @@ export async function inspectTipSource(event, env, dependencies = {}) {
     const wavPath = resolve(scratch, 'source.wav');
     await writeFile(draftPath, JSON.stringify(capsule.draft), { flag: 'wx', mode: 0o600 });
     await writeFile(wavPath, capsule.wav, { flag: 'wx', mode: 0o600 });
+    const nonce = randomBytes(16).toString('hex');
+    const attempts = [];
     const measureExact = async (...args) => {
-      const report = await (dependencies.score ?? score)(...args);
+      const attempt = attempts.length + 1;
+      attempts.push({ status: 'unavailable', attempt });
+      const report = await (dependencies.score ?? score)(...args, { nonce, attempt });
       if (report?.contract !== 'tip-v11-fr-source-speech-v2' || report.narration_wav_sha256 !== identity.wavSha256
         || report.draft_sha256 !== capsule.scoringInput.draft_sha256
         || report.source_script_sha256 !== capsule.scoringInput.source_script_sha256) throw new Error('Replay input mismatch');
+      attempts[attempt - 1] = projectInspection(report.inspection_evidence, { nonce, attempt, wavSha256: identity.wavSha256,
+        draftSha256: capsule.scoringInput.draft_sha256, scriptSha256: capsule.scoringInput.source_script_sha256 });
       return report;
     };
     const result = await measureSource(measureExact, draftPath, wavPath, scratch, offline, { inspectComparison: true });
     const replay = result.diagnostic ? { ...result.diagnostic, ...(result.comparison && { comparison: result.comparison }) }
       : { stage: 'measured_matched', measurementAttempts: result.measurementAttempts };
-    return { status: 'inspected', wavKind: capsule.wavKind, original: capsule.diagnostic, replay };
+    return { status: 'inspected', wavKind: capsule.wavKind, original: capsule.diagnostic, replay, inspection: { nonce, attempts } };
   } catch {
     return { status: 'unavailable', stage };
   } finally {
@@ -73,7 +81,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
     if (eventBytes.length > 32 * 1024) throw new Error();
     const event = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(eventBytes));
     const result = await inspectTipSource(event, process.env);
-    process.stdout.write(`${JSON.stringify(result)}\n`);
+    for (const line of inspectionLogLines(result)) process.stdout.write(line + '\n');
     if (result.status !== 'inspected' || result.replay.stage === 'measurement_unavailable') process.exitCode = 1;
   } catch {
     process.stderr.write('Private source inspection unavailable\n');
