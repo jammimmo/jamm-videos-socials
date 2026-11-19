@@ -407,6 +407,18 @@ def align_with_signature_retry(segments, words, duration, sound, recognize_tail,
         if voiced_tail < .9:
             error.reason = 'signature_tail_too_quiet'
             raise
+        # Use the full recording's own closing rows if they form a complete
+        # suffix after the measured socials endpoint. Keep every original row.
+        split = next((i for i, word in enumerate(words) if word['end'] > boundary), len(words))
+        if (0 < split < len(words) and words[split - 1]['end'] == boundary
+            and words[split]['start'] >= boundary):
+            full_tail = canonical_signature_brand(words[split:], sound, duration)
+            if full_tail is not None:
+                try:
+                    return align(segments, words[:split] + full_tail, duration, sound, defer_domain=defer_domain)
+                except AlignmentFailure:
+                    # The originally eligible focused retry still runs.
+                    pass
         # Keep the original French body and exact contact evidence. A second
         # decode is useful only if the cropped audio supplies a closing anchor.
         tail = [word for word in recognize_tail(boundary)
