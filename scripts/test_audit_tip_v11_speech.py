@@ -1054,6 +1054,19 @@ class FullAudioSocialsCreditTest(unittest.TestCase):
 
     def test_corroboration_is_limited_to_the_same_point_brand_span_and_exact_suffix(self):
         from copy import deepcopy
+        from audit_tip_v11_speech import timed_rows_digest
+
+        def assert_only_full_evidence(result):
+            self.assertEqual(result['status'], 'matched')
+            row = result['segments'][1]
+            proof = row['measurement']
+            self.assertEqual(proof['method'], 'ordinary_untimed_words_scored_as_edits_v1')
+            self.assertEqual((row['observed_words'].count(None), row['observed_words'][1]), (1, None))
+            self.assertEqual((proof['edit_count'], proof['point_words_credited']), (1, 0))
+            self.assertEqual(proof['full_timed_rows_sha256'], timed_rows_digest(self.fixture.full))
+            self.assertNotIn('focused_timed_rows_sha256', proof)
+            self.assertNotIn('observed_sha256', row)
+
         for name, row, col, replacement in [
             ('wrong fused word', 2, 0, ' Jamina'), ('wrong suffix', 4, 0, ' autres'),
             ('weak suffix', 4, 3, .599), ('shifted sur', 3, 1, self.focused()[3][1] + 481 / 24000), ('fused span misses Imo', 2, 2, .74),
@@ -1063,8 +1076,8 @@ class FullAudioSocialsCreditTest(unittest.TestCase):
                 crop = self.focused()
                 crop[row][col] = replacement
                 result, _ = self.fixture.measure(crop=crop)
-                self.assertNotEqual(result['status'], 'matched')
-        self.assertNotEqual(self.fixture.measure(crop=self.focused(-481))[0]['status'], 'matched')
+                assert_only_full_evidence(result)
+        assert_only_full_evidence(self.fixture.measure(crop=self.focused(-481))[0])
         first, last = [round(v * 24000) for v in self.fixture.full[4][1:3]]
         muted = self.fixture.decoded[:first * 2] + bytes(2 * (last - first)) + self.fixture.decoded[last * 2:]
         self.assertNotEqual(self.fixture.measure(crop=self.focused(), pcm=muted)[0]['status'], 'matched')
@@ -1073,6 +1086,100 @@ class FullAudioSocialsCreditTest(unittest.TestCase):
             full[i][3] = .599
             with self.subTest(weak_full_row=i):
                 self.assertNotEqual(self.fixture.measure(full=full, crop=self.focused())[0]['status'], 'matched')
+        for index, spelling in ((3, ' Sam'), (4, ' Imu')):
+            with self.subTest(contradictory_full_brand=spelling):
+                full = deepcopy(self.fixture.full)
+                full[index][0] = spelling
+                result, _ = self.fixture.measure(full=full, crop=self.focused())
+                self.assertNotEqual(result['status'], 'matched')
+
+
+class OrdinaryPointTest(unittest.TestCase):
+    words = 'comparez soigneusement chaque offre pendant votre visite puis consultez calmement le dossier avant toute signature'.split()
+
+    def audit_points(self, word_lists, points, *, segments=None, silence=None, preserve=True, change=None):
+        from audit_tip_v11_speech import SAMPLE_RATE
+        parts, rows, offset = [], [], 0
+        for i, words in enumerate(word_lists):
+            start = offset / 4
+            for index, word in enumerate(words):
+                left = offset / 4
+                rows.append([word, left, left if (i, index) in points else left + .25, .98])
+                offset += 1
+            parts.append({'id': ['step1', 'step2'][i], 'text': ' '.join(words), 'caption': 'Conseil',
+                          'start': start, 'end': offset / 4})
+        if change:
+            change(rows, parts)
+        if segments:
+            parts[0].update(segments)
+        audio = bytearray(struct.pack('<h', 512) * (offset * SAMPLE_RATE // 4))
+        if silence is not None:
+            lo, hi = (round(t * SAMPLE_RATE) * 2 for t in rows[silence][1:3])
+            audio[lo:hi] = bytes(hi-lo)
+        pcm = bytes(audio)
+        evidence = {'status': 'matched', 'lag_samples': 0, 'decoded_pcm_sha256': sha256(pcm)}
+        with TemporaryDirectory() as folder:
+            result = measure_final_french_speech(parts, pcm, {'passed': True, 'lag_samples': 0}, folder,
+                recognize=lambda _: rows, preservation=evidence if preserve else None)
+        return result, rows
+
+    def test_separate_and_multiple_points_cost_one_edit_each_in_real_final_pcm(self):
+        from audit_tip_v11_speech import timed_rows_digest
+        report, rows = self.audit_points([self.words, self.words], {(0, 2), (0, 6)})
+        self.assertEqual(report['status'], 'matched')  # 2/15 scene, 2/30 global.
+        first = report['segments'][0]
+        self.assertEqual(first['observed_words'], [None if i in (2, 6) else w for i, w in enumerate(self.words)])
+        proof = first['measurement']
+        self.assertEqual(proof['method'], 'ordinary_untimed_words_scored_as_edits_v1')
+        self.assertEqual(proof['expected_token_indices'], [2, 6])
+        self.assertEqual(proof['full_row_indices'], [2, 6])
+        self.assertEqual(proof['point_samples'], [12000, 36000])
+        self.assertEqual(proof['full_timed_rows_sha256'], timed_rows_digest(rows))
+        self.assertEqual(proof['decoded_pcm_sha256'], report['decoded_pcm_sha256'])
+        self.assertEqual((proof['edit_count'], proof['point_words_credited']), (2, 0))
+        self.assertNotIn('observed_sha256', first)
+        split, _ = self.audit_points([self.words, self.words], {(0, 2), (1, 6)})
+        self.assertEqual(split['status'], 'matched')
+        self.assertEqual([r['measurement']['full_row_indices'] for r in split['segments']], [[2], [21]])
+
+    def test_scene_and_global_percentages_are_independently_enforced(self):
+        scene, _ = self.audit_points([self.words, self.words], {(0, 2), (0, 6), (0, 10)})
+        self.assertEqual(scene['segments'][0]['status'], 'inconclusive')
+        overall, _ = self.audit_points([self.words, self.words], {(0, 2), (0, 6), (1, 6)})
+        self.assertEqual([r['status'] for r in overall['segments']], ['matched', 'matched'])
+        self.assertEqual(overall['status'], 'inconclusive')
+
+    def test_only_unique_interior_ordinary_points_with_voiced_neighbors_are_scored(self):
+        for word in ['pas', 'deux', '221', 'Jamm', 'whatsapp', 'Dakar']:
+            words = [*self.words[:2], word, *self.words[3:]]
+            with self.subTest(token=word):
+                self.assertEqual(self.audit_points([words], {(0, 2)})[0]['status'], 'inconclusive')
+        for identity in ('phone','domain','greeting','signature'):
+            with self.subTest(scene=identity):
+                self.assertEqual(self.audit_points([self.words], {(0, 2)}, segments={'id': identity})[0]['status'],
+                                 'inconclusive')
+        repeated = self.words + self.words
+        cases = [
+            ([repeated], {(0, 2)}, {}),
+            ([self.words], {(0, 0)}, {}),
+            ([self.words], {(0, len(self.words)-1)}, {}),
+            ([self.words], {(0, 2), (0, 3)}, {}),
+            ([self.words], {(0, 2)}, {'silence': 1}),
+            ([self.words], {(0, 2)}, {'preserve': False}),
+            ([self.words], {(0, 2)}, {'change': lambda rows, _: rows[1].__setitem__(3, .59)}),
+            ([self.words], {(0, 2)}, {'change': lambda rows, _: rows[2].__setitem__(0, 'autre')}),
+            ([self.words], {(0, 2)}, {'change': lambda rows, _: rows[2].__setitem__(3, .59)}),
+        ]
+        for i, (words, points, kwargs) in enumerate(cases):
+            with self.subTest(case=i):
+                self.assertEqual(self.audit_points(words, points, **kwargs)[0]['status'], 'inconclusive')
+        from align_tip_v11 import caption_lines, tokens
+        first_line = caption_lines(' '.join(self.words))[0]
+        cue_index = len(tokens(first_line))
+        self.assertLess(cue_index, len(self.words)-1)
+        cue, _ = self.audit_points([self.words], {(0, cue_index)},
+                                   change=lambda _rows, parts: parts[0].pop('caption'))
+        self.assertEqual(cue['status'], 'inconclusive')
 
 
 if __name__ == '__main__':

@@ -195,7 +195,7 @@ class SourceScoringTest(unittest.TestCase):
             self.assertNotIn('private', str(error.exception.detail))
         rows = [(w['word'], w['start'], w['end'], .95) for w in speech(self.plan['segments'])]
         index = next(i for i, w in enumerate(rows) if w[0] == 'commence')
-        rows[index] = ('commence', rows[index][1], rows[index][1], .99)
+        rows[index] = ('non', rows[index][1], rows[index][1], .99)
         source = self.run_source(rows=rows)
         self.assertEqual(source['reason'], 'recognition_or_timing_inconclusive')
         self.assertEqual(source['segments'], [])
