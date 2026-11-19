@@ -306,6 +306,12 @@ def canonical_fixed_brand_words(identity, expected, actual, rows):
     return actual[:index] + ['jamm', 'immo'] + actual[index + 2:]
 
 
+def measured_dakar_brand_pair(rows, index):
+    left, right = rows[index:index + 2]
+    return (left[0].strip().lower() == 'djam' and right[0].strip().lower() == 'imo'
+            and min(left[3], right[3]) >= MIN_WORD_PROBABILITY)
+
+
 def dakar_brand_spelling_index(segment, expected, actual, rows):
     """The Dakar French ASR spelling Djam Imo is accepted only in the two fixed calls to action."""
     identity = segment['id']
@@ -318,11 +324,7 @@ def dakar_brand_spelling_index(segment, expected, actual, rows):
         if normalized_words(identity, text) != [word] or not previous <= start < end <= segment['end']:
             return None
         previous = end
-    left, right = rows[index:index + 2]
-    if (left[0].strip().lower() != 'djam' or right[0].strip().lower() != 'imo'
-        or min(left[3], right[3]) < MIN_WORD_PROBABILITY):
-        return None
-    return index
+    return index if measured_dakar_brand_pair(rows, index) else None
 
 
 def fixed_fused_brand_index(segment, expected, actual, rows):
@@ -1186,7 +1188,7 @@ def verify_socials_scene_samples(decoded_pcm, lag_samples, directory, segments, 
         return None
 
 
-def fixed_socials_point(rows, first, cut, offset, limit, decoded_pcm, *, focused):
+def fixed_socials_point(rows, first, cut, offset, limit, decoded_pcm, *, focused, fused_context=False):
     """Validate one untimed interior word while keeping its two neighbors distinct."""
     if not isinstance(rows, list) or not 1 <= len(rows) <= MAX_RECOGNIZED_WORDS:
         return None
@@ -1208,14 +1210,17 @@ def fixed_socials_point(rows, first, cut, offset, limit, decoded_pcm, *, focused
             or (start < end and left == right)):
             return None
         if first <= left < cut:
-            if (right > cut or probability < MIN_WORD_PROBABILITY
+            # In the alternate focused view one literal fused interval can
+            # corroborate placement; it never supplies any reported word.
+            uncredited = fused_context and len(scene) == 2 and text.strip().lower() == 'jamimo'
+            if (right > cut or (probability < MIN_WORD_PROBABILITY and not uncredited)
                 or not re.fullmatch(r'[^\W\d_]+[.,!?]?', text.strip())):
                 return None
             if left < right and not any(audible_windows(decoded_pcm[left * 2:right * 2], SAMPLE_RATE)):
                 return None
             scene.append(row)
             indices.append(index)
-    if len(scene) != len(FIXED_SOCIALS_WORDS) or points != indices[1:2]:
+    if len(scene) != len(FIXED_SOCIALS_WORDS) - int(fused_context) or points != indices[1:2]:
         return None
     point = round(scene[1][1] * SAMPLE_RATE) + offset
     if (not first < point < cut or scene[1][0].strip().lower() != 'aussi'
@@ -1224,15 +1229,44 @@ def fixed_socials_point(rows, first, cut, offset, limit, decoded_pcm, *, focused
         return None
     observed = segment_words('socials', scene)
     expected = list(FIXED_SOCIALS_WORDS)
+    bounds = [(round(row[1] * SAMPLE_RATE) + offset, round(row[2] * SAMPLE_RATE) + offset) for row in scene]
+    row_words = [normalized_words('socials', row[0]) for row in scene]
+    if fused_context:
+        if (not focused or scene[2][0].strip().lower() != 'jamimo'
+            or row_words != [[word] for word in [*expected[:2], 'jamimo', *expected[4:]]]):
+            return None
+        return {'index': points[0], 'point': point, 'bounds': bounds, 'fused_probability': scene[2][3]}
     actual = canonical_fixed_brand_words('socials', expected, observed, scene)
     if actual != expected:
         # Djam from the full recording can trigger a check only in the exact
-        # observed context. The focused brand must independently pass the
-        # existing normalization; the global spelling never earns brand credit.
+        # observed context. Its credit requires separate corroboration below.
         if focused or observed != [*expected[:2], 'djam', 'imo', *expected[4:]]:
             return None
-    return {'index': points[0], 'point': point, 'actual': actual,
-            'brand_min_probability': min(scene[2][3], scene[3][3])}
+    return {'index': points[0], 'point': point, 'actual': actual, 'bounds': bounds, 'row_words': row_words,
+            'dakar_pair': measured_dakar_brand_pair(scene, 2), 'brand_min_probability': min(scene[2][3], scene[3][3])}
+
+
+def full_socials_point_observation(full, focused):
+    expected = list(FIXED_SOCIALS_WORDS)
+    full_spelling = [*expected[:2], 'djam', 'imo', *expected[4:]]
+    if not full['dakar_pair'] or full['row_words'] != [[word] for word in full_spelling] or full['actual'] != full_spelling:
+        return None
+    source, crop = full['bounds'], focused['bounds']
+    # Pinned faster-whisper aligns words on 50 timestamp steps per second.
+    # Keep both original points and the uncredited brand interval unchanged.
+    step = SAMPLE_RATE // 50
+    delta = focused['point'] - full['point']
+    if abs(delta) > step or abs(source[4][0] - crop[3][0]) > step:
+        return None
+    corresponding = [(source[0], crop[0]), (source[2], crop[2]), (source[3], crop[2]), *zip(source[4:], crop[3:])]
+    if any(max(left[0], right[0]) >= min(left[1], right[1]) for left, right in corresponding):
+        return None
+    reported = [*full['actual'][:1], None, 'jamm', 'immo', *full['actual'][4:]]
+    return reported, {
+        'credited_words_source': 'full_audio', 'focused_point_sample': focused['point'], 'point_delta_samples': delta,
+        'full_brand_min_probability': full['brand_min_probability'], 'focused_fused_interval_samples': list(crop[2]),
+        'focused_fused_probability': focused['fused_probability'], 'focused_brand_words_credited': 0,
+    }
 
 
 def timed_rows_digest(rows):
@@ -1275,9 +1309,16 @@ def verify_untimed_socials_samples(decoded_pcm, lag_samples, directory, segments
         return None
     start, end, window_rows, window_wav_sha = window
     focused = fixed_socials_point(window_rows, first, cut, start, (end - start) / SAMPLE_RATE, decoded_pcm, focused=True)
-    if focused is None or focused['point'] != full['point']:
-        return None
-    observed = [*focused['actual'][:1], None, *focused['actual'][2:]]
+    if focused is not None and focused['point'] == full['point']:
+        observed = [*focused['actual'][:1], None, *focused['actual'][2:]]
+        evidence = {'focused_brand_min_probability': focused['brand_min_probability']}
+    else:
+        focused = fixed_socials_point(window_rows, first, cut, start, (end - start) / SAMPLE_RATE, decoded_pcm,
+                                     focused=True, fused_context=True)
+        corroborated = full_socials_point_observation(full, focused) if focused is not None else None
+        if corroborated is None:
+            return None
+        observed, evidence = corroborated
     edits = speech_edits(expected, observed)
     if (edits != 1 or edits * 100 > len(expected) * (100 - MIN_SEGMENT_ACCURACY_PERCENT)
         or protected_speech(observed) != protected_speech(expected)):
@@ -1293,8 +1334,7 @@ def verify_untimed_socials_samples(decoded_pcm, lag_samples, directory, segments
                 'focused_timed_rows_sha256': timed_rows_digest(window_rows),
                 'full_wav_sha256': sha256(wav), 'decoded_pcm_sha256': sha256(decoded_pcm),
                 'window_wav_sha256': window_wav_sha, 'window_pcm_sha256': sha256(decoded_pcm[start * 2:end * 2]),
-                'focused_brand_min_probability': focused['brand_min_probability'],
-                'audible_timed_french_rows': len(observed) - 1,
+                **evidence, 'audible_timed_french_rows': len(observed) - 1,
             }}
 
 
