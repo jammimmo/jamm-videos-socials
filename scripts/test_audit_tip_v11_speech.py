@@ -825,6 +825,78 @@ class V11FinalSpeechTest(unittest.TestCase):
         expected_count = report['segments'][2]['expected_token_count']
         self.assertEqual(report['segments'][2]['observed_token_count'], expected_count)
 
+    def test_final_phone_field_counts_only_the_uncertain_spoken_prefix_as_an_edit(self):
+        from audit_tip_v11_speech import FIXED_CONTACT_WORDS, FIXED_SOCIALS_WORDS, PHONE_WORDS
+        rate, lag = 24000, 750
+        scenes = [
+            {'id': 'contact', 'text': ' '.join(FIXED_CONTACT_WORDS), 'start': 0, 'end': 3},
+            {'id': 'phone', 'text': ' '.join(PHONE_WORDS), 'start': 3, 'end': 9},
+            {'id': 'socials', 'text': ' '.join(FIXED_SOCIALS_WORDS), 'start': 9, 'end': 13},
+        ]
+        contact = [(word, i / 4, (i + 1) / 4, .95) for i, word in enumerate(FIXED_CONTACT_WORDS)]
+        social = [(word, 9 + i / 4, 9 + (i + 1) / 4, .95) for i, word in enumerate(FIXED_SOCIALS_WORDS)]
+        groups = ['Plus', '221', '76', '944', '48', '49']
+        full = [(word, i, i + 1, .49 if i == 0 else .91) for i, word in enumerate(groups)]
+        crop = [(word, left, right, .57 if left == 0 else .92) for word, left, right, _ in full]
+        pcm = struct.pack('<h', 512) * (13 * rate + lag)
+        first, last = 3 * rate + lag, 9 * rate + lag
+
+        def audit_field(global_rows=full, local_rows=crop, samples=pcm, parts=scenes, preservation='valid'):
+            timed = [*contact, *((w, 3 + a, 3 + b, q) for w, a, b, q in global_rows), *social]
+            shifted = [(w, a + lag / rate, b + lag / rate, q) for w, a, b, q in timed]
+            def recognize(path):
+                with wave.open(str(path), 'rb') as handle:
+                    self.assertEqual(handle.readframes(handle.getnframes()), samples[first * 2:last * 2])
+                return local_rows
+            with TemporaryDirectory() as directory:
+                return measure_final_french_speech(parts, samples, {'passed': True, 'lag_samples': lag},
+                    directory, lambda _: shifted, recognize, preservation=({
+                        'status': 'matched', 'lag_samples': lag, 'decoded_pcm_sha256': sha256(samples)
+                    } if preservation == 'valid' else preservation))
+
+        result = audit_field()
+        self.assertEqual(result['status'], 'matched')
+        phone = result['segments'][1]
+        self.assertEqual(phone['observed_words'], [None, *PHONE_WORDS[1:]])
+        self.assertNotIn('observed_sha256', phone)
+        proof = phone['measurement']
+        self.assertEqual(proof['method'], 'fixed_phone_plus_scored_as_edit_v1')
+        self.assertIs(proof['visible_phone_required'], True)
+        self.assertEqual((proof['start_sample'], proof['end_sample']), (first, last))
+        self.assertEqual(proof['decoded_pcm_sha256'], sha256(pcm))
+        self.assertEqual(proof['pcm_sha256'], sha256(pcm[first * 2:last * 2]))
+        self.assertEqual(proof['prefix_probability'], .57)
+
+        for stream, rows in [('global_rows', full), ('local_rows', crop)]:
+            alterations = {
+                'missing prefix': rows[1:], 'symbol': [('+', *rows[0][1:]), *rows[1:]],
+                'negation': [('sans', *rows[0][1:]), *rows[1:]],
+                'zero prefix': [('Plus', 0, 0, .5), *rows[1:]],
+                'no evidence': [], 'duplicate': [rows[0], *rows],
+                'wrong country': [rows[0], ('222', *rows[1][1:]), *rows[2:]],
+                'wrong final group': [*rows[:-1], ('48', *rows[-1][1:])],
+                'missing group': rows[:-1], 'weak number': [*rows[:-1], ('49', 5, 6, .59)],
+                'overlap': [rows[0], ('221', .75, 2, .99), *rows[2:]],
+            }
+            for case, altered in alterations.items():
+                with self.subTest(stream=stream, case=case):
+                    self.assertEqual(audit_field(**{stream: altered})['status'], 'inconclusive')
+        for offset in (0, 3):
+            left = first + offset * rate
+            muted = pcm[:left * 2] + bytes(rate * 2) + pcm[(left + rate) * 2:]
+            self.assertEqual(audit_field(samples=muted)['status'], 'inconclusive')
+        early = [('Plus', 0, .4, .49), *full[1:]]
+        late = [('Plus', .5, 1, .57), *crop[1:]]
+        self.assertEqual(audit_field(global_rows=early, local_rows=late)['status'], 'inconclusive')
+        bad_digest = {'status': 'matched', 'lag_samples': lag, 'decoded_pcm_sha256': '0' * 64}
+        strong = [('Plus', 0, 1, .95), *crop[1:]]
+        for evidence in (None, bad_digest):
+            with self.subTest(preservation=evidence):
+                self.assertEqual(audit_field(preservation=evidence)['status'], 'inconclusive')
+                self.assertEqual(audit_field(local_rows=strong, preservation=evidence)['segments'][1]['status'], 'matched')
+        other_cta = [*scenes[:2], {**scenes[2], 'text': scenes[2]['text'] + ' demain'}]
+        self.assertEqual(audit_field(parts=other_cta)['segments'][1]['status'], 'inconclusive')
+
     def test_phone_context_requires_actual_confident_number_without_relying_on_later_brand_spelling(self):
         scenes = [
             {'id': 'contact', 'text': 'Vous pouvez nous appeler ou nous écrire sur WhatsApp au même numéro.',

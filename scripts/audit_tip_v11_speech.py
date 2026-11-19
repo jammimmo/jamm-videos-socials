@@ -21,6 +21,7 @@ from align_tip_v11 import (
 
 CONTRACT = 'tip-v11-fr-final-speech-v2'
 SOURCE = 'final_mp4_pcm_s16le_mono_24khz'
+PHONE_PREFIX_METHOD = 'fixed_phone_plus_scored_as_edit_v1'
 SAMPLE_RATE = 24_000
 EXCLUDED_SEGMENTS = ('greeting', 'signature')
 MAX_RECOGNIZED_WORDS = 500
@@ -47,6 +48,7 @@ HOOK_QUIET_MIN_TOTAL = SAMPLE_RATE * 3 // 10
 FIXED_BRAND_WORD_INDEX = {'services': 0, 'socials': 2}
 FIXED_DOMAIN_WORDS = ('retrouvez', 'nous', 'sur', 'notre', 'site', 'jamm', 'immo', 'point', 'com')
 FIXED_DOMAIN_JAMIMO_WORDS = ('retrouvez', 'nous', 'sur', 'notre', 'site', 'jamimo', 'com')
+FIXED_CONTACT_WORDS = tuple('vous pouvez nous appeler ou nous ecrire sur whatsapp au meme numero'.split())
 FIXED_SERVICES_WORDS = tuple('jamm immo vous accompagne pour acheter vendre louer ou confier la gestion locative de votre bien'.split())
 FIXED_SOCIALS_WORDS = ('suivez', 'aussi', 'jamm', 'immo', 'sur', 'nos', 'reseaux', 'sociaux',
                        'pour', 'retrouver', 'nos', 'prochains', 'conseils')
@@ -647,7 +649,7 @@ def anchored_phone_range(segments, expected_words, observed, index, contact_resu
 
 def compare_french_segments(segments, recognized_words, lag_samples, verify_phone=None, *, verify_hook=None,
                             verify_services=None, verify_socials=None, verify_domain=None,
-                            verify_untimed_socials=None, inspection=None):
+                            verify_untimed_socials=None, phone_field_scoring=False, inspection=None):
     untimed_socials = verify_untimed_socials(recognized_words) if verify_untimed_socials else None
     opening_hook = None
     if (verify_hook and len(segments) > 2 and [part['id'] for part in segments[:2]] == ['greeting', 'hook']
@@ -864,9 +866,27 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
         elif not matched and identity == 'phone' and verify_phone:
             window = anchored_phone_range(segments, expected_words, observed, index, results[-1] if results else None)
             focused_eligible = window is not None
-            measurement = verify_phone(*window) if window else None
+            corroborating_rows = []
+            if (window and phone_field_scoring and sum(part['id'] == 'phone' for part in segments) == 1
+                and tuple(expected_words[index - 1]) == FIXED_CONTACT_WORDS
+                and tuple(expected_words[index + 1]) == FIXED_SOCIALS_WORDS):
+                left, right = (edge + lag_samples / SAMPLE_RATE for edge in window)
+                corroborating_rows = [r for r in recognized_words if r[1] < right and r[2] > left]
+            allow_prefix_edit = phone_field_rows(corroborating_rows)
+            if allow_prefix_edit:
+                measurement = verify_phone(*window, full_prefix_samples=tuple(
+                    round(t * SAMPLE_RATE) for t in corroborating_rows[0][1:3]))
+            else:
+                measurement = verify_phone(*window) if window else None
             verified_words = measurement.get('observed_words') if measurement else None
-            if verified_words == expected:
+            if (allow_prefix_edit and measurement and measurement.get('method') == PHONE_PREFIX_METHOD
+                and verified_words == [None, *PHONE_WORDS[1:]] and expected == PHONE_WORDS
+                and speech_edits(expected, verified_words) * 100 <= len(expected) * (100 - MIN_SEGMENT_ACCURACY_PERCENT)):
+                item.pop('observed_sha256', None)
+                item.update(status='matched', observed_token_count=len(verified_words), observed_words=verified_words,
+                            measurement={**{k: v for k, v in measurement.items() if k != 'observed_words'},
+                                         'full_raw_timed_rows_sha256': timed_rows_digest(corroborating_rows)})
+            elif verified_words == expected:
                 item.update(status='matched', observed_sha256=sha256(' '.join(verified_words).encode()),
                             observed_token_count=len(verified_words), observed_words=verified_words,
                             measurement={key: value for key, value in measurement.items() if key != 'observed_words'})
@@ -959,7 +979,18 @@ def verify_hook_samples(narration, decoded_pcm, lag_samples, directory, start, e
     }
 
 
-def verify_phone_samples(decoded_pcm, lag_samples, directory, start, end, recognize):
+def phone_field_rows(rows):
+    """A standalone spoken prefix and the entire canonical number in this one observation."""
+    if len(rows) < 2 or rows[0][0].strip().casefold() != 'plus' or rows[0][3] <= 0:
+        return False
+    tokens = [normalized_words('phone', row[0]) for row in rows]
+    return (all(tokens) and [word for group in tokens for word in group] == PHONE_WORDS
+            and all(row[1] < row[2] for row in rows)
+            and all(before[2] <= after[1] for before, after in zip(rows, rows[1:]))
+            and all(row[3] >= MIN_WORD_PROBABILITY for row in rows[1:]))
+
+
+def verify_phone_samples(decoded_pcm, lag_samples, directory, start, end, recognize, *, full_prefix_samples=None):
     first, last = (round(point * SAMPLE_RATE) + lag_samples for point in (start, end))
     if not 0 <= first < last <= len(decoded_pcm) // 2:
         return None
@@ -973,12 +1004,32 @@ def verify_phone_samples(decoded_pcm, lag_samples, directory, start, end, recogn
             output.setparams((1, 2, SAMPLE_RATE, 0, 'NONE', 'not compressed'))
             output.writeframes(clip)
         duration = (last - first) / SAMPLE_RATE
-        [observed], _ = words_by_segment([{'id': 'phone', 'start': 0, 'end': duration}], recognize(path), 0)
+        raw_rows = recognize(path)
+        [observed], _ = words_by_segment([{'id': 'phone', 'start': 0, 'end': duration}], raw_rows, 0)
         if (segment_words('phone', observed) != PHONE_WORDS
-            or any(word[2] > duration or word[3] < MIN_WORD_PROBABILITY for word in observed)
+            or any(word[2] > duration for word in observed)
             or any(voiced_overlap(sound, word[1], word[2]) < MIN_PHONE_WORD_AUDIBLE_SECONDS for word in observed)
             or any(left[2] > right[1] for left, right in zip(observed, observed[1:]))):
             return None
+        if any(word[3] < MIN_WORD_PROBABILITY for word in observed):
+            if (full_prefix_samples is None or not 4 <= duration <= 8 or not phone_field_rows(raw_rows)
+                or raw_rows[0][3] >= MIN_WORD_PROBABILITY):
+                return None
+            _, left, right, confidence = raw_rows[0]
+            common_left = max(left, (full_prefix_samples[0] - first) / SAMPLE_RATE)
+            common_right = min(right, (full_prefix_samples[1] - first) / SAMPLE_RATE)
+            if voiced_overlap(sound, common_left, common_right) < MIN_PHONE_WORD_AUDIBLE_SECONDS:
+                return None
+            return {
+                'method': PHONE_PREFIX_METHOD, 'observed_words': [None, *segment_words('phone', observed[1:])],
+                'start_sample': first, 'end_sample': last, 'pcm_sha256': sha256(clip),
+                'decoded_pcm_sha256': sha256(decoded_pcm), 'raw_timed_rows_sha256': timed_rows_digest(raw_rows),
+                'prefix_start_sample': first + round(left * SAMPLE_RATE),
+                'prefix_end_sample': first + round(right * SAMPLE_RATE),
+                'prefix_voiced_samples': round(voiced_overlap(sound, left, right) * SAMPLE_RATE),
+                'prefix_probability': confidence, 'number_min_probability': min(r[3] for r in raw_rows[1:]),
+                'visible_phone_required': True,
+            }
     except Exception:
         return None
     return {'method': 'phone_exact_neighbor_window', 'start_sample': first, 'end_sample': last,
@@ -1026,8 +1077,7 @@ def verify_phone_context_samples(decoded_pcm, lag_samples, directory, segments, 
     contact, phone, social = segments[index - 1:index + 2]
     contact_words = normalized_words('contact', contact['text'])
     social_words = normalized_words('socials', social['text'])
-    if (contact_words != normalized_words('contact',
-            'Vous pouvez nous appeler ou nous écrire sur WhatsApp au même numéro.')
+    if (tuple(contact_words) != FIXED_CONTACT_WORDS
         or tuple(social_words) != FIXED_SOCIALS_WORDS
         or normalized_words('phone', phone['text']) != PHONE_WORDS
         or not contact['start'] <= start < end <= social['end']
@@ -1085,8 +1135,9 @@ def verify_phone_context_samples(decoded_pcm, lag_samples, directory, segments, 
 
 
 def verify_phone_with_context(decoded_pcm, lag_samples, directory, segments, start, end, recognize,
-                              recognize_context=None):
-    direct = verify_phone_samples(decoded_pcm, lag_samples, directory, start, end, recognize)
+                              recognize_context=None, *, full_prefix_samples=None):
+    direct = verify_phone_samples(decoded_pcm, lag_samples, directory, start, end, recognize,
+                                  full_prefix_samples=full_prefix_samples)
     if direct:
         return direct
     return verify_phone_context_samples(decoded_pcm, lag_samples, directory, segments, start, end,
@@ -1498,10 +1549,10 @@ def measure_final_french_speech(segments, decoded_pcm, waveform, directory, reco
 
         results = compare_french_segments(
             segments, recognize(wav_path), lag_samples,
-            lambda start, end: verify_phone_with_context(decoded_pcm, lag_samples, directory, segments,
-                                                       start, end, recognize_phone),
+            lambda start, end, **options: verify_phone_with_context(
+                decoded_pcm, lag_samples, directory, segments, start, end, recognize_phone, **options),
             verify_hook=hook_check, verify_services=services_check, verify_socials=socials_check, verify_domain=domain_check,
-            verify_untimed_socials=untimed_socials_check,
+            verify_untimed_socials=untimed_socials_check, phone_field_scoring=preserved,
         )
     except ValueError:
         return {**result, 'reason': 'recognition_or_timing_inconclusive'}

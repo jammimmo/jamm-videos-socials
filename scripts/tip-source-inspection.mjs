@@ -5,7 +5,7 @@ const outcomes = 'completed timeout process_failed output_invalid unavailable'.s
 const methods = ('complete_preceding_french_words fixed_dakar_djam_imo_spelling fixed_company_domain_url_notation ' +
   'fixed_domain_jamimo_phonetic_spelling fixed_socials_complete_before_excluded_cue fixed_socials_signature_boundary ' +
   'french_centre_ville_spelling fixed_jamm_immo_phonetic_spelling hook_exact_silence_boundary phone_exact_neighbor_window ' +
-  'phone_exact_contact_context_v1 services_exact_brand_window socials_exact_scene_window fixed_socials_untimed_word_scored_as_edit ' +
+  'phone_exact_contact_context_v1 fixed_phone_plus_scored_as_edit_v1 services_exact_brand_window socials_exact_scene_window fixed_socials_untimed_word_scored_as_edit ' +
   'fixed_company_domain_asr_uncertain_v1 domain_exact_scene_window').split(' ');
 const flags = ('unreportable_words unsafe_uncertainty edit_budget_exceeded protected_mismatch standalone_plus mixed_boundary ' +
   'domain_unconfirmed focused_matched focused_unconfirmed focus_not_eligible untimed_word_counted score_matched global_edits_exceeded').split(' ');

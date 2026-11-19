@@ -254,6 +254,10 @@ test('public projection keeps signed measurements and strips private data at all
   assert.ok(!JSON.stringify(a).includes('PRIVATE'));
   e.calls[0].stage = 'alignment_greeting';
   assert.equal(projectInspection(e, identity).calls[0].stage, 'alignment_greeting');
+  const phone = e.scenes.find(s => s.id === 'phone');
+  Object.assign(phone, {status: 'matched', method: 'fixed_phone_plus_scored_as_edit_v1',
+    observedCount: 16, expectedCount: 16, editCount: 1, nullCount: 1, uncertainPositions: [0], protectedMatch: true});
+  assert.deepEqual(projectInspection(e, identity).scenes.find(s => s.id === 'phone'), phone);
 });
 test('invalid bindings, enum, sample, digest, scene identity and row shapes fail closed', () => {
   for (const change of [
