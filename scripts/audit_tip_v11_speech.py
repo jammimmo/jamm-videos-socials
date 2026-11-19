@@ -1,6 +1,7 @@
 """Conservatively compare French speech recognized from the final MP4 audio."""
 
 import hashlib
+import io
 from itertools import islice
 import json
 import math
@@ -185,7 +186,7 @@ def recognize_with_timeout(wav_path, timeout=RECOGNITION_TIMEOUT_SECONDS):
 
 
 def words_by_segment(segments, recognized_words, lag_samples, *, opening_hook=None, hook_crossings=None,
-                     boundary_crossings=None):
+                     boundary_crossings=None, untimed_socials=None):
     observed = [[] for _ in segments]
     ambiguous_boundary = set()
     offset = lag_samples / SAMPLE_RATE
@@ -196,6 +197,17 @@ def words_by_segment(segments, recognized_words, lag_samples, *, opening_hook=No
             raise ValueError('malformed or excessive recognized words')
         if not all(type(value) in (int, float) and math.isfinite(value) for value in (start, end, probability)):
             raise ValueError('invalid speech timestamps or confidence')
+        if untimed_socials and number - 1 == untimed_socials['measurement']['full_row_index']:
+            # Preserve the original point row in its scene. Only the independently
+            # measured nullable result can score this scene, with one full edit.
+            part = segments[untimed_socials['measurement']['scene_index']]
+            if not (part['id'] == 'socials' and text.strip().lower() == 'aussi' and start == end
+                    and part['start'] < start - offset < part['end'] and previous <= start
+                    and MIN_WORD_PROBABILITY <= probability <= 1):
+                raise ValueError('invalid corroborated socials point')
+            previous = start
+            observed[untimed_socials['measurement']['scene_index']].append((text.strip(), start - offset, end - offset, probability))
+            continue
         if not previous <= start < end <= segments[-1]['end'] + abs(offset) + .12 or not 0 <= probability <= 1:
             raise ValueError('unexpected speech timestamps or confidence')
         previous = start
@@ -568,7 +580,9 @@ def anchored_phone_range(segments, expected_words, observed, index):
 
 
 def compare_french_segments(segments, recognized_words, lag_samples, verify_phone=None, *, verify_hook=None,
-                            verify_services=None, verify_socials=None, verify_domain=None):
+                            verify_services=None, verify_socials=None, verify_domain=None,
+                            verify_untimed_socials=None):
+    untimed_socials = verify_untimed_socials(recognized_words) if verify_untimed_socials else None
     opening_hook = None
     if (verify_hook and len(segments) > 2 and [part['id'] for part in segments[:2]] == ['greeting', 'hook']
         and segments[0]['end'] == segments[1]['start'] and segments[1]['end'] == segments[2]['start']):
@@ -577,7 +591,7 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
     boundary_crossings = {}
     observed, ambiguous_boundary = words_by_segment(
         segments, recognized_words, lag_samples, opening_hook=opening_hook, hook_crossings=hook_crossings,
-        boundary_crossings=boundary_crossings,
+        boundary_crossings=boundary_crossings, untimed_socials=untimed_socials,
     )
     expected_words = [normalized_words(segment['id'], segment['text']) for segment in segments]
     actual_words = [segment_words(segment['id'], words) for segment, words in zip(segments, observed)]
@@ -586,6 +600,8 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
     repairs = {}
     for index, (left, right) in enumerate(zip(segments, segments[1:])):
         following = index + 1
+        if untimed_socials and untimed_socials['measurement']['scene_index'] in (index, following):
+            continue
         if (left['id'] in EXCLUDED_SEGMENTS or right['id'] in EXCLUDED_SEGMENTS
             or index in ambiguous_boundary or following in ambiguous_boundary
             or not expected_words[index] or not expected_words[following]
@@ -603,6 +619,11 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
     for index, segment in enumerate(segments):
         identity = segment['id']
         if identity in EXCLUDED_SEGMENTS:
+            continue
+        if untimed_socials and index == untimed_socials['measurement']['scene_index']:
+            if index in ambiguous_boundary:
+                raise ValueError('untimed socials crosses excluded speech')
+            results.append(untimed_socials)
             continue
         expected = expected_words[index]
         raw_actual = segment_words(identity, observed[index])
@@ -999,7 +1020,7 @@ def verify_services_samples(decoded_pcm, lag_samples, directory, segment, expect
     }
 
 
-def verify_socials_scene_samples(decoded_pcm, lag_samples, directory, segments, index, expected, recognize):
+def read_socials_scene_window(decoded_pcm, lag_samples, directory, segments, index, expected, recognize):
     """Recognize once from the exact French start plus <=1s excluded context."""
     if (segments[index]['id'] != 'socials' or index + 1 >= len(segments)
         or segments[index + 1]['id'] != 'signature' or tuple(expected) != FIXED_SOCIALS_WORDS
@@ -1029,7 +1050,24 @@ def verify_socials_scene_samples(decoded_pcm, lag_samples, directory, segments, 
             with wave.open(target, 'wb') as output:
                 output.setparams((1, 2, SAMPLE_RATE, 0, 'NONE', 'not compressed'))
                 output.writeframes(clip)
+        wav_digest = sha256(path.read_bytes())
         rows = list(islice(recognize(path), MAX_RECOGNIZED_WORDS + 1))
+        if sha256(path.read_bytes()) != wav_digest:
+            return None
+        return first, last, rows, wav_digest
+    finally:
+        if created:
+            path.unlink(missing_ok=True)
+
+
+def verify_socials_scene_samples(decoded_pcm, lag_samples, directory, segments, index, expected, recognize):
+    try:
+        window = read_socials_scene_window(decoded_pcm, lag_samples, directory, segments, index, expected, recognize)
+        if window is None:
+            return None
+        first, last, rows, _ = window
+        clip = decoded_pcm[first * 2:last * 2]
+        part, signature = segments[index:index + 2]
         duration = (last - first) / SAMPLE_RATE
         if (len(rows) > MAX_RECOGNIZED_WORDS
             or any(not all(type(value) in (int, float) and math.isfinite(value) for value in row[1:])
@@ -1049,9 +1087,118 @@ def verify_socials_scene_samples(decoded_pcm, lag_samples, directory, segments, 
         }
     except Exception:
         return None
-    finally:
-        if created:
-            path.unlink(missing_ok=True)
+
+
+def fixed_socials_point(rows, first, cut, offset, limit, decoded_pcm, *, focused):
+    """Validate one untimed interior word while keeping its two neighbors distinct."""
+    if not isinstance(rows, list) or not 1 <= len(rows) <= MAX_RECOGNIZED_WORDS:
+        return None
+    scene, indices, points = [], [], []
+    previous = 0
+    for index, row in enumerate(rows):
+        if (not isinstance(row, (list, tuple)) or len(row) != 4 or not isinstance(row[0], str)
+            or not 1 <= len(row[0]) <= 300
+            or not all(type(v) in (int, float) and math.isfinite(v) for v in row[1:])):
+            return None
+        text, start, end, probability = row
+        if not previous <= start <= end <= limit or not 0 <= probability <= 1:
+            return None
+        previous = end
+        left, right = round(start * SAMPLE_RATE) + offset, round(end * SAMPLE_RATE) + offset
+        if start == end:
+            points.append(index)
+        if (left < first < right or left < cut < right
+            or (start < end and left == right)):
+            return None
+        if first <= left < cut:
+            if (right > cut or probability < MIN_WORD_PROBABILITY
+                or not re.fullmatch(r'[^\W\d_]+[.,!?]?', text.strip())):
+                return None
+            if left < right and not any(audible_windows(decoded_pcm[left * 2:right * 2], SAMPLE_RATE)):
+                return None
+            scene.append(row)
+            indices.append(index)
+    if len(scene) != len(FIXED_SOCIALS_WORDS) or points != indices[1:2]:
+        return None
+    point = round(scene[1][1] * SAMPLE_RATE) + offset
+    if (not first < point < cut or scene[1][0].strip().lower() != 'aussi'
+        or round(scene[0][2] * SAMPLE_RATE) + offset != point
+        or round(scene[2][1] * SAMPLE_RATE) + offset != point):
+        return None
+    observed = segment_words('socials', scene)
+    expected = list(FIXED_SOCIALS_WORDS)
+    actual = canonical_fixed_brand_words('socials', expected, observed, scene)
+    if actual != expected:
+        # Djam from the full recording can trigger a check only in the exact
+        # observed context. The focused brand must independently pass the
+        # existing normalization; the global spelling never earns brand credit.
+        if focused or observed != [*expected[:2], 'djam', 'imo', *expected[4:]]:
+            return None
+    return {'index': points[0], 'point': point, 'actual': actual,
+            'brand_min_probability': min(scene[2][3], scene[3][3])}
+
+
+def timed_rows_digest(rows):
+    # Include exact decoder strings, times, ordering and original confidence.
+    return sha256(json.dumps(rows, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode())
+
+
+def verify_untimed_socials_samples(decoded_pcm, lag_samples, directory, segments, rows, wav_path, recognize):
+    """Corroborate the same point, counting its absent duration as one complete edit."""
+    if (type(lag_samples) is not int or lag_samples < 0 or not isinstance(rows, list)
+        or not any(isinstance(r, (tuple, list)) and len(r) == 4 and r[1] == r[2] for r in rows)):
+        return None
+    ids = [s['id'] for s in segments]
+    if ids.count('socials') != 1 or ids[-3:] != ['phone', 'socials', 'signature']:
+        return None
+    index = len(segments) - 2
+    phone, social, signature = segments[-3:]
+    expected = normalized_words('socials', social['text'])
+    if (tuple(expected) != FIXED_SOCIALS_WORDS or phone['end'] != social['start']
+        or social['end'] != signature['start']):
+        return None
+    first, cut = (round(social[k] * SAMPLE_RATE) + lag_samples for k in ('start', 'end'))
+    if not 0 <= first < cut <= len(decoded_pcm) // 2:
+        return None
+    full = fixed_socials_point(rows, first, cut, 0, len(decoded_pcm) / (2 * SAMPLE_RATE), decoded_pcm, focused=False)
+    if full is None:
+        return None
+    # Bind the full recognizer input to the exact PCM supplying the fixed crop.
+    try:
+        wav = Path(wav_path).read_bytes()
+        with wave.open(io.BytesIO(wav), 'rb') as audio:
+            if ((audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) != (1, 2, SAMPLE_RATE)
+                or audio.getnframes() * 2 != len(decoded_pcm)
+                or audio.readframes(audio.getnframes()) != decoded_pcm):
+                return None
+    except (OSError, ValueError, wave.Error, EOFError):
+        return None
+    window = read_socials_scene_window(decoded_pcm, lag_samples, directory, segments, index, expected, recognize)
+    if window is None:
+        return None
+    start, end, window_rows, window_wav_sha = window
+    focused = fixed_socials_point(window_rows, first, cut, start, (end - start) / SAMPLE_RATE, decoded_pcm, focused=True)
+    if focused is None or focused['point'] != full['point']:
+        return None
+    observed = [*focused['actual'][:1], None, *focused['actual'][2:]]
+    edits = speech_edits(expected, observed)
+    if (edits != 1 or edits * 100 > len(expected) * (100 - MIN_SEGMENT_ACCURACY_PERCENT)
+        or protected_speech(observed) != protected_speech(expected)):
+        return None
+    return {'segment': 'socials', 'status': 'matched', 'expected_token_count': len(expected),
+            'expected_sha256': sha256(' '.join(expected).encode()), 'observed_token_count': len(observed),
+            'observed_words': observed, 'measurement': {
+                'method': 'fixed_socials_untimed_word_scored_as_edit', 'untimed_token_index': 1,
+                'edit_count': edits, 'point_sample': full['point'], 'scene_index': index, 'lag_samples': lag_samples,
+                'scene_start_sample': first, 'scene_end_sample': cut, 'start_sample': start, 'end_sample': end,
+                'full_row_index': full['index'], 'focused_row_index': focused['index'],
+                'full_timed_rows_sha256': timed_rows_digest(rows),
+                'focused_timed_rows_sha256': timed_rows_digest(window_rows),
+                'full_wav_sha256': sha256(wav), 'decoded_pcm_sha256': sha256(decoded_pcm),
+                'window_wav_sha256': window_wav_sha, 'window_pcm_sha256': sha256(decoded_pcm[start * 2:end * 2]),
+                'focused_brand_min_probability': focused['brand_min_probability'],
+                'audible_timed_french_rows': len(observed) - 1,
+            }}
 
 
 def uncertain_fixed_domain_scene_measurement(decoded_pcm, lag_samples, segment, first, last, rows, notation):
@@ -1183,15 +1330,23 @@ def measure_final_french_speech(segments, decoded_pcm, waveform, directory, reco
                                                segment, expected, recognize_services)
 
         socials_check = None
+        untimed_socials_check = None
         if preserved:
             socials_attempted = False
-            def socials_check(parts, index, expected):
+            def read_socials_once(path):
                 nonlocal socials_attempted
                 if socials_attempted:
-                    return None
+                    return []
                 socials_attempted = True
+                return recognize_socials(path)
+
+            def socials_check(parts, index, expected):
                 return verify_socials_scene_samples(decoded_pcm, lag_samples, directory, parts, index,
-                                                   expected, recognize_socials)
+                                                   expected, read_socials_once)
+
+            def untimed_socials_check(rows):
+                return verify_untimed_socials_samples(decoded_pcm, lag_samples, directory, segments, rows,
+                                                     wav_path, read_socials_once)
 
         domain_check = None
         if preserved:
@@ -1209,6 +1364,7 @@ def measure_final_french_speech(segments, decoded_pcm, waveform, directory, reco
             lambda start, end: verify_phone_with_context(decoded_pcm, lag_samples, directory, segments,
                                                        start, end, recognize_phone),
             verify_hook=hook_check, verify_services=services_check, verify_socials=socials_check, verify_domain=domain_check,
+            verify_untimed_socials=untimed_socials_check,
         )
     except ValueError:
         return {**result, 'reason': 'recognition_or_timing_inconclusive'}
