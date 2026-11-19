@@ -1,6 +1,6 @@
 // Public diagnostics are reconstructed from finite fields. Never include exception text or private rows.
 const scenes = 'hook step1 step2 step3 takeaway services tools contact phone socials'.split(' ');
-const stages = 'model_load full_audio alignment_phone alignment_signature audit_phone audit_phone_context audit_services audit_socials audit_hook'.split(' ');
+const stages = 'model_load full_audio alignment_greeting alignment_phone alignment_signature audit_phone audit_phone_context audit_services audit_socials audit_hook'.split(' ');
 const outcomes = 'completed timeout process_failed output_invalid unavailable'.split(' ');
 const methods = ('complete_preceding_french_words fixed_dakar_djam_imo_spelling fixed_company_domain_url_notation ' +
   'fixed_domain_jamimo_phonetic_spelling fixed_socials_complete_before_excluded_cue fixed_socials_signature_boundary ' +

@@ -308,11 +308,12 @@ class V11AlignmentTest(unittest.TestCase):
             def __add__(self, offset):
                 return DecoderScalar(super().__add__(offset))
 
-        words = [SimpleNamespace(word='plus', start=DecoderScalar(.25), end=DecoderScalar(.5))]
+        words = [SimpleNamespace(word='plus', start=DecoderScalar(.25), end=DecoderScalar(.5), probability=DecoderScalar(.79))]
         model = Mock()
         model.transcribe.return_value = ([SimpleNamespace(words=words)], None)
         observed = recognize_words(model, 'local.wav', beam_size=5, time_offset=54)
-        self.assertEqual(observed, [{'word': 'plus', 'start': 54.25, 'end': 54.5}])
+        self.assertEqual(observed, [{'word': 'plus', 'start': 54.25, 'end': 54.5, 'probability': .79}])
+        self.assertIs(type(observed[0]['probability']), float)
         self.assertIs(type(observed[0]['start']), float)
         self.assertIs(type(observed[0]['end']), float)
         model.transcribe.assert_called_once_with('local.wav', language='fr', beam_size=5,
@@ -511,3 +512,76 @@ class V11AlignmentTest(unittest.TestCase):
             align_with_signature_retry(SEGMENTS, unanchored, 70, sound, recognize_tail)
         self.assertEqual(rejected.exception.reason, 'signature_boundary_unconfirmed')
         recognize_tail.assert_not_called()
+
+
+class GreetingWindowTests(unittest.TestCase):
+    def setUp(self):
+        # Preserve the original four lexical measurements, including the unaliased
+        # Alekoum, on a synthetic suffix whose first hook token starts at 2.36 s.
+        self.focus = [
+            {'word': word, 'start': start, 'end': end, 'probability': p}
+            for word, start, end, p in [('Salam', 0., .74, .827), ('Alekoum', .74, 1.56, .777),
+                                        ('Nanga', 1.84, 2.1, .704), ('Def', 2.1, 2.28, .941)]
+        ]
+        suffix = speech(SEGMENTS)[4:]
+        shift = 2.36 - suffix[0]['start']
+        self.suffix = [{**w, 'start': w['start'] + shift, 'end': w['end'] + shift,
+                        'probability': .99} for w in suffix]
+        self.sound = [(w['start'], w['end']) for w in self.focus + self.suffix]
+        self.full = [dict(w) for w in self.suffix]
+        self.full[0]['probability'] = .113
+
+    def run_alignment(self, callback, words=None, sound=None):
+        return align_with_phone_retry(SEGMENTS, self.full if words is None else words, 70,
+                                      self.sound if sound is None else sound, Mock(), Mock(),
+                                      recognize_greeting=callback)
+
+    def test_exact_three_focused_anchors_use_one_bounded_crop(self):
+        callback = Mock(return_value=self.focus)
+        result = self.run_alignment(callback)
+        callback.assert_called_once_with(2.36)
+        self.assertEqual(result['greetingEvidenceMethod'], 'french-v11-pinned-greeting-window')
+        self.assertEqual(self.focus[1]['word'], 'Alekoum')
+
+    def test_focused_invalid_anchors_and_measurements_do_not_recover(self):
+        for index, replacement in [(2, {'word': 'autre'}), (0, {'probability': .10}),
+                                   (3, {'probability': float('nan')}), (3, {'end': 2.37}),
+                                   (2, {'start': 1.2}), (3, {'start': 2.28})]:
+            with self.subTest(index=index, replacement=replacement):
+                rows = [dict(row) for row in self.focus]
+                rows[index].update(replacement)
+                with self.assertRaises(ValueError):
+                    self.run_alignment(Mock(return_value=rows))
+        rows = [dict(row) for row in self.focus]
+        rows[0].pop('probability')
+        with self.assertRaises(ValueError):
+            self.run_alignment(Mock(return_value=rows))
+
+    def test_unvoiced_opening_and_ambiguous_hook_do_not_trigger_recovery(self):
+        quiet = [(w['start'], w['end']) for w in self.suffix]
+        for words, sound in [(self.full, quiet),
+                             ([*self.full[:3], *[{**w, 'word': self.full[i]['word']} for i, w in enumerate(self.full[3:6])],
+                               *self.full[6:]], self.sound)]:
+            callback = Mock(return_value=self.focus)
+            with self.assertRaises(ValueError):
+                self.run_alignment(callback, words, sound)
+            callback.assert_not_called()
+
+    def test_unbounded_or_low_confidence_hook_and_lost_greeting_slots(self):
+        for update in [{'start': -.2}, {'probability': float('inf')}, {'probability': .59}]:
+            words = [dict(w) for w in self.full]
+            words[1].update(update)
+            callback = Mock(return_value=self.focus)
+            with self.subTest(update=update), self.assertRaises(ValueError):
+                self.run_alignment(callback, words)
+            callback.assert_not_called()
+        for rows in [self.focus[:-1], [*self.focus, self.focus[-1]], self.focus[::-1]]:
+            with self.subTest(rows=len(rows)), self.assertRaises(ValueError):
+                self.run_alignment(Mock(return_value=rows))
+
+    def test_already_aligned_greeting_does_not_decode_another_prefix(self):
+        words = speech(SEGMENTS)
+        sound = [(w['start'], w['end']) for w in words]
+        callback = Mock()
+        self.assertEqual(self.run_alignment(callback, words, sound), align(SEGMENTS, words, 70, sound))
+        callback.assert_not_called()

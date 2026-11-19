@@ -6,7 +6,7 @@ import random
 import unittest
 import wave
 
-from align_tip_v11 import ASR_REVISION, PHONE_WINDOW_EVIDENCE, align, align_with_signature_retry, tokens
+from align_tip_v11 import ASR_REVISION, GREETING_WINDOW_EVIDENCE, PHONE_WINDOW_EVIDENCE, align, align_with_signature_retry, tokens
 from audit_tip_v11 import (
     AUDIO_PRESERVATION_WINDOW, CAPTION_SCENES, SAMPLE_RATE, bind_manifest, measure_audio,
     measure_audio_preservation, normalized_ocr_text, sha256, verify_alignment,
@@ -135,6 +135,16 @@ class V11FinalEvidenceTest(unittest.TestCase):
         self.assertEqual(verify_alignment(json.dumps(alignment)), alignment)
 
         for changes in ({'method': 'unknown'}, {'provenance': 'local-word-timings'}, {'reviewRequired': False}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, 'alignment identity'):
+                verify_alignment(json.dumps(alignment | changes))
+
+    def test_greeting_marker_requires_pinned_decoder_and_review_identity(self):
+        alignment = align(SEGMENTS, speech(SEGMENTS), 70) | {
+            'provenance': ASR_REVISION, 'greetingEvidenceMethod': GREETING_WINDOW_EVIDENCE,
+        }
+        self.assertEqual(verify_alignment(json.dumps(alignment)), alignment)
+        for changes in ({'greetingEvidenceMethod': 'unknown'}, {'greetingEvidenceMethod': None},
+                        {'provenance': 'local-word-timings'}, {'reviewRequired': False}):
             with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, 'alignment identity'):
                 verify_alignment(json.dumps(alignment | changes))
 
