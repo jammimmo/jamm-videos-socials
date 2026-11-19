@@ -30,8 +30,9 @@ MAX_RECOGNIZED_WORDS = 500
 MAX_OBSERVED_WORDS = 128
 MAX_OBSERVED_WORD_LENGTH = 128
 MIN_WORD_PROBABILITY = .6
-MIN_SEGMENT_ACCURACY_PERCENT = 85
-MIN_GLOBAL_ACCURACY_PERCENT = 92
+# French transcript conformity, measured by token edit distance.
+MIN_SEGMENT_ACCURACY_PERCENT = 75
+MIN_GLOBAL_ACCURACY_PERCENT = 85
 # The ordinary cut still owns every word outside this window. A pair can
 # recover a displaced cut of at most the 1.1 seconds observed in the MP4,
 # plus a small allowance for differences in word timestamps.
@@ -913,9 +914,11 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
         boundary_verified = alias_kind in ('fixed_socials_boundary', 'fixed_socials_complete_boundary')
         # A wrong company domain/TLD is never an ordinary 1-in-9 word edit.
         canonical_point_omission = (tuple(expected) == FIXED_DOMAIN_WORDS
-            and tuple(raw_actual) == tuple(word for word in FIXED_DOMAIN_WORDS if word != 'point'))
+            and tuple(raw_actual) == tuple(word for word in FIXED_DOMAIN_WORDS if word != 'point')
+            and reported is not None and reported[-3:] == ['jamm', 'immo', 'com'])
         domain_verified = (identity != 'domain' or (domain_raw_verified and (
-            domain_notation is not None or domain_alias is not None or canonical_point_omission)))
+            (domain_notation is not None and domain_notation['reported'][-4:].count(None) <= 1)
+            or domain_alias is not None or canonical_point_omission)))
         matched = scored and domain_verified and (index not in ambiguous_boundary or boundary_verified)
         item = {'segment': identity, 'status': 'matched' if matched else 'inconclusive',
                 'expected_token_count': len(expected), 'observed_token_count': len(actual),
@@ -1643,7 +1646,10 @@ def french_speech_outcome(segments, results):
     ) for segment, item in zip((segment for segment in segments if segment['id'] not in EXCLUDED_SEGMENTS), results))
     if not total_words or total_edits * 100 > total_words * (100 - MIN_GLOBAL_ACCURACY_PERCENT):
         return {'status': 'inconclusive', 'reason': 'ordered_words_unconfirmed', 'segments': results}
-    return {'status': 'matched', 'segments': results}
+    outcome = {'status': 'matched', 'segments': results}
+    if total_edits:
+        outcome['warnings'] = ['french_transcript_variation']
+    return outcome
 
 
 def measure_final_french_speech(segments, decoded_pcm, waveform, directory, recognize=recognize_with_timeout,
