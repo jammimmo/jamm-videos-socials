@@ -120,5 +120,136 @@ class SocialSceneRecoveryTest(unittest.TestCase):
         read.assert_called_once()
 
 
+class UntimedSocialsTest(unittest.TestCase):
+    """Synthetic observations, with one real point and twelve distinct voiced intervals."""
+    lag = 1024
+    decoded = b'\x00\x04' * (8 * SAMPLE_RATE)
+    scenes = [
+        {'id': 'phone', 'text': 'Plus', 'start': 0, 'end': 2},
+        {'id': 'socials', 'text': 'Suivez aussi Jamm Immo sur nos réseaux sociaux pour retrouver nos prochains conseils.',
+         'start': 2, 'end': 5.5},
+        {'id': 'signature', 'text': 'À bientôt', 'start': 5.5, 'end': 7.5},
+    ]
+
+    def setUp(self):
+        words = self.scenes[1]['text'].split()
+        cursor = .25
+        self.crop = []
+        for i, word in enumerate(words):
+            end = cursor if i == 1 else cursor + .25
+            spelling = {2: 'Jam', 3: 'Imo'}.get(i, word)
+            self.crop.append([' ' + spelling, cursor, end, .97])
+            cursor = end
+        self.crop.append([' À', 3.7, 4., .4])  # Excluded signature context.
+        offset = 2 + self.lag / SAMPLE_RATE
+        self.full = [[' Plus', .5, 1., .98],
+                     *[[word, start + offset, end + offset, prob] for word, start, end, prob in self.crop]]
+        self.full[3][0] = ' Djam'
+
+    def measure(self, full=None, crop=None, pcm=None, preserved=True, scenes=None, change_wav=None):
+        pcm = self.decoded if pcm is None else pcm
+        full = self.full if full is None else full
+        focused = Mock(return_value=self.crop if crop is None else crop)
+        def global_read(path):
+            if change_wav:
+                change_wav(path)
+            return full
+        if preserved is True:
+            preserved = {'status': 'matched', 'decoded_pcm_sha256': sha256(pcm), 'lag_samples': self.lag}
+        with TemporaryDirectory() as directory:
+            result = measure_final_french_speech(
+                self.scenes if scenes is None else scenes, pcm, {'passed': True, 'lag_samples': self.lag}, directory,
+                recognize=global_read, recognize_socials=focused, preservation=preserved,
+                recognize_phone=Mock(return_value=[]), recognize_domain=Mock(return_value=[]),
+            )
+        return result, focused.call_count
+
+    def test_charges_the_point_once_and_binds_both_original_observations_and_pcm(self):
+        from audit_tip_v11_speech import FIXED_SOCIALS_WORDS, speech_edits, timed_rows_digest
+        full_snapshot, crop_snapshot = json.dumps(self.full), json.dumps(self.crop)
+        result, calls = self.measure()
+        self.assertEqual((result['status'], calls), ('matched', 1))
+        row = result['segments'][1]
+        words = list(FIXED_SOCIALS_WORDS)
+        words[1] = None
+        self.assertEqual(row['observed_words'], words)
+        self.assertEqual(speech_edits(FIXED_SOCIALS_WORDS, words), 1)
+        self.assertNotIn('observed_sha256', row)
+        proof = row['measurement']
+        self.assertEqual((proof['untimed_token_index'], proof['full_row_index'], proof['focused_row_index']), (1, 2, 1))
+        self.assertEqual(proof['point_sample'], round(2.5 * SAMPLE_RATE) + self.lag)
+        self.assertEqual(proof['full_timed_rows_sha256'], timed_rows_digest(self.full))
+        self.assertEqual(proof['focused_timed_rows_sha256'], timed_rows_digest(self.crop))
+        self.assertEqual((proof['scene_start_sample'], proof['scene_end_sample'], proof['end_sample']),
+                         (2 * SAMPLE_RATE + self.lag, round(5.5 * SAMPLE_RATE) + self.lag, round(6.5 * SAMPLE_RATE) + self.lag))
+        clip = self.decoded[proof['start_sample'] * 2:proof['end_sample'] * 2]
+        self.assertEqual((proof['decoded_pcm_sha256'], proof['window_pcm_sha256']), (sha256(self.decoded), sha256(clip)))
+        self.assertEqual(proof['audible_timed_french_rows'], 12)
+        self.assertEqual((full_snapshot, crop_snapshot), (json.dumps(self.full), json.dumps(self.crop)))
+        changed_confidence = [*self.crop[:-1], [*self.crop[-1][:3], .41]]
+        self.assertNotEqual(proof['focused_timed_rows_sha256'], timed_rows_digest(changed_confidence))
+
+    def test_wrong_missing_uncertain_multiple_and_overlapping_observations_are_held(self):
+        from copy import deepcopy
+        def mutations(rows, index):
+            cases = {}
+            for name, word_index, column, replacement in (
+                ('wrong point', index, 0, ' ici'), ('protected point', index, 0, ' non'),
+                ('uncertain point', index, 3, .59), ('uncertain neighbor', index - 1, 3, .59),
+                ('uncertain brand', index + 1, 3, .59), ('uncertain ordinary word', index + 4, 3, .59),
+                ('contradictory brand', index + 1, 0, ' autre'), ('wrong ordinary word', index + 5, 0, ' autres'),
+                ('second point', index + 4, 2, rows[index + 4][1]), ('reversed', index + 3, 2, rows[index + 3][1] - .01),
+                ('overlap', index + 1, 1, rows[index][1] - .01), ('detached point', index - 1, 2, rows[index][1] - .01),
+                ('nonfinite probability', index + 3, 3, float('nan')), ('untimed brand', index + 1, 2, rows[index + 1][1]),
+            ):
+                changed = deepcopy(rows)
+                changed[word_index][column] = replacement
+                cases[name] = changed
+            cases['missing point row'] = rows[:index] + rows[index + 1:]
+            cases['missing first row'] = rows[:index-1] + rows[index:]
+            return cases
+
+        for stream, original, point_index in (('full', self.full, 2), ('crop', self.crop, 1)):
+            for name, altered in mutations(original, point_index).items():
+                with self.subTest(stream=stream, name=name):
+                    result, calls = self.measure(**{stream: altered})
+                    self.assertEqual(result['status'], 'inconclusive')
+                    self.assertEqual(calls, int(stream == 'crop'))
+        shifted = deepcopy(self.crop)
+        for row_index, field in ((0, 2), (1, 1), (1, 2), (2, 1)):
+            shifted[row_index][field] += 1 / SAMPLE_RATE
+        report, calls = self.measure(crop=shifted)
+        self.assertEqual((report['status'], calls), ('inconclusive', 1))
+        # A row ending at the signature cut may not cross into its context.
+        for stream, rows, last, cut in [('full', self.full, -2, 5.5 + self.lag / SAMPLE_RATE),
+                                        ('crop', self.crop, -2, 3.5)]:
+            altered = deepcopy(rows)
+            altered[last][2] = cut + .01
+            with self.subTest(stream=stream, case='cut crossing'):
+                self.assertEqual(self.measure(**{stream: altered})[0]['status'], 'inconclusive')
+
+    def test_only_the_fixed_scene_with_its_preserved_audible_pcm_can_use_a_point(self):
+        from audit_tip_v11_speech import compare_french_segments
+        with self.assertRaises(ValueError):
+            compare_french_segments(self.scenes, self.full, self.lag)
+        for scene in ('phone', 'domain', 'hook'):
+            changed = [*self.scenes[:1], {**self.scenes[1], 'id': scene}, self.scenes[-1]]
+            with self.subTest(scene=scene):
+                self.assertEqual(self.measure(scenes=changed)[1], 0)
+        for change in ({'text': 'Suivez aussi une autre agence'}, {'start': 2.01}, {'end': 5.49}):
+            altered = [self.scenes[0], {**self.scenes[1], **change}, self.scenes[-1]]
+            self.assertEqual(self.measure(scenes=altered)[1], 0)
+        for evidence in (None, {'status': 'matched', 'lag_samples': self.lag, 'decoded_pcm_sha256': '0' * 64},
+                         {'status': 'matched', 'lag_samples': 0, 'decoded_pcm_sha256': sha256(self.decoded)}):
+            self.assertEqual(self.measure(preserved=evidence)[1], 0)
+        for change_wav in (lambda path: path.unlink(), lambda path: path.write_bytes(b'invalid WAV')):
+            report, calls = self.measure(change_wav=change_wav)
+            self.assertEqual((report['status'], calls), ('inconclusive', 0))
+        for start, end in ((2.5, 3.), (2., 5.5)):
+            first, last = [round(t * SAMPLE_RATE) + self.lag for t in (start, end)]
+            muted = self.decoded[:first * 2] + bytes((last - first) * 2) + self.decoded[last * 2:]
+            self.assertEqual(self.measure(pcm=muted)[1], 0)
+
+
 if __name__ == '__main__':
     unittest.main()

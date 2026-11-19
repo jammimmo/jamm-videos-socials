@@ -61,6 +61,40 @@ class SourceScoringTest(unittest.TestCase):
         self.assertEqual(diagnostic['outcome'], 'completed')
         self.assertGreater(diagnostic['recognized_row_count'], 0)
 
+    def test_scores_a_single_corresponding_fixed_socials_point_as_an_edit_only(self):
+        from align_tip_v11 import align, audible_windows
+        from audit_tip_v11_speech import FIXED_SOCIALS_WORDS
+        self.plan = {**self.plan, 'segments': [
+            {**s, 'text': ' '.join(FIXED_SOCIALS_WORDS)} if s['id'] == 'socials' else s for s in SEGMENTS
+        ]}
+        rows = [[w['word'], w['start'], w['end'], .95] for w in speech(self.plan['segments'])]
+        start = next(i for i, row in enumerate(rows) if row[0] == 'suivez')
+        point = rows[start + 2][1]
+        rows[start][2] = rows[start + 1][1] = rows[start + 1][2] = point
+        rows[start + 2][0], rows[start + 3][0] = 'Djam', 'Imo'
+        alignment = align(self.plan['segments'], [{'word': w, 'start': a, 'end': b} for w, a, b, _ in rows],
+                          70, list(audible_windows(self.data, SAMPLE_RATE)), defer_domain=True)
+        social = alignment['segments'][-2]
+        first = round(social['start'] * SAMPLE_RATE)
+        focused = [[w, a - first / SAMPLE_RATE, b - first / SAMPLE_RATE, p]
+                   for w, a, b, p in rows[start:start + len(FIXED_SOCIALS_WORDS)]]
+        focused[2][0] = 'Jam'
+        read = Mock(return_value=focused)
+        report = self.run_source(rows=rows, window=read)
+        self.assertEqual(report['status'], 'matched')
+        self.assertEqual([c['stage'] for c in report['recognizer_diagnostics']], ['full_audio', 'audit_socials'])
+        read.assert_called_once()
+        item = report['segments'][-1]
+        self.assertEqual(item['observed_words'], [FIXED_SOCIALS_WORDS[0], None, *FIXED_SOCIALS_WORDS[2:]])
+        self.assertEqual(item['measurement']['edit_count'], 1)
+        self.assertEqual(item['measurement']['full_wav_sha256'], report['narration_wav_sha256'])
+        self.assertNotIn('observed_sha256', item)
+        # The special CTA evidence leaves the prior nine gates intact.
+        changed = [(['non', *r[1:]] if r[0] == 'commence' else r) for r in rows]
+        held = self.run_source(rows=changed, window=Mock(return_value=focused))
+        self.assertEqual(held['status'], 'inconclusive')
+        self.assertEqual([r['segment'] for r in held['segments'] if r['status'] != 'matched'], ['hook'])
+
     def test_pre_alignment_diagnostics_at_65183_ms(self):
         duration = 65.183
         samples = struct.pack('<h', 800) * round(duration * SAMPLE_RATE)

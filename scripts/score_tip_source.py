@@ -18,7 +18,7 @@ from audit_tip_v11 import pcm
 from audit_tip_v11_speech import (
     EXCLUDED_SEGMENTS, MAX_RECOGNIZED_WORDS, SAMPLE_RATE, compare_french_segments, french_speech_outcome,
     recognize_final_window, recognize_with_timeout, sha256, verify_hook_samples, verify_phone_with_context,
-    verify_services_samples,
+    verify_services_samples, verify_untimed_socials_samples,
 )
 from tip_source_asr_session import SourceAsrSession
 
@@ -176,6 +176,9 @@ def _score_source(plan, wav, directory, recognize, recognize_window, *, startup=
             verify_services=lambda segment, expected: verify_services_samples(
                 raw, 0, directory, segment, expected,
                 measured_recognizer(recognize_window, 'audit_services', diagnostics)),
+            verify_untimed_socials=lambda rows: verify_untimed_socials_samples(
+                raw, 0, directory, segments, rows, source_path,
+                measured_recognizer(recognize_window, 'audit_socials', diagnostics)),
         )
     except SourceRecognitionError as error:
         return {**report, 'reason': error.reason}
