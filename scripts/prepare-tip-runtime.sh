@@ -16,15 +16,7 @@ python -I -c 'import sys; sys.exit(sys.version_info[:3] != (3,11,14))'
 runtime_dir="$RUNNER_TEMP/jamm-tip-speech-runtime"
 export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
 if [[ "$1" == --install ]]; then
-  # Never silently move the encoder when apt changes its default candidate.
-  expected_ffmpeg=$(node -p 'JSON.parse(require("node:fs").readFileSync("scripts/tip-runtime-lock.json")).ffmpegPackage')
-  installed_ffmpeg=$(dpkg-query -W -f='${Version}' ffmpeg 2>/dev/null || true)
-  if [[ "$installed_ffmpeg" != "$expected_ffmpeg" ]]; then
-    sudo -n apt-get update -qq
-    sudo -n apt-get install -y --no-install-recommends "ffmpeg=$expected_ffmpeg"
-  fi
-  # Refuse encoder drift before fetching the large ASR cache.
-  python -I -c 'import hashlib,json,shutil; from pathlib import Path; p=json.load(open("scripts/tip-runtime-lock.json")); assert all(hashlib.sha256(Path(shutil.which(k)).read_bytes()).hexdigest()==p[k+"Sha256"] for k in ["ffmpeg","ffprobe"])'
+  python -I scripts/install_tip_ffmpeg.py
   # Each workflow uses a fresh private venv. No global/user Python is mutated.
   [[ ! -e "$runtime_dir" && ! -L "$runtime_dir" ]] || {
     echo 'Refusing to replace an existing runner speech environment.' >&2; exit 1;
