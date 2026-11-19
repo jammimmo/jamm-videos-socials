@@ -103,8 +103,8 @@ def timed_words(rows, offset=0):
                 or type(row[1]) not in (float, int) or type(row[2]) not in (float, int)):
             raise AlignmentFailure('Invalid recognizer row', 'word_row_invalid', 'recognizer_output_invalid',
                                    row_index=index, row_count=len(rows))
-        word, start, end, _ = row
-        words.append({'word': word, 'start': start + offset, 'end': end + offset})
+        word, start, end, probability = row
+        words.append({'word': word, 'start': start + offset, 'end': end + offset, 'probability': probability})
     return words
 
 
@@ -152,7 +152,8 @@ def _score_source(plan, wav, directory, recognize, recognize_window, *, startup=
 
     def alignment_window(start, end=duration, *, stage='alignment_phone'):
         first = max(0, math.floor(start * SAMPLE_RATE))
-        last = min(len(raw) // 2, math.ceil(end * SAMPLE_RATE))
+        round_end = math.floor if stage == 'alignment_greeting' else math.ceil
+        last = min(len(raw) // 2, round_end(end * SAMPLE_RATE))
         path = directory / 'source-alignment-window.wav'
         with wave.open(str(path), 'wb') as target:
             target.setparams((1, 2, SAMPLE_RATE, 0, 'NONE', 'not compressed'))
@@ -167,6 +168,7 @@ def _score_source(plan, wav, directory, recognize, recognize_window, *, startup=
             plan['segments'], timed_words(recognized), duration, sound,
             lambda boundary: alignment_window(boundary - SIGNATURE_PREROLL_SECONDS, stage='alignment_signature'), alignment_window,
             defer_domain=True,
+            recognize_greeting=lambda boundary: alignment_window(0, boundary, stage='alignment_greeting'),
         )['segments']
     except SourceRecognitionError as error:
         return {**report, 'reason': error.reason}

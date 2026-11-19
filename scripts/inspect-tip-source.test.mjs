@@ -252,6 +252,8 @@ test('public projection keeps signed measurements and strips private data at all
   assert.equal(a.status, 'available');
   assert.deepEqual(a.calls[0].rows[0], [0, -1, null, 907, fixtureDigest]);
   assert.ok(!JSON.stringify(a).includes('PRIVATE'));
+  e.calls[0].stage = 'alignment_greeting';
+  assert.equal(projectInspection(e, identity).calls[0].stage, 'alignment_greeting');
 });
 test('invalid bindings, enum, sample, digest, scene identity and row shapes fail closed', () => {
   for (const change of [

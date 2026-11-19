@@ -18,7 +18,7 @@ import unicodedata
 import wave
 
 from align_tip_v11 import (
-    ASR_REVISION, PHONE_WINDOW_EVIDENCE, SIGNATURE_RETRY_ALIGNMENT_METHOD, WORD_ALIGNMENT_METHOD, has_audible_narration,
+    ASR_REVISION, GREETING_WINDOW_EVIDENCE, PHONE_WINDOW_EVIDENCE, SIGNATURE_RETRY_ALIGNMENT_METHOD, WORD_ALIGNMENT_METHOD, has_audible_narration,
 )
 from audit_tip_v11_brand_cta import measure_final_brand_cta
 from audit_tip_v11_speech import measure_final_french_speech
@@ -276,9 +276,10 @@ def verify_alignment(data):
     method = alignment.get('method')
     if method not in (WORD_ALIGNMENT_METHOD, SIGNATURE_RETRY_ALIGNMENT_METHOD):
         raise ValueError('Invalid V11 alignment identity')
-    if 'phoneEvidenceMethod' in alignment and alignment['phoneEvidenceMethod'] != PHONE_WINDOW_EVIDENCE:
+    evidence = {'phoneEvidenceMethod': PHONE_WINDOW_EVIDENCE, 'greetingEvidenceMethod': GREETING_WINDOW_EVIDENCE}
+    if any(field in alignment and alignment[field] != marker for field, marker in evidence.items()):
         raise ValueError('Invalid V11 alignment identity')
-    if method == SIGNATURE_RETRY_ALIGNMENT_METHOD or 'phoneEvidenceMethod' in alignment:
+    if method == SIGNATURE_RETRY_ALIGNMENT_METHOD or evidence.keys() & alignment.keys():
         if alignment.get('provenance') != ASR_REVISION or alignment.get('reviewRequired') is not True:
             raise ValueError('Invalid V11 alignment identity')
     duration = alignment.get('durationInFrames')

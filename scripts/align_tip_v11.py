@@ -5,6 +5,7 @@ from array import array
 import difflib
 import json
 import math
+from numbers import Real
 from pathlib import Path
 import re
 import sys
@@ -25,6 +26,10 @@ ASR_REVISION = '0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf'
 WORD_ALIGNMENT_METHOD = 'french-v11-word-anchors'
 SIGNATURE_RETRY_ALIGNMENT_METHOD = 'french-v11-word-anchors-signature-retry'
 SIGNATURE_PREROLL_SECONDS = .10
+GREETING_WINDOW_EVIDENCE = 'french-v11-pinned-greeting-window'
+GREETING_WORDS = ['salam', 'alikoum', 'nanga', 'def']
+MAX_GREETING_SECONDS = 4
+MIN_GREETING_ANCHOR_PROBABILITY = .60
 PHONE_WINDOW_EVIDENCE = 'french-v11-pinned-phone-window'
 PHONE_WORDS = ['plus', *(word for group in NUMBER_WORDS.values() for word in group.split())]
 PHONE_BOUNDARY_TOLERANCE_SECONDS = .10
@@ -487,7 +492,77 @@ def voiced_overlap(sound, start, end):
     return sum(max(0, min(end, right) - max(start, left)) for left, right in sound)
 
 
-def align_with_phone_retry(segments, words, duration, sound, recognize_tail, recognize_phone, *, defer_domain=False):
+def supported_opening_rows(rows, sound, end, *, weak_first=False):
+    previous = 0
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict) or not isinstance(row.get('word'), str):
+            return False
+        start, last, probability = (row.get(key) for key in ('start', 'end', 'probability'))
+        if (any(type(v) not in (int, float) or not math.isfinite(v) for v in (start, last, probability))
+            or not previous <= start < last <= end or not 0 <= probability <= 1
+            or (not weak_first or index != 0) and probability < MIN_GREETING_ANCHOR_PROBABILITY
+            or voiced_overlap(sound, start, last) <= 0):
+            return False
+        previous = last
+    return True
+
+
+def missing_greeting_boundary(segments, words, duration, sound):
+    if (len(segments) < 2 or [s['id'] for s in segments[:2]] != ['greeting', 'hook']
+        or tokens(segments[0]['text']) != GREETING_WORDS or len(words) < 3 or not sound):
+        return None
+    hook = tokens(segments[1]['text'])[:3]
+    if (len(hook) != 3 or not supported_opening_rows(words[:3], sound, duration, weak_first=True)
+        or [tokens(row['word']) for row in words[:3]] != [[word] for word in hook]
+        or not 0 < words[0]['start'] <= MAX_GREETING_SECONDS):
+        return None
+    expected = [token for part in segments for token in tokens(part['text'])]
+    actual = [token for row in words for token in tokens(row['word'])]
+    if any(sum(seq[i:i+3] == hook for i in range(len(seq)-2)) != 1 for seq in (expected, actual)):
+        return None
+    boundary = words[0]['start']
+    return boundary if voiced_overlap(sound, 0, boundary) > 0 else None
+
+
+def measured_greeting(rows, boundary, sound):
+    if not isinstance(rows, list) or not 3 <= len(rows) <= 4 or not supported_opening_rows(rows, sound, boundary):
+        return False
+    groups = [tokens(row['word']) for row in rows]
+    if any(len(group) != 1 for group in groups[:-1]) or (len(groups[-1]) != 1 and groups[-1] != ['nanga', 'def']):
+        return False
+    observed = [token for group in groups for token in group]
+    # Credit only exact positional anchors. One independently timed spelling can
+    # remain unmatched; three of four exact anchors necessarily span both clauses.
+    return len(observed) == len(GREETING_WORDS) and sum(a == b for a, b in zip(observed, GREETING_WORDS)) >= 3
+
+
+def align_with_phone_retry(segments, words, duration, sound, recognize_tail, recognize_phone, *,
+                           defer_domain=False, recognize_greeting=None):
+    def remaining(full_words):
+        return _align_with_phone_retry(segments, full_words, duration, sound, recognize_tail, recognize_phone,
+                                       defer_domain=defer_domain)
+
+    try:
+        return remaining(words)
+    except AlignmentFailure as error:
+        if (recognize_greeting is None or error.code != 'segment_coverage_low'
+            or error.metrics != {'segment_index': 0, 'matched_words': 0, 'expected_words': 4}):
+            raise
+        boundary = missing_greeting_boundary(segments, words, duration, sound)
+        if boundary is None:
+            raise
+        prefix = recognize_greeting(boundary)
+        if not measured_greeting(prefix, boundary, sound):
+            raise
+
+    # Every full-pass row keeps its original text, confidence and interval.
+    # The ordinary global, phone, signature and scene timing gates apply anew.
+    result = remaining([*prefix, *words])
+    result['greetingEvidenceMethod'] = GREETING_WINDOW_EVIDENCE
+    return result
+
+
+def _align_with_phone_retry(segments, words, duration, sound, recognize_tail, recognize_phone, *, defer_domain):
     try:
         return align_with_signature_retry(segments, words, duration, sound, recognize_tail, defer_domain=defer_domain)
     except PhoneEvidenceError as error:
@@ -523,17 +598,25 @@ def align_with_phone_retry(segments, words, duration, sound, recognize_tail, rec
 def recognize_words(model, wav_path, beam_size, time_offset=0):
     result, _ = model.transcribe(str(wav_path), language='fr', beam_size=beam_size,
                                  word_timestamps=True, condition_on_previous_text=False)
-    return [{'word': word.word, 'start': float(word.start) + time_offset, 'end': float(word.end) + time_offset}
-            for segment in result for word in segment.words]
+    rows = []
+    for segment in result:
+        for word in segment.words:
+            row = {'word': word.word, 'start': float(word.start) + time_offset, 'end': float(word.end) + time_offset}
+            probability = getattr(word, 'probability', None)
+            if isinstance(probability, Real) and not isinstance(probability, bool):
+                row['probability'] = float(probability)
+            rows.append(row)
+    return rows
 
 
-def recognize_audio_window(model, wav_path, start, end=None):
+def recognize_audio_window(model, wav_path, start, end=None, *, end_before=False):
     with TemporaryDirectory(prefix='tip-v11-window-') as directory:
         clip = str(Path(directory) / 'excerpt.wav')
         with wave.open(wav_path, 'rb') as source, wave.open(clip, 'wb') as target:
             rate = source.getframerate()
             first_frame = max(0, math.floor(start * rate))
-            final_frame = source.getnframes() if end is None else min(source.getnframes(), math.ceil(end * rate))
+            round_end = math.floor if end_before else math.ceil
+            final_frame = source.getnframes() if end is None else min(source.getnframes(), round_end(end * rate))
             source.setpos(first_frame)
             target.setparams(source.getparams())
             target.writeframes(source.readframes(final_frame - first_frame))
@@ -578,6 +661,7 @@ def main():
                 lambda boundary: recognize_signature_tail(model, args.wav, boundary),
                 lambda start, end: recognize_audio_window(model, args.wav, start, end),
                 defer_domain=args.defer_domain_to_final,
+                recognize_greeting=lambda boundary: recognize_audio_window(model, args.wav, 0, boundary, end_before=True),
             )
         except ValueError as error:
             report_alignment_failure(error, args.failure_code_file)

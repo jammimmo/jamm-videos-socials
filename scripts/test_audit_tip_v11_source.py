@@ -83,6 +83,27 @@ class SourceScoringTest(unittest.TestCase):
         self.assertGreater(b['omittedRows'], 0)
         self.assertEqual(b['pcmSha256'], original['pcmSha256'])
 
+    def test_greeting_recovery_uses_only_prefix_pcm_and_preserves_source_scoring(self):
+        from math import floor
+        complete = [(w['word'], w['start'], w['end'], .95) for w in speech(SEGMENTS)]
+        prefix, full = complete[:4], complete[4:]
+        frames = floor(full[0][1] * SAMPLE_RATE)
+        def focused(path):
+            self.assertEqual(path.read_bytes(), make_wav(self.data[:frames * 2]))
+            return prefix
+        with TemporaryDirectory() as folder:
+            report = score_source(self.plan, self.wav, Path(folder), lambda _: full, focused,
+                                  inspection_nonce='1' * 32)
+        self.assertEqual(report['segments'], self.run_source()['segments'])
+        self.assertEqual(report['status'], 'matched')
+        calls = report['inspection_evidence']['calls']
+        self.assertEqual([c['stage'] for c in calls], ['full_audio', 'alignment_greeting'])
+        self.assertEqual((calls[1]['startSample'], calls[1]['endSample'], calls[1]['pcmSha256']),
+                         (0, frames, sha256(self.data[:frames * 2])))
+        rejected = self.run_source(rows=full, window=lambda _: prefix[:1])
+        self.assertEqual((rejected['reason'], rejected['alignment_code'], rejected['matched_words']),
+                         ('alignment_evidence_invalid', 'segment_coverage_low', 0))
+
     def test_scores_a_single_corresponding_fixed_socials_point_as_an_edit_only(self):
         from align_tip_v11 import align, audible_windows
         from audit_tip_v11_speech import FIXED_SOCIALS_WORDS
