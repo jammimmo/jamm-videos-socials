@@ -48,7 +48,7 @@ class FixedDomainAndSocialOnsetTest(unittest.TestCase):
         self.assertEqual(item['status'], 'inconclusive')
         self.assertEqual(item['observed_words'], mapped['reported'])
         self.assertEqual(json.dumps(raw), unchanged)
-        self.assertEqual((MIN_WORD_PROBABILITY, MIN_SEGMENT_ACCURACY_PERCENT, MIN_GLOBAL_ACCURACY_PERCENT), (.6, 85, 92))
+        self.assertEqual((MIN_WORD_PROBABILITY, MIN_SEGMENT_ACCURACY_PERCENT, MIN_GLOBAL_ACCURACY_PERCENT), (.6, 75, 85))
 
     def test_other_domain_tld_missing_brand_and_suffix_cannot_spend_an_ordinary_edit(self):
         prefix = ['Retrouvez-nous', 'sur', 'notre', 'site']

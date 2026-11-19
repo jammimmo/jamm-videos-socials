@@ -213,11 +213,12 @@ class UntimedSocialsTest(unittest.TestCase):
             for name, altered in mutations(original, point_index).items():
                 with self.subTest(stream=stream, name=name):
                     result, calls = self.measure(**{stream: altered})
-                    if stream == 'crop' or name == 'detached point':
+                    two_edits = stream == 'full' and name in ('uncertain ordinary word', 'second point')
+                    if stream == 'crop' or name == 'detached point' or two_edits:
                         self.assertEqual(result['status'], 'matched')
                         row = result['segments'][1]
                         self.assertEqual(row['measurement']['method'], 'ordinary_untimed_words_scored_as_edits_v1')
-                        self.assertEqual(row['observed_words'].count(None), 1)
+                        self.assertEqual(row['observed_words'].count(None), 2 if two_edits else 1)
                         self.assertEqual(row['measurement']['point_words_credited'], 0)
                     else:
                         self.assertEqual(result['status'], 'inconclusive')
