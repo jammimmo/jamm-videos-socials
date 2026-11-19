@@ -47,6 +47,7 @@ HOOK_QUIET_MIN_TOTAL = SAMPLE_RATE * 3 // 10
 FIXED_BRAND_WORD_INDEX = {'services': 0, 'socials': 2}
 FIXED_DOMAIN_WORDS = ('retrouvez', 'nous', 'sur', 'notre', 'site', 'jamm', 'immo', 'point', 'com')
 FIXED_DOMAIN_JAMIMO_WORDS = ('retrouvez', 'nous', 'sur', 'notre', 'site', 'jamimo', 'com')
+FIXED_SERVICES_WORDS = tuple('jamm immo vous accompagne pour acheter vendre louer ou confier la gestion locative de votre bien'.split())
 FIXED_SOCIALS_WORDS = ('suivez', 'aussi', 'jamm', 'immo', 'sur', 'nos', 'reseaux', 'sociaux',
                        'pour', 'retrouver', 'nos', 'prochains', 'conseils')
 FIXED_SOCIALS_BOUNDARY_WORDS = ('aussi', 'jam', 'imo', 'sur', 'nos', 'reseaux', 'sociaux',
@@ -137,6 +138,11 @@ def observed_words_with_uncertainty(identity, expected, raw_actual, actual, rows
             if reported[5] not in ('jamimo', None):
                 return None, True
             reported[5:6] = ['jamm', 'immo']
+        elif alias_kind == 'fixed_dakar_brand':
+            alias = FIXED_BRAND_WORD_INDEX[identity]
+            if reported[alias:alias + 2] != ['djam', 'imo']:
+                return None, True
+            reported[alias:alias + 2] = ['jamm', 'immo']
         elif alias_kind == 'fixed_socials_boundary':
             if reported[1:3] != ['jam', 'imo']:
                 return None, True
@@ -185,6 +191,18 @@ def recognize_with_timeout(wav_path, timeout=RECOGNITION_TIMEOUT_SECONDS):
     return json.loads(completed.stdout)
 
 
+class SpeechComparisonError(ValueError):
+    """A failed full-pass comparison predicate, without decoder text or paths."""
+
+    def __init__(self, predicate, number, rows, segment_index=None):
+        super().__init__(predicate)
+        self.detail = {'phase': 'word_assignment', 'predicate': predicate, 'row_index': number - 1}
+        if isinstance(rows, (list, tuple)):
+            self.detail['row_count'] = len(rows)
+        if segment_index is not None:
+            self.detail['segment_index'] = segment_index
+
+
 def words_by_segment(segments, recognized_words, lag_samples, *, opening_hook=None, hook_crossings=None,
                      boundary_crossings=None, untimed_socials=None):
     observed = [[] for _ in segments]
@@ -192,11 +210,21 @@ def words_by_segment(segments, recognized_words, lag_samples, *, opening_hook=No
     offset = lag_samples / SAMPLE_RATE
     previous = 0
     index = 0
-    for number, (text, start, end, probability) in enumerate(recognized_words, 1):
-        if number > MAX_RECOGNIZED_WORDS or not isinstance(text, str) or not 1 <= len(text) <= 300:
-            raise ValueError('malformed or excessive recognized words')
-        if not all(type(value) in (int, float) and math.isfinite(value) for value in (start, end, probability)):
-            raise ValueError('invalid speech timestamps or confidence')
+    def invalid(predicate, segment_index=None):
+        return SpeechComparisonError(predicate, number, recognized_words, segment_index)
+
+    for number, raw_row in enumerate(recognized_words, 1):
+        if number > MAX_RECOGNIZED_WORDS:
+            raise invalid('row_count_excessive')
+        if not isinstance(raw_row, (tuple, list)) or len(raw_row) != 4:
+            raise invalid('row_shape_invalid')
+        text, start, end, probability = raw_row
+        if not isinstance(text, str) or not 1 <= len(text) <= 300:
+            raise invalid('row_text_invalid')
+        if not all(type(value) in (int, float) and math.isfinite(value) for value in (start, end)):
+            raise invalid('timestamp_nonfinite')
+        if type(probability) not in (int, float) or not math.isfinite(probability) or not 0 <= probability <= 1:
+            raise invalid('confidence_invalid')
         if untimed_socials and number - 1 == untimed_socials['measurement']['full_row_index']:
             # Preserve the original point row in its scene. Only the independently
             # measured nullable result can score this scene, with one full edit.
@@ -204,12 +232,19 @@ def words_by_segment(segments, recognized_words, lag_samples, *, opening_hook=No
             if not (part['id'] == 'socials' and text.strip().lower() == 'aussi' and start == end
                     and part['start'] < start - offset < part['end'] and previous <= start
                     and MIN_WORD_PROBABILITY <= probability <= 1):
-                raise ValueError('invalid corroborated socials point')
+                raise invalid('corroborated_point_invalid', untimed_socials['measurement']['scene_index'])
             previous = start
             observed[untimed_socials['measurement']['scene_index']].append((text.strip(), start - offset, end - offset, probability))
             continue
-        if not previous <= start < end <= segments[-1]['end'] + abs(offset) + .12 or not 0 <= probability <= 1:
-            raise ValueError('unexpected speech timestamps or confidence')
+        if start < previous:
+            raise invalid('timestamp_regression')
+        if end < start:
+            raise invalid('timestamp_reversed')
+        if start == end:
+            owner = next((i for i, part in enumerate(segments) if part['start'] <= start - offset < part['end']), None)
+            raise invalid('timestamp_zero_duration', owner)
+        if end > segments[-1]['end'] + abs(offset) + .12:
+            raise invalid('timestamp_overrun')
         previous = start
         text = text.strip()
         spoken_plus = text == '+'
@@ -230,7 +265,7 @@ def words_by_segment(segments, recognized_words, lag_samples, *, opening_hook=No
             continue
         excluded = segment['id'] in EXCLUDED_SEGMENTS
         if not segment['start'] <= middle < segment['end']:
-            raise ValueError('recognized word ambiguous at a scene boundary')
+            raise invalid('midpoint_outside_scene', index)
         # A word spanning verified and excluded speech blocks acceptance.
         # Keep the measurements for French scenes that the word did not touch.
         overlaps = [i for i, part in enumerate(segments) if part['start'] < end and start < part['end']]
@@ -269,6 +304,25 @@ def canonical_fixed_brand_words(identity, expected, actual, rows):
         or first[2] > second[1] or min(first[3], second[3]) < MIN_WORD_PROBABILITY):
         return actual
     return actual[:index] + ['jamm', 'immo'] + actual[index + 2:]
+
+
+def dakar_brand_spelling_index(segment, expected, actual, rows):
+    """The Dakar French ASR spelling Djam Imo is accepted only in the two fixed calls to action."""
+    identity = segment['id']
+    index = FIXED_BRAND_WORD_INDEX.get(identity)
+    if (index is None or tuple(expected) != (FIXED_SERVICES_WORDS if identity == 'services' else FIXED_SOCIALS_WORDS)
+        or actual != [*expected[:index], 'djam', 'imo', *expected[index + 2:]] or len(rows) != len(actual)):
+        return None
+    previous = segment['start']
+    for word, (text, start, end, _) in zip(actual, rows):
+        if normalized_words(identity, text) != [word] or not previous <= start < end <= segment['end']:
+            return None
+        previous = end
+    left, right = rows[index:index + 2]
+    if (left[0].strip().lower() != 'djam' or right[0].strip().lower() != 'imo'
+        or min(left[3], right[3]) < MIN_WORD_PROBABILITY):
+        return None
+    return index
 
 
 def fixed_fused_brand_index(segment, expected, actual, rows):
@@ -546,16 +600,26 @@ def exact_adjacent_split(left, right, rows, original_split, expected_left, expec
     return matches[0] if len(matches) == 1 else None
 
 
-def anchored_phone_range(segments, expected_words, observed, index):
+def anchored_phone_range(segments, expected_words, observed, index, contact_result):
     if (not 0 < index < len(segments) - 1
         or [part['id'] for part in segments[index - 1:index + 2]] != ['contact', 'phone', 'socials']
         or expected_words[index] != PHONE_WORDS):
         return None
     left = observed[index - 1]
     right_start = expected_words[index + 1][:2]
-    if (not left or segment_words('contact', left) != expected_words[index - 1]
-        or any(word[3] < MIN_WORD_PROBABILITY for word in left) or len(right_start) != 2):
+    if not left or segment_words('contact', left) != expected_words[index - 1] or len(right_start) != 2:
         return None
+    uncertain = [r for r in left if r[3] < MIN_WORD_PROBABILITY]
+    if uncertain:
+        # The contact line must already have passed its ordinary score, with
+        # the final two words independently anchoring the exact phone crop.
+        if (not contact_result or contact_result['segment'] != 'contact' or contact_result['status'] != 'matched'
+            or [normalized_words('contact', r[0]) for r in left[-2:]] != [['meme'], ['numero']]
+            or any(r[3] < MIN_WORD_PROBABILITY for r in left[-2:])
+            or any(protected_speech(normalized_words('contact', r[0]))
+                   or left[-1][2] - r[2] <= MAX_PHONE_EDGE_SHIFT_SECONDS for r in uncertain)
+            or any(l[2] > r[1] for l, r in zip(left, left[1:]))):
+            return None
     rows = observed[index] + observed[index + 1]
     start = left[-1][2]
     phone = segments[index]
@@ -656,6 +720,10 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
             alias_kind = 'fixed_domain_jamimo'
         elif index in ambiguous_boundary:
             actual = raw_actual
+        elif (dakar_index := dakar_brand_spelling_index(segment, expected, raw_actual, observed[index])) is not None:
+            alias_kind = 'fixed_dakar_brand'
+            alias_index = dakar_index
+            actual = [*raw_actual[:dakar_index], 'jamm', 'immo', *raw_actual[dakar_index + 2:]]
         elif (spelling := observed_centre_ville_spelling(segment, expected, raw_actual, observed[index])) is not None:
             actual = spelling
             alias_kind = 'centre_ville_spelling'
@@ -698,7 +766,14 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
         if reported is not None and all(word is not None for word in reported):
             item['observed_sha256'] = sha256(' '.join(reported).encode())
         if matched and alias_kind:
-            if alias_kind == 'fixed_company_domain_notation':
+            if alias_kind == 'fixed_dakar_brand':
+                item['measurement'] = {
+                    'method': 'fixed_dakar_djam_imo_spelling',
+                    'raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
+                    'raw_timed_rows_sha256': timed_rows_digest(observed[index]),
+                    'brand_min_probability_milli': round(min(r[3] for r in observed[index][alias_index:alias_index + 2]) * 1000),
+                }
+            elif alias_kind == 'fixed_company_domain_notation':
                 item['measurement'] = {
                     'method': 'fixed_company_domain_url_notation',
                     'raw_observed_sha256': sha256(' '.join(domain_notation['raw_words']).encode()),
@@ -778,7 +853,7 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
                     'global_raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
                 }}
         elif not matched and identity == 'phone' and verify_phone:
-            window = anchored_phone_range(segments, expected_words, observed, index)
+            window = anchored_phone_range(segments, expected_words, observed, index, results[-1] if results else None)
             measurement = verify_phone(*window) if window else None
             verified_words = measurement.get('observed_words') if measurement else None
             if verified_words == expected:

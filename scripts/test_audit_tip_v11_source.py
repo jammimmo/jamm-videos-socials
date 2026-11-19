@@ -131,6 +131,34 @@ class SourceScoringTest(unittest.TestCase):
                 self.assertEqual({key: report[key] for key in metrics}, metrics)
                 self.assertNotIn('SECRET', json.dumps(report))
 
+    def test_private_post_alignment_failure_retains_only_its_finite_predicate_and_indices(self):
+        from audit_tip_v11_speech import SpeechComparisonError, words_by_segment
+        scene = [{'id': 'hook', 'start': 1, 'end': 2, 'text': 'secret'}]
+        for candidate, predicate in (
+            (('private',), 'row_shape_invalid'), (('', 1, 1.1, .9), 'row_text_invalid'),
+            (('private', 1, float('inf'), .9), 'timestamp_nonfinite'),
+            (('private', 1, 1.1, -.01), 'confidence_invalid'),
+            (('private', -.1, .2, .9), 'timestamp_regression'),
+            (('private', 1.2, 1.1, .9), 'timestamp_reversed'),
+            (('private', 1.2, 1.2, .9), 'timestamp_zero_duration'),
+            (('private', 1.1, 2.4, .9), 'timestamp_overrun'),
+            (('private', .1, .2, .9), 'midpoint_outside_scene'),
+        ):
+            with self.subTest(predicate=predicate), self.assertRaises(SpeechComparisonError) as error:
+                words_by_segment(scene, [candidate], 0)
+            self.assertEqual(error.exception.detail['predicate'], predicate)
+            self.assertEqual(error.exception.detail['row_index'], 0)
+            self.assertEqual(error.exception.detail['row_count'], 1)
+            self.assertNotIn('private', str(error.exception.detail))
+        rows = [(w['word'], w['start'], w['end'], .95) for w in speech(self.plan['segments'])]
+        index = next(i for i, w in enumerate(rows) if w[0] == 'commence')
+        rows[index] = ('commence', rows[index][1], rows[index][1], .99)
+        source = self.run_source(rows=rows)
+        self.assertEqual(source['reason'], 'recognition_or_timing_inconclusive')
+        self.assertEqual(source['segments'], [])
+        self.assertEqual(source['comparison_failure'], {'phase': 'word_assignment', 'predicate': 'timestamp_zero_duration',
+                                                       'row_index': index, 'row_count': len(rows), 'segment_index': 1})
+
     def test_classifies_full_decode_timeout_without_exposing_exception_or_transcript(self):
         failure = subprocess.TimeoutExpired(['sensitive-command-path'], 150,
                                              output=b'private raw spoken words', stderr=b'private diagnostics')

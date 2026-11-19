@@ -60,7 +60,32 @@ function measuredDiagnostic(speech) {
   return diagnostic;
 }
 
-export async function measureSource(measure, draft, wav, scratch, env) {
+const wordAssignmentPredicates = new Set([
+  'row_count_excessive', 'row_shape_invalid', 'row_text_invalid', 'timestamp_nonfinite', 'confidence_invalid',
+  'timestamp_regression', 'timestamp_reversed', 'timestamp_zero_duration', 'timestamp_overrun',
+  'corroborated_point_invalid', 'midpoint_outside_scene',
+]);
+
+function inspectionComparisonFailure(speech) {
+  const detail = speech.comparison_failure;
+  if (speech.reason !== 'recognition_or_timing_inconclusive' || !Array.isArray(speech.segments)
+    || speech.segments.length !== 0 || !detail || typeof detail !== 'object' || Array.isArray(detail)) return;
+  if (detail.phase === 'french_comparison' && detail.predicate === 'unclassified_value_error') {
+    return { phase: detail.phase, predicate: detail.predicate };
+  }
+  if (detail.phase !== 'word_assignment' || !wordAssignmentPredicates.has(detail.predicate)
+    || !Number.isInteger(detail.row_index) || detail.row_index < 0 || detail.row_index > 500) return;
+  const safe = { phase: detail.phase, predicate: detail.predicate, row_index: detail.row_index };
+  if (Number.isInteger(detail.row_count) && detail.row_count > detail.row_index && detail.row_count <= 501) {
+    safe.row_count = detail.row_count;
+  }
+  if (Number.isInteger(detail.segment_index) && detail.segment_index >= 0 && detail.segment_index < 32) {
+    safe.segment_index = detail.segment_index;
+  }
+  return safe;
+}
+
+export async function measureSource(measure, draft, wav, scratch, env, { inspectComparison = false } = {}) {
   for (let attempt = 1; attempt <= 2; attempt++) {
     let transient = false;
     let alignment = {};
@@ -73,7 +98,9 @@ export async function measureSource(measure, draft, wav, scratch, env) {
         // alongside a negative score. Never retry mixed evidence to obtain a pass.
         const incompleteRecognizerCall = Array.isArray(speech.recognizer_diagnostics)
           && speech.recognizer_diagnostics.some(call => call?.outcome !== 'completed');
-        return { diagnostic: { ...measuredDiagnostic(speech), incompleteRecognizerCall, measurementAttempts: attempt } };
+        const diagnostic = { ...measuredDiagnostic(speech), incompleteRecognizerCall, measurementAttempts: attempt };
+        const comparison = inspectComparison && inspectionComparisonFailure(speech);
+        return comparison ? { diagnostic, comparison } : { diagnostic };
       }
       if (speech?.status === 'inconclusive') {
         if (runtimeReasons.includes(speech.reason)) {
