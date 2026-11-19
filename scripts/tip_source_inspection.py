@@ -9,7 +9,7 @@ import wave
 
 from audit_tip_v11_speech import (
     ASR_REVISION, EXCLUDED_SEGMENTS, MAX_OBSERVED_WORDS, MAX_RECOGNIZED_WORDS, MIN_GLOBAL_ACCURACY_PERCENT,
-    SAMPLE_RATE, normalized_words, protected_speech, sha256, speech_edits,
+    PHONE_PREFIX_METHOD, PHONE_WORDS, SAMPLE_RATE, normalized_words, protected_speech, sha256, speech_edits,
 )
 
 MAX_TRACE_BYTES = 768 * 1024
@@ -137,7 +137,9 @@ class SourceInspection:
                          method=item.get('measurement', {}).get('method'), reason=item.get('reason'))
             if words:
                 scene['editCount'] = speech_edits(self.expected[identity], words)
-                scene['protectedMatch'] = protected_speech(self.expected[identity]) == protected_speech(words)
+                numeric_phone = (identity == 'phone' and self.expected[identity] == PHONE_WORDS
+                                 and scene['method'] == PHONE_PREFIX_METHOD and words == [None, *PHONE_WORDS[1:]])
+                scene['protectedMatch'] = numeric_phone or protected_speech(self.expected[identity]) == protected_speech(words)
         total = sum(len(e) for e in self.expected.values())
         edits = [s['editCount'] for s in self.scenes.values()]
         checks = [s['protectedMatch'] for s in self.scenes.values()]

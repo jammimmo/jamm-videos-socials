@@ -182,12 +182,13 @@ def _score_source(plan, wav, directory, recognize, recognize_window, *, startup=
             inspection.aligned(segments)
         narration = pcm(raw)
 
-        def phone_verifier(start, end):
+        def phone_verifier(start, end, *, full_prefix_samples=None):
             contact = next((s for s in segments if s['id'] == 'contact'), None)
             return verify_phone_with_context(raw, 0, directory, segments, start, end,
                 measured(recognize_window, 'audit_phone', round(start * SAMPLE_RATE)),
                 recognize_context=measured(recognize_window, 'audit_phone_context',
-                                           round(contact['start'] * SAMPLE_RATE) if contact else None))
+                                           round(contact['start'] * SAMPLE_RATE) if contact else None),
+                full_prefix_samples=full_prefix_samples)
 
         results = compare_french_segments(
             segments, recognized, 0,
@@ -202,7 +203,7 @@ def _score_source(plan, wav, directory, recognize, recognize_window, *, startup=
                 raw, 0, directory, segments, rows, source_path,
                 measured(recognize_window, 'audit_socials', next(
                     (round(s['start'] * SAMPLE_RATE) for s in segments if s['id'] == 'socials'), None))),
-            inspection=inspection,
+            phone_field_scoring=True, inspection=inspection,
         )
     except SourceRecognitionError as error:
         return {**report, 'reason': error.reason}
