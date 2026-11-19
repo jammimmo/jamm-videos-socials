@@ -102,6 +102,80 @@ class V11FinalEvidenceTest(unittest.TestCase):
             with self.subTest(final_samples=len(shifted)):
                 self.assertEqual(self.preservation(shifted)['reason'], 'unexpected_padding_audio')
 
+    def add_local_noise(self, decoded, start, length, fraction=.23):
+        # Independent, deterministic noise at a fraction of the reference RMS.
+        # This models a measurable residual without encoding a second MP4.
+        noise = random.Random(start)
+        for i in range(48 + start, 48 + start + length):
+            decoded[i] += round(fraction * .707 * noise.randint(-5000, 5000))
+
+    def test_sparse_coherent_residual_retains_original_excess_and_pcm_identity(self):
+        original = self.preservation(self.final)
+        self.assertEqual(original['contract'], 'tip-v11-final-audio-preservation-v1')
+        self.assertNotIn('codec_exceptions', original)
+        start = SAMPLE_RATE
+        self.add_local_noise(self.final, start, AUDIO_PRESERVATION_WINDOW)
+        report = self.preservation(self.final)
+        self.assertEqual((report['status'], report['contract']), ('matched', 'tip-v11-final-audio-preservation-v2'))
+        rows = report['codec_exceptions']
+        self.assertEqual([row[0] for row in rows], [100])
+        self.assertEqual(report['decoded_pcm_sha256'], sha256(self.final.tobytes()))
+        self.assertEqual(report['windows_over_limit'], len(rows))
+        self.assertEqual(report['worst_residual_to_limit_ppm'], max(row[1] for row in rows))
+        self.assertGreater(rows[0][1], 1_000_000)
+        self.assertLessEqual(rows[0][5], 1_000_000)
+
+    def test_sparse_allowance_rejects_local_attenuation_shift_or_other_voice(self):
+        start = 48 + SAMPLE_RATE
+        length = AUDIO_PRESERVATION_WINDOW
+        for name, replacement in (
+            ('attenuated', array.array('h', (round(sample * .75) for sample in self.final[start:start + length]))),
+            ('shifted', self.final[start + 12:start + length + 12]),
+            ('substituted', self.final[900:900 + length]),
+        ):
+            with self.subTest(name=name):
+                altered = self.final[:]
+                altered[start:start + length] = replacement
+                if name == 'attenuated':
+                    self.assertTrue(measure_audio(self.segments, self.voice, self.voice, altered)['passed'])
+                self.assertEqual(self.preservation(altered)['reason'], 'local_sample_residual_over_limit')
+
+    def test_exception_duration_includes_touching_windows_and_separate_bursts(self):
+        window = AUDIO_PRESERVATION_WINDOW
+        for name, offsets in (
+            ('contiguous', [SAMPLE_RATE, SAMPLE_RATE + window]),
+            ('sparse window count but excessive union duration', [SAMPLE_RATE, 2 * SAMPLE_RATE, 3 * SAMPLE_RATE]),
+            ('unmeasurable edge context', [0]),
+        ):
+            with self.subTest(name=name):
+                altered = self.final[:]
+                for start in offsets:
+                    self.add_local_noise(altered, start, window)
+                result = self.preservation(altered)
+                self.assertEqual(result['reason'], 'local_sample_residual_over_limit')
+                self.assertLessEqual(result['worst_residual_to_limit_ppm'], 2_000_000)
+
+    def test_quiet_unrelated_energy_is_rejected_even_when_source_gain_is_preserved(self):
+        start, window = SAMPLE_RATE, AUDIO_PRESERVATION_WINDOW
+        for i in range(window):
+            # The alternating orthogonal component overwhelms the quiet signal.
+            value = 42 if i % 2 else -42
+            self.voice[start + i] = value
+            self.final[48 + start + i] = round(value * .707) + (38 if i % 4 < 2 else -38)
+        result = self.preservation(self.final)
+        self.assertEqual(result['reason'], 'local_sample_residual_over_limit')
+        self.assertLessEqual(result['worst_residual_to_limit_ppm'], 2_000_000)
+
+    def test_isolated_signal_cannot_explain_an_excess_in_its_surrounding_context(self):
+        start, window = SAMPLE_RATE, AUDIO_PRESERVATION_WINDOW
+        for left in (start - window, start + window):
+            self.voice[left:left + window] = array.array('h', [0]) * window
+            self.final[48 + left:48 + left + window] = array.array('h', [0]) * window
+        self.add_local_noise(self.final, start, window)
+        result = self.preservation(self.final)
+        self.assertEqual(result['reason'], 'local_sample_residual_over_limit')
+        self.assertLessEqual(result['worst_residual_to_limit_ppm'], 2_000_000)
+
     def test_contact_ocr_preserves_meaningful_punctuation_and_digits(self):
         phone = normalized_ocr_text('phone', '+221 76 944 48 49')
         self.assertNotEqual(phone, normalized_ocr_text('phone', '221 76 944 48 49'))

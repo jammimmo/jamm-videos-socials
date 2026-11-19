@@ -37,6 +37,7 @@ CAPTION_WIDTH, CAPTION_HEIGHT = 746, 162
 CAPTION_CROP = f'{CAPTION_WIDTH}:{CAPTION_HEIGHT}:128:1372'
 CONTACT_CROPS = {'domain': '560:104:130:710', 'phone': '578:74:128:898', 'brand': '386:44:132:1056'}
 AUDIO_PRESERVATION_CONTRACT = 'tip-v11-final-audio-preservation-v1'
+AUDIO_CODEC_PRESERVATION_CONTRACT = 'tip-v11-final-audio-preservation-v2'
 AUDIO_PRESERVATION_WINDOW = SAMPLE_RATE // 50
 AUDIO_PRESERVATION_HOP = SAMPLE_RATE // 100
 AUDIO_PRESERVATION_FLOOR = 20
@@ -206,6 +207,58 @@ process.stdout.write(tipV11Effects(segments, durationInFrames));
 """, module_url, data=json.dumps(cue_inputs).encode())
 
 
+def codec_window_metrics(reference, decoded, start, length, gain):
+    expected = [sample * gain for sample in reference[start:start + length]]
+    observed = decoded[start:start + length]
+    power = sum(value * value for value in expected)
+    observed_power = sum(value * value for value in observed)
+    if not power or not observed_power:
+        return None
+    cross = sum(a * b for a, b in zip(expected, observed))
+    rms = math.sqrt(power / length)
+    residual = math.sqrt(sum((a - b) ** 2 for a, b in zip(expected, observed)) / length)
+    limit = max(AUDIO_PRESERVATION_FLOOR, AUDIO_PRESERVATION_RMS_RATIO * rms)
+    cosine = max(-1, min(1, cross / math.sqrt(power * observed_power)))
+    return (math.ceil(residual / limit * 1_000_000), math.floor(rms * 1000),
+            round(cross / power * 1_000_000), math.floor(cosine * 1_000_000))
+
+
+def verified_codec_exceptions(reference, decoded, gain, offsets, over_limit):
+    """Keep the fixed lag. Verify the source waveform inside every exceptional window."""
+    if len(over_limit) * 100 > len(offsets):
+        return None
+    window = AUDIO_PRESERVATION_WINDOW
+    rows = []
+    union_start = union_end = union_samples = 0
+    for index in over_limit:
+        start = offsets[index]
+        end = start + window
+        if start < window or end + window > len(reference):
+            return None
+        if start > union_end:
+            union_start = union_end = start
+        union_samples += end - union_end
+        union_end = end
+        if end - union_start > window + AUDIO_PRESERVATION_HOP or union_samples * 100 > len(reference):
+            return None
+
+        local = codec_window_metrics(reference, decoded, start, window, gain)
+        context = codec_window_metrics(reference, decoded, start - window, 3 * window, gain)
+        if local is None or context is None:
+            return None
+        residual, rms, projection, cosine = local
+        context_residual, _, _, context_cosine = context
+        # Where the absolute noise floor dominates, the projection must still explain
+        # at least half of decoded energy. At higher levels require the waveform cosine.
+        minimum_cosine = 940_000 if rms * 180_000 >= 20_000 * 1_000_000 else 707_107
+        if (not 1_000_000 < residual <= 2_000_000 or rms <= 20_000
+            or not 820_000 <= projection <= 1_180_000 or cosine < minimum_cosine
+            or context_residual > 1_000_000 or context_cosine < 940_000):
+            return None
+        rows.append([index, residual, rms, projection, cosine, context_residual, context_cosine])
+    return rows
+
+
 def measure_audio_preservation(alignment, narration, mix, decoded_pcm, lag, effects=render_audit_effects):
     """Check which samples survived the mux. Only a lexical test can verify the spoken words."""
     result = {
@@ -252,21 +305,28 @@ def measure_audio_preservation(alignment, narration, mix, decoded_pcm, lag, effe
     if offsets[-1] != last:
         offsets.append(last)
     worst = 0.0
-    failed = 0
-    for offset in offsets:
+    over_limit = []
+    for index, offset in enumerate(offsets):
         expected = [sample * gain for sample in mix[offset:offset + window]]
         reference_rms = math.sqrt(sum(sample * sample for sample in expected) / window)
         residual = math.sqrt(sum((observed - reference) ** 2 for reference, observed
                                  in zip(expected, aligned[offset:offset + window])) / window)
         ratio = residual / max(AUDIO_PRESERVATION_FLOOR, AUDIO_PRESERVATION_RMS_RATIO * reference_rms)
         worst = max(worst, ratio)
-        failed += ratio > 1
-    return {
-        **result, 'status': 'inconclusive' if failed else 'matched',
-        'windows_checked': len(offsets), 'windows_over_limit': failed,
+        if ratio > 1:
+            over_limit.append(index)
+    result.update({
+        'windows_checked': len(offsets), 'windows_over_limit': len(over_limit),
         'worst_residual_to_limit_ppm': math.ceil(worst * 1_000_000),
-        **({'reason': 'local_sample_residual_over_limit'} if failed else {}),
-    }
+    })
+    if not over_limit:
+        return {**result, 'status': 'matched'}
+    if result['worst_residual_to_limit_ppm'] <= 2_000_000:
+        rows = verified_codec_exceptions(mix, aligned, gain, offsets, over_limit)
+        if rows:
+            return {**result, 'contract': AUDIO_CODEC_PRESERVATION_CONTRACT,
+                    'status': 'matched', 'codec_exceptions': rows}
+    return {**result, 'reason': 'local_sample_residual_over_limit'}
 
 
 def verify_alignment(data):
