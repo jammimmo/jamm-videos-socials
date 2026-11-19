@@ -1,5 +1,7 @@
 import io
+from importlib.util import find_spec
 import json
+import math
 from pathlib import Path
 import struct
 import subprocess
@@ -60,6 +62,36 @@ class SourceScoringTest(unittest.TestCase):
         self.assertEqual(diagnostic['window_duration_ms'], 70_000)
         self.assertEqual(diagnostic['outcome'], 'completed')
         self.assertGreater(diagnostic['recognized_row_count'], 0)
+
+    def test_positional_opening_preserves_the_french_score_and_exact_input_pcm(self):
+        rows = [(r['word'], r['start'], r['end'], .95) for r in speech(SEGMENTS)[4:]]
+        end_sample = int(rows[0][1] * SAMPLE_RATE)
+        with patch('align_tip_v11.greeting_speech_samples', return_value=16384) as detector:
+            report = self.run_source(rows)
+            detector.assert_called_once_with(self.data[:end_sample * 2])
+        self.assertEqual(report['status'], 'matched')
+        self.assertEqual(len(report['segments']), 10)
+        self.assertEqual(report['excluded_segments'], ['greeting', 'signature'])
+        self.assertEqual(report['greeting_position']['prefix_pcm_sha256'], sha256(self.data[:end_sample * 2]))
+        self.assertIs(report['greeting_position']['words_evaluated'], False)
+        self.assertEqual([r['stage'] for r in report['recognizer_diagnostics']], ['full_audio'])
+        wrong = [(('jamais' if word == 'observations' else word), start, end, p) for word, start, end, p in rows]
+        with patch('align_tip_v11.greeting_speech_samples', return_value=16384):
+            self.assertEqual(self.run_source(wrong)['status'], 'inconclusive')
+
+    @unittest.skipUnless(find_spec('faster_whisper') and find_spec('onnxruntime'), 'requires packaged Silero runtime')
+    def test_packaged_vad_rejects_silence_noise_click_and_sustained_tone(self):
+        import numpy as np
+        from align_tip_v11 import GREETING_VAD_MIN_SAMPLES, greeting_speech_samples
+        count = 2 * SAMPLE_RATE
+        click = np.zeros(count, dtype='<i2')
+        click[SAMPLE_RATE] = 32767
+        signals = {'silence': bytes(2 * count), 'click': click.tobytes(),
+                   'noise': np.random.default_rng(4).integers(-2500, 2500, count, dtype=np.int16).tobytes(),
+                   'tone': (5000 * np.sin(np.arange(count) * 2 * math.pi * 440 / SAMPLE_RATE)).astype('<i2').tobytes()}
+        for name, signal in signals.items():
+            with self.subTest(name=name):
+                self.assertLess(greeting_speech_samples(signal), GREETING_VAD_MIN_SAMPLES)
 
     def test_inspection_never_changes_receipt_outcome_and_capped_rows_keep_their_commitment(self):
         ordinary = self.run_source()

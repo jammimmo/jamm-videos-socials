@@ -16,7 +16,7 @@ import unicodedata
 import wave
 
 from align_tip_v11 import (
-    ASR_REPO, ASR_REVISION, NUMBER_WORDS, PHONE_WORDS, audible_windows, caption_lines, has_audible_narration, voiced_overlap,
+    ASR_REPO, ASR_REVISION, NUMBER_WORDS, PHONE_WORDS, protected_speech, audible_windows, caption_lines, has_audible_narration, voiced_overlap,
 )
 
 
@@ -56,12 +56,6 @@ FIXED_SOCIALS_WORDS = ('suivez', 'aussi', 'jamm', 'immo', 'sur', 'nos', 'reseaux
                        'pour', 'retrouver', 'nos', 'prochains', 'conseils')
 FIXED_SOCIALS_BOUNDARY_WORDS = ('aussi', 'jam', 'imo', 'sur', 'nos', 'reseaux', 'sociaux',
                                 'pour', 'retrouver', 'nos', 'prochains', 'conseils')
-PROTECTED_SPEECH_WORDS = frozenset('''
-zero un une deux trois quatre cinq six sept huit neuf dix onze douze treize quatorze quinze seize
-vingt trente quarante cinquante soixante septante huitante octante nonante cent cents mille millier
-milliers million millions milliard milliards premier premiere second seconde ne n pas aucun aucune
-aucuns aucunes jamais ni sans plus non rien guere
-'''.split())
 
 
 def sha256(value):
@@ -102,16 +96,6 @@ def speech_edits(expected, observed):
                                  previous[column] + int(word != heard)))
         previous = following
     return previous[-1]
-
-
-def protected_speech(words):
-    """Keep numeric and negation semantics exact even when other words score."""
-    def protected(word):
-        if any(unicodedata.category(char).startswith('N') for char in word) or word in PROTECTED_SPEECH_WORDS:
-            return True
-        stem = word[:-4] if word.endswith('ieme') else ''
-        return bool(stem) and all(unicodedata.category(char).startswith('L') for char in stem)
-    return [word for word in words if word is not None and protected(word)]
 
 
 def bounded_observed_words(words):

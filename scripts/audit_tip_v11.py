@@ -19,6 +19,8 @@ import wave
 
 from align_tip_v11 import (
     ASR_REVISION, GREETING_WINDOW_EVIDENCE, PHONE_WINDOW_EVIDENCE, SIGNATURE_RETRY_ALIGNMENT_METHOD, WORD_ALIGNMENT_METHOD, has_audible_narration,
+    FIXED_GREETING_TEXT, GREETING_POSITION_EVIDENCE, GREETING_VAD_FRAME, GREETING_VAD_MIN_SAMPLES, GREETING_VAD_SHA256,
+    MAX_GREETING_SECONDS,
 )
 from audit_tip_v11_brand_cta import measure_final_brand_cta
 from audit_tip_v11_speech import measure_final_french_speech
@@ -329,15 +331,16 @@ def measure_audio_preservation(alignment, narration, mix, decoded_pcm, lag, effe
     return {**result, 'reason': 'local_sample_residual_over_limit'}
 
 
-def verify_alignment(data):
+def verify_alignment(data, narration=None):
     alignment = json.loads(data)
     if not isinstance(alignment, dict):
         raise ValueError('Invalid V11 alignment identity')
     method = alignment.get('method')
     if method not in (WORD_ALIGNMENT_METHOD, SIGNATURE_RETRY_ALIGNMENT_METHOD):
         raise ValueError('Invalid V11 alignment identity')
-    evidence = {'phoneEvidenceMethod': PHONE_WINDOW_EVIDENCE, 'greetingEvidenceMethod': GREETING_WINDOW_EVIDENCE}
-    if any(field in alignment and alignment[field] != marker for field, marker in evidence.items()):
+    evidence = {'phoneEvidenceMethod': (PHONE_WINDOW_EVIDENCE,),
+                'greetingEvidenceMethod': (GREETING_WINDOW_EVIDENCE, GREETING_POSITION_EVIDENCE)}
+    if any(field in alignment and alignment[field] not in markers for field, markers in evidence.items()):
         raise ValueError('Invalid V11 alignment identity')
     if method == SIGNATURE_RETRY_ALIGNMENT_METHOD or evidence.keys() & alignment.keys():
         if alignment.get('provenance') != ASR_REVISION or alignment.get('reviewRequired') is not True:
@@ -365,6 +368,29 @@ def verify_alignment(data):
             previous = end
         if abs(previous - duration / FPS) > .01:
             raise ValueError('Incomplete V11 alignment timeline')
+    positional = alignment.get('greetingEvidenceMethod') == GREETING_POSITION_EVIDENCE
+    if positional != ('greetingPositionEvidence' in alignment):
+        raise ValueError('Incomplete greeting position evidence')
+    if positional:
+        prefix = alignment['greetingPositionEvidence']
+        onset = segments[1]['start']
+        end_sample = math.floor(onset * SAMPLE_RATE)
+        cue = {'text': FIXED_GREETING_TEXT, 'start': 0, 'end': onset}
+        if (segments[0] != {'id': 'greeting', **cue} or captions[0] != cue
+            or not isinstance(prefix, dict) or prefix.get('vad_sha256') != GREETING_VAD_SHA256
+            or prefix.get('words_evaluated') is not False or not 0 < onset <= MAX_GREETING_SECONDS
+            or type(prefix.get('end_sample')) is not int or prefix['end_sample'] != end_sample
+            or not isinstance(prefix.get('prefix_pcm_sha256'), str)
+            or not re.fullmatch('[0-9a-f]{64}', prefix['prefix_pcm_sha256'])
+            or type(prefix.get('speech_samples_16k')) is not int or prefix['speech_samples_16k'] % GREETING_VAD_FRAME
+            or not GREETING_VAD_MIN_SAMPLES <= prefix['speech_samples_16k'] <= end_sample * 2 // 3):
+            raise ValueError('Invalid greeting position evidence')
+        if narration is not None:
+            samples = narration[:end_sample]
+            if sys.byteorder != 'little':
+                samples.byteswap()
+            if len(samples) != end_sample or sha256(samples.tobytes()) != prefix['prefix_pcm_sha256']:
+                raise ValueError('Greeting position evidence refers to different narration samples')
     return alignment
 
 
@@ -473,8 +499,8 @@ def bind_manifest(manifest_data, props_data, alignment_data, alignment, media_sh
 
 def audit(args):
     alignment_data = limited_read(args.alignment, 64 * 1024)
-    alignment = verify_alignment(alignment_data)
     narration, narration_sha = read_wave(args.narration_wav)
+    alignment = verify_alignment(alignment_data, narration)
     mix, mix_sha = read_wave(args.mix_wav)
     with TemporaryDirectory() as folder:
         video = Path(folder) / 'audit.mp4'

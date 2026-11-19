@@ -3,6 +3,9 @@
 import argparse
 from array import array
 import difflib
+from functools import partial
+import hashlib
+import io
 import json
 import math
 from numbers import Real
@@ -28,6 +31,11 @@ SIGNATURE_RETRY_ALIGNMENT_METHOD = 'french-v11-word-anchors-signature-retry'
 SIGNATURE_PREROLL_SECONDS = .10
 FIXED_SIGNATURE_TEXT = 'À bientôt ! Jamm Immo ! Kër gu baax, xel mu dal !'
 GREETING_WINDOW_EVIDENCE = 'french-v11-pinned-greeting-window'
+GREETING_POSITION_EVIDENCE = 'french-v11-pcm-vad-before-hook-v1'
+FIXED_GREETING_TEXT = 'Salam alikoum ! Nanga def ?'
+GREETING_VAD_SHA256 = '4cbf549b8326f60f80f2536d9eefeb450a9abe83365a098031c89719f1be17d2'
+GREETING_VAD_MIN_SAMPLES = 14_400  # 900 ms at 16 kHz
+GREETING_VAD_FRAME = 512
 GREETING_WORDS = ['salam', 'alikoum', 'nanga', 'def']
 MAX_GREETING_SECONDS = 4
 MIN_ALIGNMENT_ANCHOR_PROBABILITY = .60
@@ -38,6 +46,24 @@ SCENE_PREROLL_SECONDS = .08
 AUDIBLE_WINDOW_SECONDS = .1
 DEFERRED_DOMAIN_CHECKS = ('domain_audio', 'visible_domain_cta')
 DOMAIN_BOUNDARY_METHOD = 'bounded-domain-anchors-final-mp4'
+
+
+PROTECTED_SPEECH_WORDS = frozenset('''
+zero un une deux trois quatre cinq six sept huit neuf dix onze douze treize quatorze quinze seize
+vingt trente quarante cinquante soixante septante huitante octante nonante cent cents mille millier
+milliers million millions milliard milliards premier premiere second seconde ne n pas aucun aucune
+aucuns aucunes jamais ni sans plus non rien guere
+'''.split())
+
+
+def protected_speech(words):
+    """Keep numeric and negation semantics exact even when other words score."""
+    def protected(word):
+        if any(unicodedata.category(char).startswith('N') for char in word) or word in PROTECTED_SPEECH_WORDS:
+            return True
+        stem = word[:-4] if word.endswith('ieme') else ''
+        return bool(stem) and all(unicodedata.category(char).startswith('L') for char in stem)
+    return [word for word in words if word is not None and protected(word)]
 
 
 class AlignmentFailure(ValueError):
@@ -203,7 +229,7 @@ def bounded_domain_boundary(segments, index, groups, offset, mapping, actual, st
             and 0 <= stamps[following[0]][0] - stamps[last][1] <= 1.25)
 
 
-def align(segments, words, duration, audible=None, *, defer_domain=False, signature_boundary=None):
+def align(segments, words, duration, audible=None, *, defer_domain=False, signature_boundary=None, first_scene_start=0):
     if not math.isfinite(duration) or not 58.5 <= duration <= 119:
         raise AlignmentFailure('V11 narration must fit the 60–120 second master', 'duration_invalid', duration_ms=milliseconds(duration))
     if not words:
@@ -319,7 +345,7 @@ def align(segments, words, duration, audible=None, *, defer_domain=False, signat
 
     duration_in_frames = max(1801, math.ceil((duration + .6) * 30))
     end_of_video = duration_in_frames / 30
-    scene_starts = [0]
+    scene_starts = [first_scene_start]
     for scene, (left_anchor, right_anchor) in enumerate(zip(anchors, anchors[1:])):
         _, _, _, left_last, exact_end = left_anchor
         _, right_start, right_first, _, _ = right_anchor
@@ -436,9 +462,11 @@ def corroborated_dakar_signature(segments, words, split, focused, boundary, soun
     return window
 
 
-def align_with_signature_retry(segments, words, duration, sound, recognize_tail, *, defer_domain=False):
+def align_with_signature_retry(segments, words, duration, sound, recognize_tail, *, defer_domain=False, first_scene_start=0):
+    align_scenes = partial(align, segments, duration=duration, audible=sound, defer_domain=defer_domain,
+                           first_scene_start=first_scene_start)
     try:
-        return align(segments, words, duration, sound, defer_domain=defer_domain)
+        return align_scenes(words)
     except SignatureEvidenceError as error:
         boundary = error.preceding_end
         if boundary is None or not 1.2 <= duration - boundary <= 8 or segments[-1]['id'] != 'signature':
@@ -456,7 +484,7 @@ def align_with_signature_retry(segments, words, duration, sound, recognize_tail,
             full_tail = canonical_signature_brand(words[split:], sound, duration)
             if full_tail is not None:
                 try:
-                    return align(segments, words[:split] + full_tail, duration, sound, defer_domain=defer_domain)
+                    return align_scenes(words[:split] + full_tail)
                 except AlignmentFailure:
                     # The originally eligible focused retry still runs.
                     pass
@@ -471,8 +499,7 @@ def align_with_signature_retry(segments, words, duration, sound, recognize_tail,
             raise
         original = [word for word in words if word['end'] <= boundary + .001]
         try:
-            alignment = align(segments, original + tail, duration, sound, defer_domain=defer_domain,
-                              signature_boundary=boundary)
+            alignment = align_scenes(original + tail, signature_boundary=boundary)
         except SignatureEvidenceError as retry_error:
             retry_error.reason = 'signature_retry_insufficient'
             # The closing gate tokenizes the joined words; align tokenizes each
@@ -484,8 +511,7 @@ def align_with_signature_retry(segments, words, duration, sound, recognize_tail,
             if normalized_tail is None:
                 raise
             try:
-                alignment = align(segments, original + normalized_tail, duration, sound, defer_domain=defer_domain,
-                                  signature_boundary=boundary)
+                alignment = align_scenes(original + normalized_tail, signature_boundary=boundary)
             except SignatureEvidenceError as normalized_error:
                 normalized_error.reason = 'signature_retry_insufficient'
                 raise
@@ -574,8 +600,79 @@ def measured_greeting(rows, boundary, sound):
     return len(observed) == len(GREETING_WORDS) and sum(a == b for a, b in zip(observed, GREETING_WORDS)) >= 3
 
 
+def greeting_speech_samples(prefix):
+    """Count complete, positive 32 ms Silero frames in this prefix alone."""
+    import numpy as np
+    from faster_whisper.audio import decode_audio
+    from faster_whisper.utils import get_assets_path
+    from faster_whisper.vad import get_vad_model
+
+    asset = Path(get_assets_path()) / 'silero_vad_v6.onnx'
+    if hashlib.sha256(asset.read_bytes()).hexdigest() != GREETING_VAD_SHA256:
+        return 0
+    stream = io.BytesIO()
+    with wave.open(stream, 'wb') as output:
+        output.setparams((1, 2, 24000, 0, 'NONE', 'not compressed'))
+        output.writeframes(prefix)
+    stream.seek(0)
+    audio = decode_audio(stream, sampling_rate=16000)
+    count = min(len(audio), len(prefix) // 3) // GREETING_VAD_FRAME
+    if count * GREETING_VAD_FRAME < GREETING_VAD_MIN_SAMPLES:
+        return 0
+    probabilities = get_vad_model()(audio[:count * GREETING_VAD_FRAME]).reshape(-1)
+    if len(probabilities) != count or not np.all((probabilities >= 0) & (probabilities <= 1)):
+        return 0
+    return int(np.count_nonzero(probabilities >= .5)) * GREETING_VAD_FRAME
+
+
+def measured_greeting_position(segments, words, duration, sound, raw):
+    if (len(segments) < 2 or segments[0] != {'id': 'greeting', 'text': FIXED_GREETING_TEXT}
+        or segments[1]['id'] != 'hook' or len(raw) != 2 * round(duration * 24000)):
+        return None
+    body = [token for segment in segments[1:] for token in tokens(segment['text'])]
+    hook = tokens(segments[1]['text'])[:3]
+    groups = [tokens(row['word']) for row in words]
+    observed = [word for group in groups for word in group]
+    if len(hook) != 3 or any(sum(seq[i:i+3] == hook for i in range(len(seq)-2)) != 1
+                             for seq in (GREETING_WORDS + body, observed)):
+        return None
+    index = next((i for i in range(len(groups)-2) if groups[i:i+3] == [[token] for token in hook]), None)
+    if index is None or not supported_anchor_rows(words[index:index+3], sound, duration, weak_first=True):
+        return None
+    onset = words[index]['start']
+    if not 0 < onset <= MAX_GREETING_SECONDS:
+        return None
+
+    # Do not absorb an overlapping word or a recognized piece of French advice
+    # into the excluded greeting. The remaining opaque rows retain no lexical credit.
+    previous = 0
+    for row in words[:index]:
+        if (not previous <= row['start'] < row['end'] <= onset
+            or any(unicodedata.category(c).startswith('N') for c in row['word'])):
+            return None
+        previous = row['end']
+    preceding = [word for group in groups[:index] for word in group]
+    if protected_speech(preceding) or set(zip(preceding, preceding[1:])) & set(zip(body, body[1:])):
+        return None
+    end_sample = math.floor(onset * 24000)
+    if end_sample * 2 // 3 < GREETING_VAD_MIN_SAMPLES:
+        return None
+    prefix = raw[:2 * end_sample]
+    try:
+        voiced = greeting_speech_samples(prefix)
+    except Exception:
+        # An unavailable local VAD leaves the original safe diagnostic intact.
+        return None
+    if (type(voiced) is not int or voiced % GREETING_VAD_FRAME
+        or not GREETING_VAD_MIN_SAMPLES <= voiced <= end_sample * 2 // 3):
+        return None
+    return index, onset, {'end_sample': end_sample, 'speech_samples_16k': voiced,
+                          'prefix_pcm_sha256': hashlib.sha256(prefix).hexdigest(),
+                          'vad_sha256': GREETING_VAD_SHA256, 'words_evaluated': False}
+
+
 def align_with_phone_retry(segments, words, duration, sound, recognize_tail, recognize_phone, *,
-                           defer_domain=False, recognize_greeting=None):
+                           defer_domain=False, recognize_greeting=None, opening_pcm=None):
     def remaining(full_words):
         return _align_with_phone_retry(segments, full_words, duration, sound, recognize_tail, recognize_phone,
                                        defer_domain=defer_domain)
@@ -583,8 +680,27 @@ def align_with_phone_retry(segments, words, duration, sound, recognize_tail, rec
     try:
         return remaining(words)
     except AlignmentFailure as error:
-        if (recognize_greeting is None or error.code != 'segment_coverage_low'
+        if (error.code != 'segment_coverage_low'
             or error.metrics != {'segment_index': 0, 'matched_words': 0, 'expected_words': 4}):
+            raise
+        opening = (measured_greeting_position(segments, words, duration, sound, opening_pcm)
+                   if opening_pcm is not None else None)
+        if opening is not None:
+            index, onset, evidence = opening
+            # Align only the French body and closing. Every original full-pass
+            # row is retained by the separate French content audit.
+            try:
+                body = _align_with_phone_retry(segments[1:], words[index:], duration, sound, recognize_tail,
+                                               recognize_phone, defer_domain=defer_domain, first_scene_start=onset)
+            except AlignmentFailure as downstream:
+                if 'segment_index' in downstream.metrics:
+                    downstream.metrics['segment_index'] += 1
+                raise
+            cue = {'text': FIXED_GREETING_TEXT, 'start': 0, 'end': onset}
+            return {**body, 'segments': [{'id': 'greeting', **cue}, *body['segments']],
+                    'captions': [cue, *body['captions']], 'greetingEvidenceMethod': GREETING_POSITION_EVIDENCE,
+                    'greetingPositionEvidence': evidence}
+        if recognize_greeting is None:
             raise
         boundary = missing_greeting_boundary(segments, words, duration, sound)
         if boundary is None:
@@ -600,9 +716,12 @@ def align_with_phone_retry(segments, words, duration, sound, recognize_tail, rec
     return result
 
 
-def _align_with_phone_retry(segments, words, duration, sound, recognize_tail, recognize_phone, *, defer_domain):
+def _align_with_phone_retry(segments, words, duration, sound, recognize_tail, recognize_phone, *,
+                           defer_domain, first_scene_start=0):
+    align_scenes = partial(align_with_signature_retry, segments, duration=duration, sound=sound,
+                           recognize_tail=recognize_tail, defer_domain=defer_domain, first_scene_start=first_scene_start)
     try:
-        return align_with_signature_retry(segments, words, duration, sound, recognize_tail, defer_domain=defer_domain)
+        return align_scenes(words)
     except PhoneEvidenceError as error:
         if error.gap is None:
             raise
@@ -628,7 +747,7 @@ def _align_with_phone_retry(segments, words, duration, sound, recognize_tail, re
             error.code = 'phone_window_unvoiced'
             raise
         merged = [*words[:index], *focused, *words[index:]]
-        alignment = align_with_signature_retry(segments, merged, duration, sound, recognize_tail, defer_domain=defer_domain)
+        alignment = align_scenes(merged)
         alignment['phoneEvidenceMethod'] = PHONE_WINDOW_EVIDENCE
         return alignment
 
@@ -681,7 +800,8 @@ def main():
         if (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) != (1, 2, 24000):
             raise ValueError('Expected 24 kHz mono PCM16')
         duration = wav.getnframes() / wav.getframerate()
-        sound = list(audible_windows(wav.readframes(wav.getnframes()), wav.getframerate()))
+        opening_pcm = wav.readframes(wav.getnframes())
+        sound = list(audible_windows(opening_pcm, wav.getframerate()))
     if args.transcript:
         with open(args.transcript, encoding='utf8') as source:
             words = json.load(source)
@@ -699,6 +819,7 @@ def main():
                 lambda boundary: recognize_signature_tail(model, args.wav, boundary),
                 lambda start, end: recognize_audio_window(model, args.wav, start, end),
                 defer_domain=args.defer_domain_to_final,
+                opening_pcm=opening_pcm,
                 recognize_greeting=lambda boundary: recognize_audio_window(model, args.wav, 0, boundary, end_before=True),
             )
         except ValueError as error:
