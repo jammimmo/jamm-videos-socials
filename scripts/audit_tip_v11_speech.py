@@ -645,7 +645,7 @@ def anchored_phone_range(segments, expected_words, observed, index, contact_resu
 
 def compare_french_segments(segments, recognized_words, lag_samples, verify_phone=None, *, verify_hook=None,
                             verify_services=None, verify_socials=None, verify_domain=None,
-                            verify_untimed_socials=None):
+                            verify_untimed_socials=None, inspection=None):
     untimed_socials = verify_untimed_socials(recognized_words) if verify_untimed_socials else None
     opening_hook = None
     if (verify_hook and len(segments) > 2 and [part['id'] for part in segments[:2]] == ['greeting', 'hook']
@@ -687,6 +687,9 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
         if untimed_socials and index == untimed_socials['measurement']['scene_index']:
             if index in ambiguous_boundary:
                 raise ValueError('untimed socials crosses excluded speech')
+            if inspection is not None:
+                inspection.observe(identity, segment_words(identity, observed[index]), untimed_socials['observed_words'],
+                                   {'untimed_word_counted': True, 'score_matched': True})
             results.append(untimed_socials)
             continue
         expected = expected_words[index]
@@ -818,12 +821,14 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
                                else 'fixed_jamm_immo_phonetic_spelling'),
                     'raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
                 }
+        focused_eligible = False
         if index in ambiguous_boundary and not boundary_verified:
             item['reason'] = 'mixed_language_boundary'
             rows = observed[index]
             if (segment is opening_hook and exact and hook_crossings == rows[:1]
                 and rows[0][1] < segment['start'] < rows[0][2] <= segment['end']
                 and normalized_words('hook', rows[0][0]) == expected[:1]):
+                focused_eligible = True
                 measurement = verify_hook(segment['start'], segment['end'], expected)
                 if measurement:
                     item.pop('reason')
@@ -834,6 +839,7 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
                     })
             elif verify_socials and complete_socials_boundary_only(
                     segments, index, boundary_crossings.get(index, []), observed[index], expected, raw_actual):
+                focused_eligible = True
                 confirmed = verify_socials(segments, index, expected)
                 if confirmed:
                     verified_words, measurement = confirmed
@@ -846,6 +852,7 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
                             'global_raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
                         })
         elif not matched and identity == 'domain' and verify_domain:
+            focused_eligible = True
             confirmed = verify_domain(segment, expected)
             if confirmed:
                 item = {**confirmed, 'measurement': {
@@ -854,6 +861,7 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
                 }}
         elif not matched and identity == 'phone' and verify_phone:
             window = anchored_phone_range(segments, expected_words, observed, index, results[-1] if results else None)
+            focused_eligible = window is not None
             measurement = verify_phone(*window) if window else None
             verified_words = measurement.get('observed_words') if measurement else None
             if verified_words == expected:
@@ -862,6 +870,7 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
                             measurement={key: value for key, value in measurement.items() if key != 'observed_words'})
         elif not matched and identity == 'services' and verify_services:
             if fixed_brand_alias_index(identity, expected, raw_actual) is not None:
+                focused_eligible = True
                 confirmed = verify_services(segment, expected)
                 if confirmed:
                     verified_words, measurement = confirmed
@@ -869,6 +878,19 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
                                 observed_token_count=len(verified_words), observed_words=verified_words, measurement={
                                     **measurement, 'raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
                                 })
+        if inspection is not None:
+            inspection.observe(identity, raw_actual, reported, {
+                'unreportable_words': reported is None, 'unsafe_uncertainty': unsafe_uncertainty,
+                'edit_budget_exceeded': reported is not None and edits * 100 > len(expected) * (100 - MIN_SEGMENT_ACCURACY_PERCENT),
+                'protected_mismatch': reported is not None and protected_speech(reported) != protected_speech(expected),
+                'standalone_plus': any(r[0] == '+' for r in observed[index]),
+                'mixed_boundary': index in ambiguous_boundary and not boundary_verified,
+                'domain_unconfirmed': not domain_verified,
+                'focused_matched': focused_eligible and item['status'] == 'matched',
+                'focused_unconfirmed': focused_eligible and item['status'] != 'matched',
+                'focus_not_eligible': not matched and not focused_eligible,
+                'score_matched': item['status'] == 'matched',
+            })
         results.append(item)
     return results
 

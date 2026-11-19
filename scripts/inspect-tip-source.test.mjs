@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { inspectTipSource } from './inspect-tip-source.mjs';
+import {inspectionLogLines, projectInspection} from './tip-source-inspection.mjs';
 import { machineSourceFixture } from './fixtures/machine-source-work.mjs';
 import { pcmToWav } from './generate-gemini-voiceover.mjs';
 
@@ -144,9 +145,13 @@ if Path(__file__).with_suffix('.comparison').is_file():
     words = [word for part in plan['segments'] for word in tokens(part['text'])]
     step = 59 / len(words)
     point = len(tokens(plan['segments'][0]['text'])) + 2
-    rows = [(w, .2 + i * step, .2 + (i if i == point else i + .8) * step, .99) for i, w in enumerate(words)]
+    held = Path(__file__).with_suffix('.held').is_file()
+    rows = [('non' if held and i == point else w, .2 + i * step,
+             .2 + (i if i == point and not held else i + .8) * step, .99) for i, w in enumerate(words)]
+assert sys.argv[2] == '--inspect-trace'
 with TemporaryDirectory() as directory:
-    print(json.dumps(score_source(plan, wav, Path(directory), lambda _: rows, lambda _: [])))
+    print(json.dumps(score_source(plan, wav, Path(directory), lambda _: rows, lambda _: [],
+                                  inspection_nonce=sys.argv[3], inspection_attempt=int(sys.argv[4]))))
 `, { mode: 0o700 });
     const result = await inspectTipSource(f.event, { ...f.env, RUNNER_TEMP: scratch, TIP_SOURCE_PYTHON: python },
       { request: f.transport(), verifyRuntime: async () => {} });
@@ -155,6 +160,17 @@ with TemporaryDirectory() as directory:
     assert.equal(result.replay.alignment_code, 'timestamp_regression');
     assert.equal(result.replay.row_index, 1);
     assert.doesNotMatch(JSON.stringify(result), /privee|fake\.private\.jwt/);
+    const trace = result.inspection.attempts[0];
+    assert.equal(trace.status, 'available');
+    assert.ok(trace.scenes.every(s => s.status === 'not_evaluated'));
+    assert.deepEqual(trace.calls[0].rows[1].slice(0, 4), [1, 240, 1200, 1000]);
+    // An authorized holder can reproduce this fingerprint without giving the log a public dictionary key.
+    const master = createHash('sha256').update('jamm-source-inspection-private-wav-v1').update(Buffer.from([0])).update(f.wav).digest();
+    const rowKey = createHmac('sha256', master).update('row-key-v1').update(Buffer.from([0]))
+      .update(Buffer.from(result.inspection.nonce, 'hex')).digest();
+    const rowFingerprint = createHmac('sha256', rowKey).update(JSON.stringify(['row-v1', 1, 'full_audio', 1, 1, 'privee'])).digest('hex');
+    assert.equal(trace.calls[0].rows[1][4], rowFingerprint);
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(master.toString('hex') + '|' + rowKey.toString('hex')));
     assert.deepEqual(await readdir(scratch), ['synthetic-recognizer']);
     await writeFile(python + '.comparison', '', { mode: 0o600 });
     const comparison = await inspectTipSource(f.event, { ...f.env, RUNNER_TEMP: scratch, TIP_SOURCE_PYTHON: python },
@@ -164,6 +180,20 @@ with TemporaryDirectory() as directory:
     assert.equal(comparison.replay.comparison.predicate, 'timestamp_zero_duration');
     assert.equal(comparison.replay.comparison.segment_index, 1);
     assert.equal(comparison.original.comparison, undefined);
+    assert.notEqual(result.inspection.nonce, comparison.inspection.nonce);
+    await writeFile(python + '.held', '', { mode: 0o600 });
+    const held = await inspectTipSource(f.event, { ...f.env, RUNNER_TEMP: scratch, TIP_SOURCE_PYTHON: python },
+      { request: f.transport(), verifyRuntime: async () => {} });
+    assert.equal(held.replay.matchedSegments, 9);
+    assert.equal(held.replay.segmentCount, 10);
+    const evidence = held.inspection.attempts[0];
+    assert.equal(evidence.status, 'available');
+    assert.equal(evidence.truncated, false);
+    const [failed] = evidence.scenes.filter(s => s.status === 'inconclusive');
+    assert.equal(failed.id, 'hook');
+    assert.ok(failed.gateFlags.includes('protected_mismatch'));
+    assert.equal(evidence.global.protectedMatch, false);
+    assert.equal(held.original.inspection_evidence, undefined);
   } finally { await rm(scratch, { recursive: true, force: true }); }
 });
 
@@ -198,5 +228,98 @@ test('comparison failures expose only bounded predicates in exact inspections an
   for (const override of [{ reason: 'ordered_words_unconfirmed' }, { segments: [{ status: 'inconclusive' }] }]) {
     const inspected = await measureSource(async () => ({ ...failed, ...override }), '', '', '.', {}, { inspectComparison: true });
     assert.equal(inspected.comparison, undefined);
+  }
+});
+
+const fixtureDigest = 'a'.repeat(64);
+const identity = {nonce: '1'.repeat(32), attempt: 1, wavSha256: fixtureDigest, draftSha256: fixtureDigest, scriptSha256: fixtureDigest};
+function evidence() {
+  const ids = ['hook', 'step1', 'step2', 'step3', 'takeaway', 'services', 'tools', 'contact', 'phone', 'socials'];
+  return {
+    ...identity, version: 1, pcmSha256: fixtureDigest, modelRevision: '0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf',
+    sourceFrames: 1500000, truncated: false, global: {status: 'inconclusive', expectedCount: 108, editCount: null, protectedMatch: null},
+    scenes: ids.map(id => ({id, status: 'not_evaluated', startSample: null, endSample: null, expectedCount: 10,
+      observedCount: null, nullCount: null, editCount: null, protectedMatch: null, method: null, reason: null,
+      gateFlags: [], uncertainPositions: [], rawMismatchPositions: []})),
+    calls: [{callIndex: 1, stage: 'full_audio', outcome: 'completed', startSample: 0, endSample: 1500000, pcmSha256: fixtureDigest,
+      streamDigest: fixtureDigest, rowCount: 1, omittedRows: 0, rows: [[0, -1, null, 907, fixtureDigest]]}],
+  };
+}
+test('public projection keeps signed measurements and strips private data at all levels', () => {
+  const e = evidence();
+  for (const obj of [e, e.global, e.scenes[0], e.calls[0]]) obj.privatePath = 'PRIVATE';
+  const a = projectInspection(e, identity);
+  assert.equal(a.status, 'available');
+  assert.deepEqual(a.calls[0].rows[0], [0, -1, null, 907, fixtureDigest]);
+  assert.ok(!JSON.stringify(a).includes('PRIVATE'));
+});
+test('invalid bindings, enum, sample, digest, scene identity and row shapes fail closed', () => {
+  for (const change of [
+    e => e.wavSha256 = 'b'.repeat(64), e => e.nonce = '2'.repeat(32), e => e.attempt = 2,
+    e => e.calls[0].stage = 'SECRET', e => e.global.status = 'SECRET', e => e.scenes[0].method = 'SECRET',
+    e => e.scenes[0].reason = 'SECRET', e => e.scenes[0].gateFlags = ['SECRET'],
+    e => e.scenes[0].id = 'socials', e => e.calls[0].rows[0][4] = 'SECRET',
+    e => e.calls[0].rows[0].push('SECRET'), e => e.calls[0].rows[0][1] = 'SECRET',
+    e => e.calls[0].omittedRows = 500, e => e.sourceFrames = 3e6,
+  ]) {
+    const e = evidence();
+    change(e);
+    assert.deepEqual(projectInspection(e, identity), {status: 'unavailable', attempt: 1});
+  }
+});
+test('summary is first, row chunks are bounded and every dropped row is accounted for', () => {
+  const attempts = [1, 2].map(attempt => {
+    const e = evidence();
+    e.attempt = attempt;
+    e.calls = Array.from({length: 12}, (_, i) => ({...e.calls[0], callIndex: i + 1, rowCount: 500,
+      rows: Array.from({length: 500}, (_, n) => [n, 10, 20, 900, fixtureDigest])}));
+    return projectInspection(e, {...identity, attempt});
+  });
+  const lines = inspectionLogLines({status: 'inspected', inspection: {nonce: identity.nonce, attempts}});
+  assert.ok(lines.length > 1);
+  assert.ok(lines.every(s => Buffer.byteLength(s) + 1 <= 16384));
+  assert.ok(Buffer.byteLength(lines.join('\n') + '\n') <= 1024 * 1024);
+  const [summary, ...chunks] = lines.map(s => JSON.parse(s));
+  for (const a of summary.inspection.attempts) {
+    for (const c of a.calls) {
+      const rows = chunks.filter(x => x.callIndex === c.callIndex && x.attempt === a.attempt).flatMap(x => x.rows);
+      assert.equal(rows.length + c.omittedRows, 500);
+      assert.equal(c.rows, undefined);
+    }
+  }
+  assert.deepEqual(inspectionLogLines({status: 'unavailable'}), ['{"status":"unavailable"}']);
+});
+test('maximal metadata is chunked intact, with row losses measurable for each call', () => {
+  const attempts = [1, 2].map(attempt => {
+    const e = evidence();
+    e.attempt = attempt;
+    e.global.ruleEvaluated = true;
+    e.global.editBudgetExceeded = false;
+    for (const s of e.scenes) Object.assign(s, {observedCount: 150000,
+      uncertainPositions: Array.from({length: 128}, (_, i) => i),
+      rawMismatchPositions: Array.from({length: 128}, (_, i) => i),
+      gateFlags: ['unreportable_words', 'unsafe_uncertainty', 'edit_budget_exceeded', 'protected_mismatch',
+        'standalone_plus', 'mixed_boundary', 'domain_unconfirmed', 'focused_matched', 'focused_unconfirmed',
+        'focus_not_eligible', 'untimed_word_counted', 'score_matched', 'global_edits_exceeded']});
+    e.calls = Array.from({length: 12}, (_, i) => ({...e.calls[0], callIndex: i + 1, rowCount: 500,
+      rows: Array.from({length: 500}, (_, n) => [n, 240000, 290000, 900, fixtureDigest])}));
+    return projectInspection(e, {...identity, attempt});
+  });
+  const lines = inspectionLogLines({status: 'inspected', inspection: {nonce: identity.nonce, attempts}});
+  assert.ok(lines.every(s => Buffer.byteLength(s) + 1 <= 16384));
+  assert.ok(Buffer.byteLength(lines.join('\n') + '\n') <= 1024 * 1024);
+  const [summary, ...records] = lines.map(s => JSON.parse(s));
+  assert.equal(summary.inspection.metadataChunked, true);
+  assert.ok(summary.inspection.attempts.some(a => a.truncated));
+  for (const a of summary.inspection.attempts) {
+    assert.deepEqual([a.sceneCount, a.callCount, a.global.ruleEvaluated, a.global.editBudgetExceeded], [10, 12, true, false]);
+    const own = records.filter(r => r.attempt === a.attempt);
+    assert.deepEqual(own.filter(r => r.type === 'inspection_scene').map(r => r.scene), attempts[a.attempt - 1].scenes);
+    const calls = own.filter(r => r.type === 'inspection_call');
+    assert.equal(calls.length, 12);
+    for (const {call} of calls) {
+      const rows = own.filter(r => r.type === 'inspection_rows' && r.callIndex === call.callIndex).flatMap(r => r.rows);
+      assert.equal(rows.length + call.omittedRows, call.rowCount);
+    }
   }
 });

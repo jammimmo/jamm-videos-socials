@@ -21,6 +21,7 @@ from audit_tip_v11_speech import (
     verify_services_samples, verify_untimed_socials_samples,
 )
 from tip_source_asr_session import SourceAsrSession
+from tip_source_inspection import SourceInspection
 
 
 class SourceRecognitionError(RuntimeError):
@@ -29,7 +30,7 @@ class SourceRecognitionError(RuntimeError):
         self.reason = reason
 
 
-def measured_recognizer(recognize, stage, diagnostics):
+def measured_recognizer(recognize, stage, diagnostics, *, inspection=None, first_sample=None):
     """Keep a bounded runtime trace without paths, raw words or diagnostics.
 
     An unavailable decoder must not be confused with speech differing from
@@ -47,6 +48,7 @@ def measured_recognizer(recognize, stage, diagnostics):
                       'window_duration_ms': window_duration_ms, 'outcome': 'unavailable'}
         diagnostics.append(diagnostic)
         started = monotonic()
+        rows = None
         try:
             rows = recognize(path)
             if not isinstance(rows, list) or len(rows) > MAX_RECOGNIZED_WORDS:
@@ -74,6 +76,8 @@ def measured_recognizer(recognize, stage, diagnostics):
             raise SourceRecognitionError('recognizer_unavailable') from None
         finally:
             diagnostic['elapsed_ms'] = max(0, min(360_000, round((monotonic() - started) * 1000)))
+            if inspection is not None:
+                inspection.call(diagnostic, path, first_sample, rows)
     return measured
 
 
@@ -104,22 +108,27 @@ def timed_words(rows, offset=0):
     return words
 
 
-def score_source(plan, wav, directory, recognize=None, recognize_window=None):
-    # Only the source scorer shares a model between its bounded WAV windows.
-    # The final MP4 audit and injected test recognizers keep their own paths.
+def score_source(plan, wav, directory, recognize=None, recognize_window=None, *, inspection_nonce=None, inspection_attempt=1):
+    # The production score remains independent of the optional private inspection.
+    inspection = (SourceInspection(plan, wav, extract_pcm(wav), inspection_nonce, inspection_attempt)
+                  if inspection_nonce is not None else None)
     if recognize is not None or recognize_window is not None:
-        return _score_source(plan, wav, directory, recognize or recognize_with_timeout,
-                             recognize_window or recognize_final_window)
-    session = SourceAsrSession(directory)
-    try:
-        return _score_source(plan, wav, directory, session.recognize, session.recognize_window,
-                             startup=session.start)
-    finally:
-        session.close()
+        report = _score_source(plan, wav, directory, recognize or recognize_with_timeout,
+                               recognize_window or recognize_final_window, inspection=inspection)
+    else:
+        session = SourceAsrSession(directory)
+        try:
+            report = _score_source(plan, wav, directory, session.recognize, session.recognize_window,
+                                   startup=session.start, inspection=inspection)
+        finally:
+            session.close()
+    if inspection is not None:
+        report['inspection_evidence'] = inspection.finish(report)
+    return report
 
 
-def _score_source(plan, wav, directory, recognize, recognize_window, *, startup=None):
-    raw = extract_pcm(wav)
+def _score_source(plan, wav, directory, recognize, recognize_window, *, startup=None, inspection=None):
+    raw = inspection.raw if inspection is not None else extract_pcm(wav)
     duration = len(raw) / (2 * SAMPLE_RATE)
     sound = list(audible_windows(raw, SAMPLE_RATE))
     diagnostics = []
@@ -138,6 +147,9 @@ def _score_source(plan, wav, directory, recognize, recognize_window, *, startup=
     source_path = directory / 'source.wav'
     source_path.write_bytes(wav)
 
+    def measured(recognizer, stage, first_sample=None):
+        return measured_recognizer(recognizer, stage, diagnostics, inspection=inspection, first_sample=first_sample)
+
     def alignment_window(start, end=duration, *, stage='alignment_phone'):
         first = max(0, math.floor(start * SAMPLE_RATE))
         last = min(len(raw) // 2, math.ceil(end * SAMPLE_RATE))
@@ -145,12 +157,12 @@ def _score_source(plan, wav, directory, recognize, recognize_window, *, startup=
         with wave.open(str(path), 'wb') as target:
             target.setparams((1, 2, SAMPLE_RATE, 0, 'NONE', 'not compressed'))
             target.writeframes(raw[first * 2:last * 2])
-        return timed_words(measured_recognizer(recognize_window, stage, diagnostics)(path), first / SAMPLE_RATE)
+        return timed_words(measured(recognize_window, stage, first)(path), first / SAMPLE_RATE)
 
     try:
         if startup is not None:
-            measured_recognizer(lambda _: startup(), 'model_load', diagnostics)(source_path)
-        recognized = measured_recognizer(recognize, 'full_audio', diagnostics)(source_path)
+            measured(lambda _: startup(), 'model_load')(source_path)
+        recognized = measured(recognize, 'full_audio', 0)(source_path)
         segments = align_with_phone_retry(
             plan['segments'], timed_words(recognized), duration, sound,
             lambda boundary: alignment_window(boundary - SIGNATURE_PREROLL_SECONDS, stage='alignment_signature'), alignment_window,
@@ -164,21 +176,31 @@ def _score_source(plan, wav, directory, recognize, recognize_window, *, startup=
         return {**report, 'reason': 'recognizer_unavailable'}
 
     try:
+        if inspection is not None:
+            inspection.aligned(segments)
         narration = pcm(raw)
+
+        def phone_verifier(start, end):
+            contact = next((s for s in segments if s['id'] == 'contact'), None)
+            return verify_phone_with_context(raw, 0, directory, segments, start, end,
+                measured(recognize_window, 'audit_phone', round(start * SAMPLE_RATE)),
+                recognize_context=measured(recognize_window, 'audit_phone_context',
+                                           round(contact['start'] * SAMPLE_RATE) if contact else None))
+
         results = compare_french_segments(
             segments, recognized, 0,
-            lambda start, end: verify_phone_with_context(raw, 0, directory, segments, start, end,
-                measured_recognizer(recognize_window, 'audit_phone', diagnostics),
-                recognize_context=measured_recognizer(recognize_window, 'audit_phone_context', diagnostics)),
+            phone_verifier,
             verify_hook=lambda start, end, expected: verify_hook_samples(
                 narration, raw, 0, directory, start, end, expected,
-                measured_recognizer(recognize_window, 'audit_hook', diagnostics)),
+                measured(recognize_window, 'audit_hook', round(start * SAMPLE_RATE))),
             verify_services=lambda segment, expected: verify_services_samples(
                 raw, 0, directory, segment, expected,
-                measured_recognizer(recognize_window, 'audit_services', diagnostics)),
+                measured(recognize_window, 'audit_services', round(segment['start'] * SAMPLE_RATE))),
             verify_untimed_socials=lambda rows: verify_untimed_socials_samples(
                 raw, 0, directory, segments, rows, source_path,
-                measured_recognizer(recognize_window, 'audit_socials', diagnostics)),
+                measured(recognize_window, 'audit_socials', next(
+                    (round(s['start'] * SAMPLE_RATE) for s in segments if s['id'] == 'socials'), None))),
+            inspection=inspection,
         )
     except SourceRecognitionError as error:
         return {**report, 'reason': error.reason}
@@ -197,11 +219,17 @@ def _score_source(plan, wav, directory, recognize, recognize_window, *, startup=
 
 if __name__ == '__main__':
     try:
+        nonce, attempt = None, 1
+        if len(sys.argv) != 1:
+            if len(sys.argv) != 4 or sys.argv[1] != '--inspect-trace':
+                raise ValueError('Invalid inspection arguments')
+            nonce, attempt = sys.argv[2], int(sys.argv[3])
         plan = json.loads(sys.stdin.buffer.readline(16 * 1024))
         wav = sys.stdin.buffer.read(8 * 1024 * 1024 + 1)
         if len(wav) > 8 * 1024 * 1024:
             raise ValueError('Oversized narration')
         with TemporaryDirectory(prefix='jamm-tip-source-speech-') as folder:
-            print(json.dumps(score_source(plan, wav, Path(folder)), allow_nan=False))
+            report = score_source(plan, wav, Path(folder), inspection_nonce=nonce, inspection_attempt=attempt)
+            print(json.dumps(report, allow_nan=False, separators=(',', ':')))
     except (KeyError, OSError, TypeError, ValueError, wave.Error, EOFError):
         sys.exit(2)
