@@ -10,7 +10,7 @@ from unittest.mock import Mock
 from align_tip_v11 import (
     DOMAIN_BOUNDARY_METHOD, PHONE_WINDOW_EVIDENCE, PhoneEvidenceError, SignatureEvidenceError, align, align_with_phone_retry,
     align_with_signature_retry, recognize_words, report_alignment_failure, tokens,
-    alignment_failure_diagnostics, bounded_domain_boundary, canonical_signature_brand,
+    alignment_failure_diagnostics, audible_windows, bounded_domain_boundary, canonical_signature_brand,
 )
 
 
@@ -230,6 +230,24 @@ class V11AlignmentTest(unittest.TestCase):
             align(SEGMENTS, words, 70)
         with self.assertRaisesRegex(ValueError, 'excessive silence'):
             align(SEGMENTS, speech(SEGMENTS), 75)
+
+    def test_padded_minimum_counts_all_final_silence_and_still_requires_the_signature(self):
+        duration = 58.5
+        rate = 24_000
+        rows = [{**word, 'start': word['start'] * .8, 'end': word['end'] * .8}
+                for word in speech(SEGMENTS)]
+        # 56.5 s of input with 0.5 or 0.6 s of native silence, then 2 s of zeros.
+        def windows(audible_samples):
+            pcm = b'\x00\x10' * audible_samples + bytes(2 * (int(duration * rate) - audible_samples))
+            return list(audible_windows(pcm, rate))
+
+        sound = windows(56 * rate)
+        self.assertEqual(align(SEGMENTS, rows, duration, sound)['segments'][-1]['id'], 'signature')
+        with self.assertRaisesRegex(ValueError, 'excessive silence') as rejected:
+            align(SEGMENTS, rows, duration, windows(int(55.9 * rate)))
+        self.assertEqual(alignment_failure_diagnostics(rejected.exception)['alignment_code'], 'trailing_silence')
+        with self.assertRaisesRegex(ValueError, 'signature'):
+            align(SEGMENTS, rows[:-len(tokens(SEGMENTS[-1]['text']))], duration, sound)
 
     def test_phone_window_recovers_only_absent_number_with_small_timestamp_overlap(self):
         full, phone, index, sound = phone_gap()

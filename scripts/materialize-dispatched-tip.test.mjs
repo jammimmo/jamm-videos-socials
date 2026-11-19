@@ -26,6 +26,10 @@ test('V11 preserves borderline one-minute narration and the normal tempo for the
   assert.throws(() => tipV11NarrationTempo(58.49), /cannot fit/);
   assert.throws(() => tipV11NarrationTempo(123), /cannot fit/);
   assert.equal(tipV11NarrationTempo(60, { exactTourV8: true }), 1.03);
+  assert.equal(tipV11NarrationTempo(56, { exactTourV8: true }), 1.03);
+  assert.throws(() => tipV11NarrationTempo(55.999, { exactTourV8: true }), /cannot fit/);
+  assert.equal(tipV11NarrationTempo(58.4, { exactTourV8: true }), 1.03);
+  assert.throws(() => tipV11NarrationTempo(58.4), /cannot fit/);
   assert.equal(tipV11NarrationTempo(61, { exactTourV8: true }), 1.03);
   assert.equal(tipV11NarrationTempo(71.84, { exactTourV8: true }), 1.03);
 });
@@ -45,7 +49,7 @@ test('a cached automatic Ngor take reports the measured duration failure before 
   const plan = buildTipV11Narration(spec);
   const audioDir = join(root, 'public', 'audio', 'voiceovers');
   mkdirSync(audioDir, { recursive: true });
-  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=350:sample_rate=24000:duration=60',
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=350:sample_rate=24000:duration=57',
     '-c:a', 'pcm_s16le', join(audioDir, `${plan.id}.wav`)]);
   writeFileSync(join(audioDir, `${plan.id}.sha256`), voiceCacheHash(plan.script, '', 'tip-v11-fr'));
   await assert.rejects(renderTipV11(spec, { root }), /normalized narration outside 58\.5–119 s.*tempo 1\.03×/);

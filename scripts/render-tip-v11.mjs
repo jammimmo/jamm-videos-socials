@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { buildTipV11Narration, TIP_V11_TEMPLATE } from './tip-v11-contract.mjs';
 import { voiceCacheHash } from './voice-profile.mjs';
@@ -8,12 +8,15 @@ import { tipV11Effects } from './tip-v11-effects.mjs';
 import { buildTipV11RenderManifest, collectTipV11StaticFiles } from './tip-v11-render-manifest.mjs';
 import { geometryArtifactDirectory } from '../src/compositions/tip-v11-caption-geometry.ts';
 import { summarizeCaptionGeometry } from './tip-v11-caption-geometry.mjs';
-import { isReviewedPcm, NORMALIZED_NARRATION_PROCESSING, readStagedPrivateReviewedNarration, stageReviewedNarration } from './tip-v11-reviewed-narration.mjs';
+import { isReviewedPcm, NORMALIZED_NARRATION_PROCESSING, readStagedPrivateReviewedNarration, reviewedPcmData, stageReviewedNarration } from './tip-v11-reviewed-narration.mjs';
 
 const MIN_NARRATION_SECONDS = 58.5;
 const MAX_NARRATION_SECONDS = 119;
 const DEFAULT_TEMPO = 1.03;
 const TEMPO_HEADROOM_SECONDS = 0.25;
+// Alignment checks the total trailing silence, including silence in the take.
+const MAX_TAIL_PADDING_SECONDS = 2.5;
+const PCM_SAMPLE_RATE = 24_000;
 
 class TipNarrationDurationError extends Error {}
 
@@ -49,7 +52,9 @@ function narrationDuration(path) {
 }
 
 export function tipV11NarrationTempo(rawSeconds, { exactTourV8 = false } = {}) {
-  if (!Number.isFinite(rawSeconds) || rawSeconds < MIN_NARRATION_SECONDS
+  // atempo works in blocks. Decide the actual deficit from the normalized PCM.
+  const minRawSeconds = exactTourV8 ? MIN_NARRATION_SECONDS - MAX_TAIL_PADDING_SECONDS : MIN_NARRATION_SECONDS;
+  if (!Number.isFinite(rawSeconds) || rawSeconds < minRawSeconds
     || rawSeconds > MAX_NARRATION_SECONDS * DEFAULT_TEMPO) {
     throw new TipNarrationDurationError(`V11 raw narration cannot fit without stretching or truncation (${rawSeconds.toFixed(3)} s)`);
   }
@@ -58,6 +63,21 @@ export function tipV11NarrationTempo(rawSeconds, { exactTourV8 = false } = {}) {
   return exactTourV8 || rawSeconds / DEFAULT_TEMPO >= MIN_NARRATION_SECONDS + TEMPO_HEADROOM_SECONDS
     ? DEFAULT_TEMPO
     : 1;
+}
+
+export function padShortNgorNarration(wav) {
+  const data = reviewedPcmData(wav);
+  if (!data) throw new TipNarrationDurationError('Invalid normalized Ngor PCM');
+  const samples = data.length / 2;
+  const missing = MIN_NARRATION_SECONDS * PCM_SAMPLE_RATE - samples;
+  if (missing <= 0 || missing > MAX_TAIL_PADDING_SECONDS * PCM_SAMPLE_RATE) {
+    return { wav, normalizedSeconds: samples / PCM_SAMPLE_RATE, paddingSamples: 0 };
+  }
+  const end = data.offset + data.length;
+  const padded = Buffer.concat([wav.subarray(0, end), Buffer.alloc(missing * 2), wav.subarray(end)]);
+  padded.writeUInt32LE(padded.length - 8, 4);
+  padded.writeUInt32LE(data.length + missing * 2, data.offset - 4);
+  return { wav: padded, normalizedSeconds: MIN_NARRATION_SECONDS, paddingSamples: missing };
 }
 
 export async function normalizeTipV11Narration(root, raw, normalizedPath, options) {
@@ -76,13 +96,30 @@ export async function normalizeTipV11Narration(root, raw, normalizedPath, option
   const filters = tempo === 1 ? normalize : `atempo=${tempo},${normalize}`;
   await run('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-i', raw, '-map', '0:a:0',
     '-af', filters, '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', normalizedPath], root);
-  const normalizedSeconds = narrationDuration(normalizedPath);
+  let normalizedSeconds;
+  let paddingSamples = 0;
+  if (options?.exactTourV8) {
+    const measured = padShortNgorNarration(await readFile(normalizedPath));
+    normalizedSeconds = measured.normalizedSeconds;
+    paddingSamples = measured.paddingSamples;
+    if (paddingSamples) {
+      const temporary = `${normalizedPath}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temporary, measured.wav, { flag: 'wx', mode: 0o600 });
+        await rename(temporary, normalizedPath);
+      } finally {
+        await rm(temporary, { force: true });
+      }
+    }
+  } else {
+    normalizedSeconds = narrationDuration(normalizedPath);
+  }
   if (!Number.isFinite(normalizedSeconds) || normalizedSeconds < MIN_NARRATION_SECONDS
     || normalizedSeconds > MAX_NARRATION_SECONDS) {
     throw new TipNarrationDurationError(`V11 normalized narration outside 58.5–119 s (${normalizedSeconds.toFixed(3)} s; raw ${rawSeconds.toFixed(3)} s; tempo ${tempo}×)`);
   }
-  console.log(`V11 narration measured: ${rawSeconds.toFixed(3)} s raw, ${normalizedSeconds.toFixed(3)} s normalized, tempo ${tempo}×`);
-  return { rawSeconds, normalizedSeconds, tempo };
+  console.log(`V11 narration measured: ${rawSeconds.toFixed(3)} s raw, ${normalizedSeconds.toFixed(3)} s normalized, tempo ${tempo}×, ${paddingSamples} tail padding samples`);
+  return { rawSeconds, normalizedSeconds, tempo, ...(paddingSamples > 0 && { paddingSamples }) };
 }
 
 export async function renderTipV11(spec, {
