@@ -736,6 +736,88 @@ class V11FinalSpeechTest(unittest.TestCase):
             self.assertEqual(audit_words(full, lambda unused: focused, missing_plus)['segments'][1]['status'],
                              'inconclusive')
 
+    def test_only_distant_scored_contact_uncertainty_allows_one_exact_phone_verification(self):
+        from audit_tip_v11_speech import PHONE_WORDS
+        contact = 'Vous pouvez nous appeler ou nous écrire sur WhatsApp au même numéro'.split()
+        scenes = [
+            {'id': 'contact', 'text': ' '.join(contact), 'start': 0, 'end': 3},
+            {**self.segments[3], 'start': 3, 'end': 8},
+            {'id': 'socials', 'text': 'Suivez aussi Jamm Immo', 'start': 8, 'end': 10},
+        ]
+        left = [(w, i / 4, (i + 1) / 4, .10 if i == 0 else .98) for i, w in enumerate(contact)]
+        phone = [(w, 3 + i * 5 / 6, 3 + (i + 1) * 5 / 6, .10 if i == 0 else .98)
+                 for i, w in enumerate(['Plus', '221', '76', '944', '48', '49'])]
+        right = [(w, 8 + i / 2, 8 + (i + 1) / 2, .98) for i, w in enumerate(scenes[2]['text'].split())]
+        verified = Mock(return_value={'observed_words': PHONE_WORDS})
+        measured = compare_french_segments(scenes, left + phone + right, 0, verified)
+        verified.assert_called_once_with(3, 8)
+        self.assertIsNone(measured[0]['observed_words'][0])
+        self.assertEqual(measured[1]['observed_words'], PHONE_WORDS)
+        self.assertEqual(compare_french_segments(scenes, left + phone + right, 0, Mock(return_value=None))[1]['status'],
+                         'inconclusive')
+        for changed in (
+            [*left[:-2], ('même', *left[-2][1:3], .59), left[-1]],
+            [*left[:-3], ('au', *left[-3][1:3], .59), *left[-2:]],
+            [left[0], ('pouvez', *left[1][1:3], .2), *left[2:]],
+            [('autre', *left[0][1:]), *left[1:]],
+            [left[0], ('pouvez', .20, .50, .98), *left[2:]],
+        ):
+            retry = Mock(return_value={'observed_words': PHONE_WORDS})
+            self.assertEqual(compare_french_segments(scenes, changed + phone + right, 0, retry)[1]['status'],
+                             'inconclusive')
+            retry.assert_not_called()
+
+    def test_dakar_brand_pair_keeps_raw_evidence_and_independent_uncertainty(self):
+        from audit_tip_v11_speech import FIXED_SERVICES_WORDS, FIXED_SOCIALS_WORDS, dakar_brand_spelling_index
+        for identity, words, brand in [('services', FIXED_SERVICES_WORDS, 0), ('socials', FIXED_SOCIALS_WORDS, 2)]:
+            expected = list(words)
+            segment = {'id': identity, 'text': ' '.join(expected), 'start': 0, 'end': len(expected)}
+            raw = [*expected[:brand], 'Djam', 'Imo', *expected[brand + 2:]]
+            rows = [(w, i, i + .9, .095 if i == 8 else .735 if i == brand else .887)
+                    for i, w in enumerate(raw)]
+            [result] = compare_french_segments([segment], rows, 0)
+            self.assertEqual(result['status'], 'matched')
+            self.assertEqual(result['observed_words'], [*expected[:8], None, *expected[9:]])
+            self.assertNotIn('observed_sha256', result)
+            proof = result['measurement']
+            self.assertEqual(proof['method'], 'fixed_dakar_djam_imo_spelling')
+            self.assertEqual(proof['raw_observed_sha256'], sha256(' '.join(w.lower() for w in raw).encode()))
+            self.assertEqual(proof['brand_min_probability_milli'], 735)
+            for change in (
+                (brand, ('Sam', *rows[brand][1:])), (brand, ('Diama', *rows[brand][1:])),
+                (brand, ('Diam', *rows[brand][1:])),
+                (brand, ('Jamimo', *rows[brand][1:])), (brand, ('Djam', *rows[brand][1:3], .599)),
+                (brand + 1, ('Imo', *rows[brand + 1][1:3], .599)),
+                (brand + 1, ('Imo', rows[brand][2] - .1, rows[brand + 1][2], .95)),
+                (8, ('autre', *rows[8][1:])),
+            ):
+                i, observed = change
+                altered = rows.copy()
+                altered[i] = observed
+                [ordinary] = compare_french_segments([segment], altered, 0)
+                self.assertNotEqual(ordinary.get('measurement', {}).get('method'), proof['method'])
+            for second in ('Imo', 'Immo'):
+                altered = rows.copy()
+                altered[brand] = ('Sam', *rows[brand][1:])
+                altered[brand + 1] = (second, *rows[brand + 1][1:])
+                [ordinary] = compare_french_segments([segment], altered, 0)
+                # Ordinary word edits keep their existing score. An unsupported
+                # name is never reported as the canonical brand by this rule.
+                self.assertEqual(ordinary['observed_words'][brand:brand + 2], ['sam', second.lower()])
+                self.assertNotEqual(ordinary.get('measurement', {}).get('method'), proof['method'])
+            flat = [w.lower() for w in raw]
+            for scene in ('domain', 'phone', 'signature', 'hook'):
+                self.assertIsNone(dakar_brand_spelling_index({**segment, 'id': scene}, expected, flat, rows))
+            self.assertIsNone(dakar_brand_spelling_index(segment, expected[1:] + expected[:1], flat, rows))
+            swapped = rows.copy()
+            swapped[brand], swapped[brand + 1] = swapped[brand + 1], swapped[brand]
+            self.assertIsNone(dakar_brand_spelling_index(segment, expected, flat, swapped))
+            for i in (brand, brand + 1):
+                zero = rows.copy()
+                zero[i] = (rows[i][0], rows[i][1], rows[i][1], rows[i][3])
+                with self.assertRaises(ValueError):
+                    compare_french_segments([segment], zero, 0)
+
     def test_standalone_plus_requires_focused_evidence(self):
         bare_symbol = self.recognized[:7] + [('+', 7.2, 7.3, .96), ('221', 7.3, 7.5, .96)] + self.recognized[8:]
         report = self.measure(bare_symbol)

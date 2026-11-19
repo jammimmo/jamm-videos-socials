@@ -56,8 +56,9 @@ export async function inspectTipSource(event, env, dependencies = {}) {
         || report.source_script_sha256 !== capsule.scoringInput.source_script_sha256) throw new Error('Replay input mismatch');
       return report;
     };
-    const result = await measureSource(measureExact, draftPath, wavPath, scratch, offline);
-    const replay = result.diagnostic ?? { stage: 'measured_matched', measurementAttempts: result.measurementAttempts };
+    const result = await measureSource(measureExact, draftPath, wavPath, scratch, offline, { inspectComparison: true });
+    const replay = result.diagnostic ? { ...result.diagnostic, ...(result.comparison && { comparison: result.comparison }) }
+      : { stage: 'measured_matched', measurementAttempts: result.measurementAttempts };
     return { status: 'inspected', wavKind: capsule.wavKind, original: capsule.diagnostic, replay };
   } catch {
     return { status: 'unavailable', stage };

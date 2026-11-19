@@ -139,6 +139,12 @@ from score_tip_source import score_source
 plan = json.loads(sys.stdin.buffer.readline())
 wav = sys.stdin.buffer.read()
 rows = [('mot', 0.5, 0.75, 1), ('privee', 0.01, 0.05, 1)]
+if Path(__file__).with_suffix('.comparison').is_file():
+    from align_tip_v11 import tokens
+    words = [word for part in plan['segments'] for word in tokens(part['text'])]
+    step = 59 / len(words)
+    point = len(tokens(plan['segments'][0]['text'])) + 2
+    rows = [(w, .2 + i * step, .2 + (i if i == point else i + .8) * step, .99) for i, w in enumerate(words)]
 with TemporaryDirectory() as directory:
     print(json.dumps(score_source(plan, wav, Path(directory), lambda _: rows, lambda _: [])))
 `, { mode: 0o700 });
@@ -150,5 +156,47 @@ with TemporaryDirectory() as directory:
     assert.equal(result.replay.row_index, 1);
     assert.doesNotMatch(JSON.stringify(result), /privee|fake\.private\.jwt/);
     assert.deepEqual(await readdir(scratch), ['synthetic-recognizer']);
+    await writeFile(python + '.comparison', '', { mode: 0o600 });
+    const comparison = await inspectTipSource(f.event, { ...f.env, RUNNER_TEMP: scratch, TIP_SOURCE_PYTHON: python },
+      { request: f.transport(), verifyRuntime: async () => {} });
+    assert.equal(comparison.replay.reason, 'recognition_or_timing_inconclusive');
+    assert.equal(comparison.replay.segmentCount, 0);
+    assert.equal(comparison.replay.comparison.predicate, 'timestamp_zero_duration');
+    assert.equal(comparison.replay.comparison.segment_index, 1);
+    assert.equal(comparison.original.comparison, undefined);
   } finally { await rm(scratch, { recursive: true, force: true }); }
+});
+
+test('comparison failures expose only bounded predicates in exact inspections and never enter producer diagnostics', async () => {
+  const { measureSource } = await import('./measure-tip-source.mjs');
+  const f = fixture();
+  const trusted = { phase: 'word_assignment', predicate: 'timestamp_zero_duration', row_index: 25, row_count: 151, segment_index: 4 };
+  const failed = { ...f.speech, status: 'inconclusive', reason: 'recognition_or_timing_inconclusive', segments: [],
+    comparison_failure: { ...trusted, text: 'SECRET', exception: 'PRIVATE' } };
+  const result = await inspectTipSource(f.event, f.env, { request: f.transport(), verifyRuntime: async () => {}, score: async () => failed });
+  assert.deepEqual(result.original, f.original);
+  assert.deepEqual(result.replay.comparison, trusted);
+  assert.doesNotMatch(JSON.stringify(result), /SECRET|PRIVATE/);
+  const production = await measureSource(async () => failed, '', '', '.', {});
+  assert.equal(production.comparison, undefined);
+  assert.equal(production.diagnostic.comparison, undefined);
+  assert.equal(production.diagnostic.row_index, undefined);
+  for (const [detail, expected] of [
+    [{ ...trusted, predicate: 'SECRET' }, undefined],
+    [{ ...trusted, phase: 'SECRET' }, undefined],
+    [{ ...trusted, row_index: -1 }, undefined],
+    [{ ...trusted, row_index: 501 }, undefined],
+    [{ ...trusted, row_index: true }, undefined],
+    [{ ...trusted, row_count: 1, segment_index: 32 }, { phase: trusted.phase, predicate: trusted.predicate, row_index: trusted.row_index }],
+    [{ phase: 'french_comparison', predicate: 'unclassified_value_error', message: 'SECRET' },
+     { phase: 'french_comparison', predicate: 'unclassified_value_error' }],
+  ]) {
+    const inspected = await measureSource(async () => ({ ...failed, comparison_failure: detail }), '', '', '.', {}, { inspectComparison: true });
+    assert.deepEqual(inspected.comparison, expected);
+    assert.doesNotMatch(JSON.stringify(inspected), /SECRET|PRIVATE/);
+  }
+  for (const override of [{ reason: 'ordered_words_unconfirmed' }, { segments: [{ status: 'inconclusive' }] }]) {
+    const inspected = await measureSource(async () => ({ ...failed, ...override }), '', '', '.', {}, { inspectComparison: true });
+    assert.equal(inspected.comparison, undefined);
+  }
 });

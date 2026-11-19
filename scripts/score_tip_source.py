@@ -16,7 +16,7 @@ from align_tip_v11 import (
 )
 from audit_tip_v11 import pcm
 from audit_tip_v11_speech import (
-    EXCLUDED_SEGMENTS, MAX_RECOGNIZED_WORDS, SAMPLE_RATE, compare_french_segments, french_speech_outcome,
+    EXCLUDED_SEGMENTS, MAX_RECOGNIZED_WORDS, SAMPLE_RATE, SpeechComparisonError, compare_french_segments, french_speech_outcome,
     recognize_final_window, recognize_with_timeout, sha256, verify_hook_samples, verify_phone_with_context,
     verify_services_samples, verify_untimed_socials_samples,
 )
@@ -182,8 +182,11 @@ def _score_source(plan, wav, directory, recognize, recognize_window, *, startup=
         )
     except SourceRecognitionError as error:
         return {**report, 'reason': error.reason}
+    except SpeechComparisonError as error:
+        return {**report, 'reason': 'recognition_or_timing_inconclusive', 'comparison_failure': error.detail}
     except ValueError:
-        return {**report, 'reason': 'recognition_or_timing_inconclusive'}
+        return {**report, 'reason': 'recognition_or_timing_inconclusive',
+                'comparison_failure': {'phase': 'french_comparison', 'predicate': 'unclassified_value_error'}}
     # A source can be admitted to rendering before pixels exist. Do not
     # certify the domain here: final MP4 audio and visible-CTA evidence must
     # pass independently before automatic approval or publication.
