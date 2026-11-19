@@ -357,6 +357,37 @@ class V11AlignmentTest(unittest.TestCase):
         self.assertEqual(rejected.exception.reason, 'signature_closing_unrecognized')
         recognize_tail.assert_called_once()
 
+    def test_complete_full_signature_preserves_rows_before_trying_an_incomplete_focused_decode(self):
+        body = speech(SEGMENTS)[:-len(tokens(SEGMENTS[-1]['text']))]
+        scale = 60.38 / body[-1]['end']
+        body = [{**row, 'start': row['start'] * scale, 'end': row['end'] * scale} for row in body]
+        specs = [('À', 60.78, 61.30), ('bientôt', 61.30, 61.64), ('!', 61.64, 62.10),
+                 ('Jam', 62.10, 62.68), ('Imo,', 62.68, 63.18),
+                 ('suite', 63.68, 63.90), ('du', 63.90, 64.26), ('son', 64.26, 64.50),
+                 ('final', 64.94, 65.72)]
+        tail = [{'word': word, 'start': start, 'end': end} for word, start, end in specs]
+        duration = 66.16
+        sound = [(0, 60.4), (61.2, 61.7), (62.1, 63.2), (63.7, 64.6), (64.8, 65.8)]
+        focused = Mock(return_value=tail[:2])
+        canonical = [*tail[:3], {**tail[3], 'word': 'jamm'}, {**tail[4], 'word': 'immo'}, *tail[5:]]
+        result = align_with_signature_retry(SEGMENTS, body + tail, duration, sound, focused)
+        self.assertEqual(result, align(SEGMENTS, body + canonical, duration, sound))
+        self.assertEqual([r['word'] for r in tail], [word for word, _, _ in specs])
+        focused.assert_not_called()
+
+        for label, observed in {
+            'missing brand word': [*tail[:4], *tail[5:]],
+            'reversed brand': [*tail[:3], {**tail[3], 'word': 'Imo'}, {**tail[4], 'word': 'Jam'}, *tail[5:]],
+            'wide gap': [*tail[:3], {**tail[3], 'end': 62.45}, *tail[4:]],
+            'truncated continuation': tail[:6],
+            'crosses the preceding word': [{**tail[0], 'start': 60.35}, *tail[1:]],
+        }.items():
+            with self.subTest(label=label), self.assertRaises(SignatureEvidenceError) as rejected:
+                align_with_signature_retry(SEGMENTS, body + observed, duration, sound, focused)
+            self.assertEqual(rejected.exception.reason, 'signature_retry_insufficient')
+            focused.assert_called_once_with(body[-1]['end'])
+            focused.reset_mock()
+
     def test_split_signature_brand_uses_one_focused_decode_and_preserves_each_timestamp(self):
         # Observed closing timestamps; neutral words stand in for unconfirmed
         # ASR output beyond the brand. No private transcription is necessary.
