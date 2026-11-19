@@ -52,6 +52,18 @@ def phone_gap():
 
 
 class V11AlignmentTest(unittest.TestCase):
+    def test_point_contributes_no_word_anchor_or_caption_timing(self):
+        words = speech(SEGMENTS)
+        index = next(i for i, w in enumerate(words) if w['word'] == 'logement')
+        point = {**words[index], 'end': words[index]['start']}
+        sound = [(0, 70)]
+        omitted = align(SEGMENTS, words[:index] + words[index + 1:], 70, sound)
+        self.assertEqual(align(SEGMENTS, words[:index] + [point] + words[index + 1:], 70, sound), omitted)
+        count = len(tokens(SEGMENTS[0]['text']))
+        greeting_points = [{**w, 'end': w['start']} for w in words[:count]]
+        with self.assertRaises(ValueError):
+            align(SEGMENTS, greeting_points + words[count:], 70, sound)
+
     def test_pre_alignment_codes_for_invalid_plan_audio_and_coverage(self):
         words = speech(SEGMENTS)
         sound = [(0, 70)]

@@ -226,8 +226,14 @@ def align(segments, words, duration, audible=None, *, defer_domain=False, signat
                 code, difference = 'timestamp_overrun', end - duration
             raise AlignmentFailure('Invalid narration timestamps', code, row_index=index, span_ms=milliseconds(difference))
         previous = start
+        # A point has no speech interval. Keep its original source index for
+        # the audit, but never derive coverage, scene or caption cues from it.
+        if start == end:
+            continue
         recognized = tokens(word['word'])
-        if recognized == ['jamm', 'immo'] and index + 1 < len(words) and re.match(r'^\s*\.\s*com\b', words[index + 1]['word'], re.I):
+        if (recognized == ['jamm', 'immo'] and index + 1 < len(words)
+            and words[index + 1]['start'] < words[index + 1]['end']
+            and re.match(r'^\s*\.\s*com\b', words[index + 1]['word'], re.I)):
             recognized = [*recognized, 'point']
         for token in recognized:
             actual.append(token)

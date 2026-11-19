@@ -1,5 +1,6 @@
 """Conservatively compare French speech recognized from the final MP4 audio."""
 
+import difflib
 import hashlib
 import io
 from itertools import islice
@@ -15,12 +16,13 @@ import unicodedata
 import wave
 
 from align_tip_v11 import (
-    ASR_REPO, ASR_REVISION, NUMBER_WORDS, PHONE_WORDS, audible_windows, has_audible_narration, voiced_overlap,
+    ASR_REPO, ASR_REVISION, NUMBER_WORDS, PHONE_WORDS, audible_windows, caption_lines, has_audible_narration, voiced_overlap,
 )
 
 
 CONTRACT = 'tip-v11-fr-final-speech-v2'
 SOURCE = 'final_mp4_pcm_s16le_mono_24khz'
+ORDINARY_POINT_METHOD = 'ordinary_untimed_words_scored_as_edits_v1'
 PHONE_PREFIX_METHOD = 'fixed_phone_plus_scored_as_edit_v1'
 SAMPLE_RATE = 24_000
 EXCLUDED_SEGMENTS = ('greeting', 'signature')
@@ -206,7 +208,7 @@ class SpeechComparisonError(ValueError):
 
 
 def words_by_segment(segments, recognized_words, lag_samples, *, opening_hook=None, hook_crossings=None,
-                     boundary_crossings=None, untimed_socials=None):
+                     boundary_crossings=None, untimed_socials=None, ordinary_points=None):
     observed = [[] for _ in segments]
     ambiguous_boundary = set()
     offset = lag_samples / SAMPLE_RATE
@@ -244,6 +246,11 @@ def words_by_segment(segments, recognized_words, lag_samples, *, opening_hook=No
             raise invalid('timestamp_reversed')
         if start == end:
             owner = next((i for i, part in enumerate(segments) if part['start'] <= start - offset < part['end']), None)
+            proof = ordinary_points.get(owner) if ordinary_points else None
+            if proof and number - 1 in proof['measurement']['full_row_indices']:
+                observed[owner].append((text.strip(), start - offset, end - offset, probability))
+                previous = start
+                continue
             raise invalid('timestamp_zero_duration', owner)
         if end > segments[-1]['end'] + abs(offset) + .12:
             raise invalid('timestamp_overrun')
@@ -604,7 +611,7 @@ def exact_adjacent_split(left, right, rows, original_split, expected_left, expec
     return matches[0] if len(matches) == 1 else None
 
 
-def anchored_phone_range(segments, expected_words, observed, index, contact_result):
+def anchored_phone_range(segments, expected_words, observed, index, contact_result, socials_result=None):
     if (not 0 < index < len(segments) - 1
         or [part['id'] for part in segments[index - 1:index + 2]] != ['contact', 'phone', 'socials']
         or expected_words[index] != PHONE_WORDS):
@@ -613,7 +620,7 @@ def anchored_phone_range(segments, expected_words, observed, index, contact_resu
     right_start = expected_words[index + 1][:2]
     if not left or segment_words('contact', left) != expected_words[index - 1] or len(right_start) != 2:
         return None
-    uncertain = [r for r in left if r[3] < MIN_WORD_PROBABILITY]
+    uncertain = [r for r in left if r[3] < MIN_WORD_PROBABILITY or r[1] == r[2]]
     if uncertain:
         # The contact line must already have passed its ordinary score, with
         # the final two words independently anchoring the exact phone crop.
@@ -635,22 +642,172 @@ def anchored_phone_range(segments, expected_words, observed, index, contact_resu
         if not 4 <= end - start <= 8 or abs(end - phone['end']) > MAX_PHONE_EDGE_SHIFT_SECONDS:
             continue
         anchor = rows[pivot:pivot + 2]
-        if (segment_words('socials', anchor)[:2] != right_start
-            or any(word[3] < MIN_WORD_PROBABILITY for word in anchor)
+        anchor_length = len(anchor)
+        if (len(anchor) == 2 and anchor[1][1] == anchor[1][2] and socials_result
+            and socials_result['status'] == 'matched' and socials_result['observed_words'][:4] == ['suivez', None, 'jamm', 'immo']
+            and tuple(expected_words[index + 1]) == FIXED_SOCIALS_WORDS):
+            # The onset is the positively timed Suivez. Use the two actual
+            # brand rows after the uncredited point to corroborate that onset.
+            brand = rows[pivot + 2:pivot + 4]
+            if ([normalized_words('socials', r[0]) for r in brand] not in (
+                    [['jamm'], ['immo']], [['jam'], ['imo']], [['djam'], ['imo']])
+                or normalized_words('socials', anchor[0][0]) != ['suivez']):
+                continue
+            anchor = [anchor[0], *brand]
+            anchor_length = 4
+        elif segment_words('socials', anchor)[:2] != right_start:
+            continue
+        if (any(word[3] < MIN_WORD_PROBABILITY or word[1] >= word[2] for word in anchor)
             or segment_words('phone', rows[:pivot]) != PHONE_WORDS):
             continue
         # No ASR word may be trimmed out or assigned twice in the retry.
-        timed = [left[-1], *rows[:pivot + len(anchor)]]
+        timed = [left[-1], *rows[:pivot + anchor_length]]
         if any(before[2] > after[1] for before, after in zip(timed, timed[1:])):
             continue
         windows.append((start, end))
     return windows[0] if len(windows) == 1 else None
 
 
+# Fixed identifiers are never ordinary uncertainty, even in the advice body.
+POINT_PROTECTED_NAMES = frozenset('jamm jam djam diam immo imo jamimo diamimo jammimmo whatsapp assistant'.split())
+POINT_SCENES = frozenset('hook step1 step2 step3 takeaway services tools assistant contact socials'.split())
+
+
+def ordinary_point_scene(segment, indexed_rows, lag_samples):
+    identity = segment['id']
+    expected = normalized_words(identity, segment['text'])
+    rows = [row for _, row in indexed_rows]
+    parts = [normalized_words(identity, row[0]) for row in rows]
+    if not all(parts) or not expected:
+        return None
+    # Preserve source row boundaries through accented spelling / apostrophes.
+    positions, flat = [], []
+    for words in parts:
+        positions.append(len(flat))
+        flat.extend(words)
+    actual = flat.copy()
+    brand = FIXED_BRAND_WORD_INDEX.get(identity)
+    fixed_line = {'services': FIXED_SERVICES_WORDS, 'socials': FIXED_SOCIALS_WORDS}.get(identity)
+    # Only the already admitted split spellings in their existing fixed line.
+    # Both brand words must be independently timed, voiced and confident.
+    if brand is not None and tuple(expected) == fixed_line and len(rows) == len(flat) == len(expected):
+        if all(rows[i][1] < rows[i][2] for i in (brand, brand + 1)):
+            actual = canonical_fixed_brand_words(identity, expected, flat, rows)
+            if (flat == [*expected[:brand], 'djam', 'imo', *expected[brand + 2:]]
+                and measured_dakar_brand_pair(rows, brand)):
+                actual = [*flat[:brand], 'jamm', 'immo', *flat[brand + 2:]]
+    if not bounded_observed_words(actual):
+        return None
+
+    matches = difflib.SequenceMatcher(None, expected, actual, autojunk=False).get_matching_blocks()
+    mapped = {m.b + i: m.a + i for m in matches for i in range(m.size)}
+    caption_edges = set()
+    if 'caption' not in segment:
+        offset = 0
+        for line in caption_lines(segment['text']):
+            caption_edges.add(offset)
+            offset += len(normalized_words(identity, line))
+
+    names = set(POINT_PROTECTED_NAMES)
+    for token in re.findall(r'[^\W_]+', segment['text'])[1:]:
+        if not token.islower():
+            names.update(normalized_words(identity, token))
+    known_brand = [w for w in expected if w in names]
+    observed_brand = [w for w in actual if w in names]
+    protected = {i for i, word in enumerate(actual) if word in names or protected_speech([word])}
+    reported = actual.copy()
+    full_indices, expected_slots, samples = [], [], []
+    for i, (raw, start, end, p) in enumerate(rows):
+        pos = positions[i]
+        if start < end:
+            if p < MIN_WORD_PROBABILITY:
+                for token_index in range(pos, pos + len(parts[i])):
+                    reported[token_index] = None
+            continue
+        # The point can locate a single missing ordinary word between the
+        # two observed neighbors. It supplies neither timing nor word credit.
+        exp = mapped.get(pos)
+        if (i == 0 or i + 1 == len(rows) or len(parts[i]) != 1 or exp is None
+            or not 0 < exp < len(expected) - 1 or exp in caption_edges or pos in protected or p < MIN_WORD_PROBABILITY
+            or not raw.strip().islower() or not re.fullmatch(r'[^\W\d_]+[.,!?]?', raw.strip())
+            or raw.strip().casefold().rstrip('.,!?') in names
+            or not all(rows[j][1] < rows[j][2] and rows[j][3] >= MIN_WORD_PROBABILITY for j in (i - 1, i + 1))
+            or mapped.get(pos - 1) != exp - 1 or mapped.get(pos + 1) != exp + 1):
+            return None
+        triplet = expected[exp - 1:exp + 2]
+        if any(sum(words[k:k + 3] == triplet for k in range(len(words) - 2)) != 1 for words in (expected, actual)):
+            return None
+        full_indices.append(indexed_rows[i][0])
+        expected_slots.append(exp)
+        samples.append(round(start * SAMPLE_RATE))
+        reported[pos] = None
+    if not full_indices:
+        return None
+    edits = speech_edits(expected, reported)
+    matched = (known_brand == observed_brand and all(reported[i] is not None for i in protected)
+               and protected_speech(reported) == protected_speech(expected)
+               and edits * 100 <= len(expected) * (100 - MIN_SEGMENT_ACCURACY_PERCENT))
+    return {'segment': identity, 'status': 'matched' if matched else 'inconclusive',
+            'expected_token_count': len(expected), 'observed_token_count': len(reported), 'observed_words': reported,
+            'expected_sha256': sha256(' '.join(expected).encode()), 'measurement': {
+                'method': ORDINARY_POINT_METHOD, 'full_row_indices': full_indices, 'expected_token_indices': expected_slots,
+                'point_samples': samples, 'edit_count': edits, 'point_words_credited': 0,
+                'scene_start_sample': round(segment['start'] * SAMPLE_RATE) + lag_samples,
+                'scene_end_sample': round(segment['end'] * SAMPLE_RATE) + lag_samples,
+            }}
+
+
+def ordinary_point_reports(segments, rows, lag_samples, decoded_pcm, wav_path, specialized):
+    if not decoded_pcm or not isinstance(rows, (list, tuple)) or not 0 < len(rows) <= MAX_RECOGNIZED_WORDS:
+        return {}
+    if not any(isinstance(r, (list, tuple)) and len(r) == 4 and r[1] == r[2] for r in rows):
+        return {}
+    if (any(not isinstance(r, (list, tuple)) or len(r) != 4 or not isinstance(r[0], str)
+            or not 1 <= len(r[0]) <= 300 or not all(type(v) in (int, float) and math.isfinite(v) for v in r[1:])
+            or not 0 <= r[1] <= r[2] or not 0 <= r[3] <= 1 for r in rows)
+        or type(lag_samples) is not int or lag_samples < 0):
+        return {}
+    wav_hash = None
+    if wav_path is not None:
+        wav = matching_pcm_wav(wav_path, decoded_pcm)
+        if wav is None:
+            return {}
+        wav_hash = sha256(wav)
+    reports = {}
+    for scene, part in enumerate(segments):
+        if part['id'] not in POINT_SCENES or (specialized and scene == specialized['measurement']['scene_index']):
+            continue
+        lo, hi = (round(part[k] * SAMPLE_RATE) + lag_samples for k in ('start', 'end'))
+        inside = [(i, r) for i, r in enumerate(rows) if lo <= round(r[1] * SAMPLE_RATE) < hi]
+        if not any(r[1] == r[2] for _, r in inside):
+            continue
+        if (not 0 <= lo < hi <= len(decoded_pcm) // 2
+            or any(left[1][2] > right[1][1] for left, right in zip(inside, inside[1:]))
+            or any(round(r[1] * SAMPLE_RATE) < lo < round(r[2] * SAMPLE_RATE) for r in rows)):
+            continue
+        previous = lo
+        for _, row in inside:
+            left, right = (round(t * SAMPLE_RATE) for t in row[1:3])
+            if (not previous <= left <= right <= hi or (row[1] == row[2] and not lo < left < hi)
+                or (row[1] < row[2] and (left == right or not any(audible_windows(decoded_pcm[2*left:2*right], SAMPLE_RATE))))):
+                break
+            previous = right
+        else:
+            result = ordinary_point_scene(part, inside, lag_samples)
+            if result:
+                result['measurement'].update(full_timed_rows_sha256=timed_rows_digest(rows),
+                                             decoded_pcm_sha256=sha256(decoded_pcm))
+                if wav_hash:
+                    result['measurement']['full_wav_sha256'] = wav_hash
+                reports[scene] = result
+    return reports
+
+
 def compare_french_segments(segments, recognized_words, lag_samples, verify_phone=None, *, verify_hook=None,
                             verify_services=None, verify_socials=None, verify_domain=None,
-                            verify_untimed_socials=None, phone_field_scoring=False, inspection=None):
+                            verify_untimed_socials=None, phone_field_scoring=False, ordinary_point_pcm=None, ordinary_point_wav=None, inspection=None):
     untimed_socials = verify_untimed_socials(recognized_words) if verify_untimed_socials else None
+    point_reports = ordinary_point_reports(segments, recognized_words, lag_samples, ordinary_point_pcm, ordinary_point_wav, untimed_socials)
     opening_hook = None
     if (verify_hook and len(segments) > 2 and [part['id'] for part in segments[:2]] == ['greeting', 'hook']
         and segments[0]['end'] == segments[1]['start'] and segments[1]['end'] == segments[2]['start']):
@@ -659,7 +816,7 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
     boundary_crossings = {}
     observed, ambiguous_boundary = words_by_segment(
         segments, recognized_words, lag_samples, opening_hook=opening_hook, hook_crossings=hook_crossings,
-        boundary_crossings=boundary_crossings, untimed_socials=untimed_socials,
+        boundary_crossings=boundary_crossings, untimed_socials=untimed_socials, ordinary_points=point_reports,
     )
     expected_words = [normalized_words(segment['id'], segment['text']) for segment in segments]
     actual_words = [segment_words(segment['id'], words) for segment, words in zip(segments, observed)]
@@ -668,7 +825,8 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
     repairs = {}
     for index, (left, right) in enumerate(zip(segments, segments[1:])):
         following = index + 1
-        if untimed_socials and untimed_socials['measurement']['scene_index'] in (index, following):
+        if index in point_reports or following in point_reports or (
+            untimed_socials and untimed_socials['measurement']['scene_index'] in (index, following)):
             continue
         if (left['id'] in EXCLUDED_SEGMENTS or right['id'] in EXCLUDED_SEGMENTS
             or index in ambiguous_boundary or following in ambiguous_boundary
@@ -695,6 +853,15 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
                 inspection.observe(identity, segment_words(identity, observed[index]), untimed_socials['observed_words'],
                                    {'untimed_word_counted': True, 'score_matched': True})
             results.append(untimed_socials)
+            continue
+        if index in point_reports:
+            item = point_reports[index]
+            if index in ambiguous_boundary:
+                raise ValueError('untimed word crosses excluded speech')
+            if inspection is not None:
+                inspection.observe(identity, segment_words(identity, observed[index]), item['observed_words'],
+                                   {'untimed_word_counted': True, 'score_matched': item['status'] == 'matched'})
+            results.append(item)
             continue
         expected = expected_words[index]
         raw_actual = segment_words(identity, observed[index])
@@ -864,7 +1031,8 @@ def compare_french_segments(segments, recognized_words, lag_samples, verify_phon
                     'global_raw_observed_sha256': sha256(' '.join(raw_actual).encode()),
                 }}
         elif not matched and identity == 'phone' and verify_phone:
-            window = anchored_phone_range(segments, expected_words, observed, index, results[-1] if results else None)
+            window = anchored_phone_range(segments, expected_words, observed, index, results[-1] if results else None,
+                                          point_reports.get(index + 1) or untimed_socials)
             focused_eligible = window is not None
             corroborating_rows = []
             if (window and phone_field_scoring and sum(part['id'] == 'phone' for part in segments) == 1
@@ -1325,6 +1493,19 @@ def timed_rows_digest(rows):
     return sha256(json.dumps(rows, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode())
 
 
+def matching_pcm_wav(wav_path, decoded_pcm):
+    try:
+        wav = Path(wav_path).read_bytes()
+        with wave.open(io.BytesIO(wav), 'rb') as audio:
+            if ((audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) != (1, 2, SAMPLE_RATE)
+                or audio.getnframes() * 2 != len(decoded_pcm)
+                or audio.readframes(audio.getnframes()) != decoded_pcm):
+                return None
+    except (OSError, ValueError, wave.Error, EOFError):
+        return None
+    return wav
+
+
 def verify_untimed_socials_samples(decoded_pcm, lag_samples, directory, segments, rows, wav_path, recognize):
     """Corroborate the same point, counting its absent duration as one complete edit."""
     if (type(lag_samples) is not int or lag_samples < 0 or not isinstance(rows, list)
@@ -1346,14 +1527,8 @@ def verify_untimed_socials_samples(decoded_pcm, lag_samples, directory, segments
     if full is None:
         return None
     # Bind the full recognizer input to the exact PCM supplying the fixed crop.
-    try:
-        wav = Path(wav_path).read_bytes()
-        with wave.open(io.BytesIO(wav), 'rb') as audio:
-            if ((audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) != (1, 2, SAMPLE_RATE)
-                or audio.getnframes() * 2 != len(decoded_pcm)
-                or audio.readframes(audio.getnframes()) != decoded_pcm):
-                return None
-    except (OSError, ValueError, wave.Error, EOFError):
+    wav = matching_pcm_wav(wav_path, decoded_pcm)
+    if wav is None:
         return None
     window = read_socials_scene_window(decoded_pcm, lag_samples, directory, segments, index, expected, recognize)
     if window is None:
@@ -1553,6 +1728,7 @@ def measure_final_french_speech(segments, decoded_pcm, waveform, directory, reco
                 decoded_pcm, lag_samples, directory, segments, start, end, recognize_phone, **options),
             verify_hook=hook_check, verify_services=services_check, verify_socials=socials_check, verify_domain=domain_check,
             verify_untimed_socials=untimed_socials_check, phone_field_scoring=preserved,
+            ordinary_point_pcm=decoded_pcm if preserved else None, ordinary_point_wav=wav_path,
         )
     except ValueError:
         return {**result, 'reason': 'recognition_or_timing_inconclusive'}

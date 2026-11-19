@@ -203,7 +203,7 @@ def _score_source(plan, wav, directory, recognize, recognize_window, *, startup=
                 raw, 0, directory, segments, rows, source_path,
                 measured(recognize_window, 'audit_socials', next(
                     (round(s['start'] * SAMPLE_RATE) for s in segments if s['id'] == 'socials'), None))),
-            phone_field_scoring=True, inspection=inspection,
+            phone_field_scoring=True, ordinary_point_pcm=raw, ordinary_point_wav=source_path, inspection=inspection,
         )
     except SourceRecognitionError as error:
         return {**report, 'reason': error.reason}

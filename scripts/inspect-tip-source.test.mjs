@@ -146,7 +146,7 @@ if Path(__file__).with_suffix('.comparison').is_file():
     step = 59 / len(words)
     point = len(tokens(plan['segments'][0]['text'])) + 2
     held = Path(__file__).with_suffix('.held').is_file()
-    rows = [('non' if held and i == point else w, .2 + i * step,
+    rows = [('non' if i == point else w, .2 + i * step,
              .2 + (i if i == point and not held else i + .8) * step, .99) for i, w in enumerate(words)]
 assert sys.argv[2] == '--inspect-trace'
 with TemporaryDirectory() as directory:
@@ -258,6 +258,10 @@ test('public projection keeps signed measurements and strips private data at all
   Object.assign(phone, {status: 'matched', method: 'fixed_phone_plus_scored_as_edit_v1',
     observedCount: 16, expectedCount: 16, editCount: 1, nullCount: 1, uncertainPositions: [0], protectedMatch: true});
   assert.deepEqual(projectInspection(e, identity).scenes.find(s => s.id === 'phone'), phone);
+  const socials = e.scenes.find(s => s.id === 'socials');
+  Object.assign(socials, {status: 'matched', method: 'ordinary_untimed_words_scored_as_edits_v1',
+    observedCount: 13, expectedCount: 13, editCount: 1, nullCount: 1, uncertainPositions: [1], protectedMatch: true});
+  assert.deepEqual(projectInspection(e, identity).scenes.find(s => s.id === 'socials'), socials);
 });
 test('invalid bindings, enum, sample, digest, scene identity and row shapes fail closed', () => {
   for (const change of [

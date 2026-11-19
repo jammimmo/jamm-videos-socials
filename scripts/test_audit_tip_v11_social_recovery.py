@@ -213,20 +213,31 @@ class UntimedSocialsTest(unittest.TestCase):
             for name, altered in mutations(original, point_index).items():
                 with self.subTest(stream=stream, name=name):
                     result, calls = self.measure(**{stream: altered})
-                    self.assertEqual(result['status'], 'inconclusive')
+                    if stream == 'crop' or name == 'detached point':
+                        self.assertEqual(result['status'], 'matched')
+                        row = result['segments'][1]
+                        self.assertEqual(row['measurement']['method'], 'ordinary_untimed_words_scored_as_edits_v1')
+                        self.assertEqual(row['observed_words'].count(None), 1)
+                        self.assertEqual(row['measurement']['point_words_credited'], 0)
+                    else:
+                        self.assertEqual(result['status'], 'inconclusive')
                     self.assertEqual(calls, int(stream == 'crop'))
         shifted = deepcopy(self.crop)
         for row_index, field in ((0, 2), (1, 1), (1, 2), (2, 1)):
             shifted[row_index][field] += 1 / SAMPLE_RATE
         report, calls = self.measure(crop=shifted)
-        self.assertEqual((report['status'], calls), ('inconclusive', 1))
+        self.assertEqual((report['segments'][1]['measurement']['method'], calls), ('ordinary_untimed_words_scored_as_edits_v1', 1))
         # A row ending at the signature cut may not cross into its context.
         for stream, rows, last, cut in [('full', self.full, -2, 5.5 + self.lag / SAMPLE_RATE),
                                         ('crop', self.crop, -2, 3.5)]:
             altered = deepcopy(rows)
             altered[last][2] = cut + .01
             with self.subTest(stream=stream, case='cut crossing'):
-                self.assertEqual(self.measure(**{stream: altered})[0]['status'], 'inconclusive')
+                report, _ = self.measure(**{stream: altered})
+                if stream == 'full':
+                    self.assertEqual(report['status'], 'inconclusive')
+                else:
+                    self.assertEqual(report['segments'][1]['measurement']['method'], 'ordinary_untimed_words_scored_as_edits_v1')
 
     def test_only_the_fixed_scene_with_its_preserved_audible_pcm_can_use_a_point(self):
         from audit_tip_v11_speech import compare_french_segments
