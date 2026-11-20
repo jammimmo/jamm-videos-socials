@@ -14,7 +14,7 @@ jobs:
       contents: read
       id-token: write
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: ${{ github.event.client_payload.evidence.destinationMediaContract == 'tip-v11-destination-manifest-v1' && 45 || 30 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -92,6 +92,7 @@ jobs:
             --brand-logo public/tip-v11/logo.png --report "out/batch/${STEM}.audit.json"
 
       - name: Stream the MP4 to the Jamm Immo Worker
+        if: env.TIP_DESTINATION_MEDIA_CONTRACT != 'tip-v11-destination-manifest-v1'
         run: |
           set +x
           VIDEO="out/batch/tip-${TIP_JOB_ID}.mp4"
@@ -121,6 +122,13 @@ jobs:
             unset ATTESTATION
             node scripts/deliver-tip-v11-report.mjs "${REPORT}" || true
           fi
+
+      - name: Deliver the master, destination variants and bound report
+        if: env.TIP_DESTINATION_MEDIA_CONTRACT == 'tip-v11-destination-manifest-v1'
+        timeout-minutes: 17
+        run: |
+          set +x
+          node scripts/deliver-tip-destination-attempt.mjs
 
       - name: Report a terminal renderer failure
         if: ${{ failure() }}

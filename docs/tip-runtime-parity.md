@@ -42,19 +42,19 @@ and keeps that one model resident for its recognition windows. The output compar
 decoded audio and pictures. Equal tools or a shared installer cannot by
 themselves establish an interchangeable render.
 
-The common synthetic fixture from `f0c73b26` is retained. Its v3 receipt adds
-the measured speech runtime digest. Compare two receipts from the same exact
-renderer commit and the same orchestration attempt with:
+The common synthetic fixture from `f0c73b26` is retained. Its v4 receipt records
+the measured speech runtime and the decoded picture, decoded audio, frame count
+and caption geometry for the Facebook, Instagram and TikTok layouts. Compare two
+receipts from the same exact renderer commit and the same orchestration attempt with:
 
 ```sh
 node scripts/compare-tip-runner-parity.mjs "$RENDERER_SOURCE_SHA" hosted.json mini.json
 ```
 
-The older Estate Flow v2 comparator deliberately rejects v3. Its caller must
-adopt this common v3 comparator when the reviewed renderer ref is updated;
-do not remove the decoded-picture check. The recorded f0c73b26 exercise had
-equal tools and decoded audio but different decoded pictures. That drift
-remains unresolved by this installation change, and no new render is claimed.
+Use the comparator from the reviewed renderer commit. A v3 receipt verifies only
+the master and cannot establish destination parity. The recorded `f0c73b26`
+exercise had equal tools and decoded audio but different decoded pictures. A
+new hosted and mini-PC comparison is required for the v4 receipt.
 
 The production Worker currently accepts only the existing GitHub-hosted advice
 identity. A qualified mini-PC fixture does not grant it a production identity.

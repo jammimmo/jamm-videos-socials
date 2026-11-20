@@ -34,7 +34,7 @@ function retryDelay(response, fallback, now) {
   return Math.max(fallback, milliseconds);
 }
 
-async function confirmsDelivery(response, matchesReceipt) {
+export async function confirmsDelivery(response, matchesReceipt) {
   const reader = response.body?.getReader();
   if (!reader) return false;
   const chunks = [];

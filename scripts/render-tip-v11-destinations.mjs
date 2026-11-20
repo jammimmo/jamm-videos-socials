@@ -7,12 +7,12 @@ import { decodedTipMediaFingerprints } from './tip-decoded-media-fingerprint.mjs
 import { summarizeCaptionGeometry } from './tip-v11-caption-geometry.mjs';
 
 // The caller supplies one already aligned composition and its mixed audio.
-// This receipt belongs to local layout QA, outside render delivery.
+// These are local proofs. Only the signed workflow may submit them to the Worker.
 const destinations = ['tiktok', 'instagram', 'facebook'];
 const maxSeconds = { tiktok: 120, instagram: 120, facebook: 90 };
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
-export async function renderTipV11Destinations({ root, outputDirectory, props, selectedDestinations = destinations }) {
+export async function renderTipV11Destinations({ root, outputDirectory, props, selectedDestinations = destinations, deadline }) {
   const { captionGeometryRunId: _sharedGeometryRun, ...baseProps } = props;
   if (!selectedDestinations.length || new Set(selectedDestinations).size !== selectedDestinations.length
     || selectedDestinations.some(destination => !destinations.includes(destination))) {
@@ -27,6 +27,8 @@ export async function renderTipV11Destinations({ root, outputDirectory, props, s
   await mkdir(outputDirectory, { mode: 0o700 });
   const videos = [];
   for (const destination of selectedDestinations) {
+    const remaining = deadline === undefined ? 15 * 60 * 1000 : Math.min(15 * 60 * 1000, deadline - Date.now());
+    if (remaining < 1_000) throw new Error('V11 destination render budget exhausted');
     const propsPath = join(outputDirectory, `${destination}.props.json`);
     const videoPath = join(outputDirectory, `${destination}.mp4`);
     const renderProps = { ...baseProps, destination, captionGeometryRunId: randomUUID() };
@@ -39,7 +41,7 @@ export async function renderTipV11Destinations({ root, outputDirectory, props, s
         'render', 'src/index.ts', 'TipV11Fr', videoPath, `--props=${propsPath}`,
         '--config=remotion.tip-v11.config.ts', '--codec=h264', '--audio-codec=aac',
         '--image-format=jpeg', '--concurrency=3', '--log=error',
-      ], { cwd: root, stdio: 'inherit', timeout: 15 * 60 * 1000 });
+      ], { cwd: root, stdio: 'inherit', timeout: remaining });
       captionGeometry = await summarizeCaptionGeometry(renderProps, geometryDirectory);
     } finally {
       await rm(geometryDirectory, { recursive: true, force: true });

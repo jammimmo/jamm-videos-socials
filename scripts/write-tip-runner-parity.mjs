@@ -4,6 +4,7 @@ import { createReadStream } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ensureBrowser } from '@remotion/renderer';
+import { compareTipRunnerParity } from './compare-tip-runner-parity.mjs';
 import { assertTipSourceRuntime, expectedTipRuntime } from './tip-runtime.mjs';
 
 const [fixtureLog, output, sourceSha, ffmpeg, ffprobe] = process.argv.slice(2);
@@ -32,7 +33,7 @@ const browser = await ensureBrowser({
 if (browser.type !== 'local-puppeteer-browser') throw new Error('Expected Remotion’s bundled Chromium');
 
 const receipt = {
-  schema: 'jamm-tip-runner-parity-v3',
+  schema: 'jamm-tip-runner-parity-v4',
   sourceSha,
   lockSha256: await digest(join(root, 'package-lock.json')),
   toolchain: {
@@ -50,4 +51,5 @@ const receipt = {
   },
   fixture,
 };
+compareTipRunnerParity(sourceSha, receipt, receipt);
 await writeFile(output, `${JSON.stringify(receipt, null, 2)}\n`, { flag: 'wx' });

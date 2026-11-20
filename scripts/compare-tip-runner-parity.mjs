@@ -8,9 +8,12 @@ const toolchainKeys = ['node', 'npm', 'python', 'ffmpeg', 'ffprobe', 'chromium',
   'ffmpegSha256', 'ffprobeSha256', 'chromiumSha256', 'speechRuntimeSha256'];
 const exactFixtureKeys = ['renderer', 'voiceSource', 'alignment', 'captionGeometry', 'duration',
   'width', 'height', 'closedGopKeyframes', 'closedGopSeconds', 'decodedVideoSha256', 'decodedAudioSha256'];
+const destinations = ['facebook', 'instagram', 'tiktok'];
+const exactDestinationKeys = ['width', 'height', 'duration', 'videoFrames', 'captionGeometrySha256',
+  'decodedVideoSha256', 'decodedAudioSha256'];
 
 function verifyReceipt(receipt, expectedSha, lane) {
-  if (receipt?.schema !== 'jamm-tip-runner-parity-v3' || receipt.sourceSha !== expectedSha
+  if (receipt?.schema !== 'jamm-tip-runner-parity-v4' || receipt.sourceSha !== expectedSha
     || !digest.test(receipt.lockSha256 ?? '')) throw new Error(`${lane}: invalid or different source receipt`);
   const tools = receipt.toolchain;
   if (!tools || Object.keys(tools).length !== toolchainKeys.length || toolchainKeys.some(key => {
@@ -30,12 +33,31 @@ function verifyReceipt(receipt, expectedSha, lane) {
     || fixture.retainedArtifact !== false) {
     throw new Error(`${lane}: incomplete or failed offline render`);
   }
+  if (!Array.isArray(fixture.destinationLayouts) || fixture.destinationLayouts.length !== destinations.length) {
+    throw new Error(`${lane}: incomplete destination render evidence`);
+  }
+  const layouts = new Map(fixture.destinationLayouts.map(layout => [layout?.destination, layout]));
+  const pictures = new Set([fixture.decodedVideoSha256]);
+  const frames = layouts.get('facebook')?.videoFrames;
+  for (const destination of destinations) {
+    const layout = layouts.get(destination);
+    if (!layout || layout.width !== fixture.width || layout.height !== fixture.height
+      || !Number.isSafeInteger(frames) || frames <= 60 * 30 || layout.videoFrames !== frames
+      || !Number.isFinite(layout.duration) || layout.duration <= 60 || layout.duration > (destination === 'facebook' ? 90 : 120)
+      || Math.abs(layout.duration - frames / 30) > .12 || Math.abs(layout.duration - fixture.duration) > .12
+      || layout.decodedAudioSha256 !== fixture.decodedAudioSha256 || pictures.has(layout.decodedVideoSha256)
+      || !['mediaSha256', 'decodedVideoSha256', 'captionGeometrySha256'].every(key => digest.test(layout[key] ?? ''))) {
+      throw new Error(`${lane}: invalid destination render evidence for ${destination}`);
+    }
+    pictures.add(layout.decodedVideoSha256);
+  }
+  return layouts;
 }
 
 export function compareTipRunnerParity(expectedSha, hosted, mini) {
   if (typeof expectedSha !== 'string' || !commit.test(expectedSha)) throw new Error('Expected a full reviewed renderer SHA');
-  verifyReceipt(hosted, expectedSha, 'github-hosted');
-  verifyReceipt(mini, expectedSha, 'mini-pc');
+  const hostedDestinations = verifyReceipt(hosted, expectedSha, 'github-hosted');
+  const miniDestinations = verifyReceipt(mini, expectedSha, 'mini-pc');
   const differences = [];
   if (hosted.lockSha256 !== mini.lockSha256) differences.push('lockSha256');
   for (const key of toolchainKeys) {
@@ -44,11 +66,21 @@ export function compareTipRunnerParity(expectedSha, hosted, mini) {
   for (const key of exactFixtureKeys) {
     if (hosted.fixture[key] !== mini.fixture[key]) differences.push(`fixture.${key}`);
   }
+  const sameDestinationMediaBytes = {};
+  for (const destination of destinations) {
+    const hostedLayout = hostedDestinations.get(destination);
+    const miniLayout = miniDestinations.get(destination);
+    for (const key of exactDestinationKeys) {
+      if (hostedLayout[key] !== miniLayout[key]) differences.push(`fixture.destinationLayouts.${destination}.${key}`);
+    }
+    sameDestinationMediaBytes[destination] = hostedLayout.mediaSha256 === miniLayout.mediaSha256;
+  }
   return {
     sourceSha: expectedSha,
     status: differences.length ? 'drift' : 'matched',
     differences,
     sameMediaBytes: hosted.fixture.mediaSha256 === mini.fixture.mediaSha256,
+    sameDestinationMediaBytes,
   };
 }
 

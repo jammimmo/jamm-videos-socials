@@ -10,6 +10,7 @@ import { parseReviewedNarration, REVIEWED_NARRATION_DISPATCH, stagePrivateReview
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HEX64_RE = /^[a-f0-9]{64}$/;
+export const TIP_DESTINATION_MEDIA_CONTRACT = 'tip-v11-destination-manifest-v1';
 
 function object(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -68,6 +69,11 @@ export function materializeDispatchedTip(raw, { legacy = false, rendererSha } = 
   const content = object(payload.content, 'content');
   const delivery = object(payload.delivery, 'delivery');
   const evidence = object(payload.evidence, 'evidence');
+  const destinations = Object.hasOwn(evidence, 'destinationMediaContract');
+  if (destinations && (!v11 || evidence.destinationMediaContract !== TIP_DESTINATION_MEDIA_CONTRACT
+    || evidence.mediaStorageMode !== 'job_owned_v1')) {
+    throw new Error('invalid private V11 destination delivery contract');
+  }
   const reviewedNarration = reviewed ? parseReviewedNarration(evidence.reviewedNarration, rendererSha) : null;
   if ((reviewed && !reviewedNarration) || (!reviewed && Object.hasOwn(evidence, 'reviewedNarration'))) {
     throw new Error('invalid reviewed V11 narration contract or renderer identity');
@@ -113,6 +119,7 @@ export function materializeDispatchedTip(raw, { legacy = false, rendererSha } = 
       ...makeTipV11Spec({ id: `tip-${jobId}`, title, body: fr }),
       sourceScriptSha256: digestTipValue(content.scriptFr),
       ...(reviewedNarration && { reviewedNarration }),
+      ...(destinations && { destinationMediaContract: TIP_DESTINATION_MEDIA_CONTRACT }),
     };
     return { jobId, callbackUrl, uploadUrl, callbackToken, spec };
   }
@@ -185,6 +192,7 @@ async function main() {
     `TIP_UPLOAD_URL=${result.uploadUrl}`,
     `TIP_CALLBACK_TOKEN=${result.callbackToken}`,
     `TIP_SPEC_FILE=${specFile}`,
+    ...(result.spec.destinationMediaContract ? [`TIP_DESTINATION_MEDIA_CONTRACT=${result.spec.destinationMediaContract}`] : []),
     '',
   ].join('\n'));
   const staged = result.spec.reviewedNarration?.source === 'private-attempt'

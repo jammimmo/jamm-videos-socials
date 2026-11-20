@@ -204,7 +204,14 @@ async function main() {
         root, outputDirectory: join(scratch, 'destination-layouts'), props,
       });
       assert.equal(layouts.audioSha256, manifest.mix_wav_sha256);
-      receipt.destinationLayouts = layouts.videos;
+      receipt.destinationLayouts = layouts.videos.map(({ destination, width, height, duration, videoFrames,
+        mediaSha256, decodedVideoSha256, decodedAudioSha256, captionGeometry }) => {
+        assert.equal(decodedAudioSha256, receipt.decodedAudioSha256);
+        assert.notEqual(decodedVideoSha256, receipt.decodedVideoSha256);
+        assert.equal(videoFrames, props.durationInFrames);
+        return { destination, width, height, duration, videoFrames, mediaSha256, decodedVideoSha256, decodedAudioSha256,
+          captionGeometrySha256: createHash('sha256').update(JSON.stringify(captionGeometry)).digest('hex') };
+      });
     }
   } finally {
     await rm(scratch, { recursive: true, force: true });

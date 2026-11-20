@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { materializeDispatchedTip as materialize } from './materialize-dispatched-tip.mjs';
+import { materializeDispatchedTip as materialize, TIP_DESTINATION_MEDIA_CONTRACT } from './materialize-dispatched-tip.mjs';
 import { renderTipV11, tipV11NarrationTempo } from './render-tip-v11.mjs';
 import { tipV11Effects } from './tip-v11-effects.mjs';
 import { readStagedPrivateReviewedNarration, stagePrivateReviewedNarration, stageReviewedNarration, REVIEWED_NARRATION_DISPATCH } from './tip-v11-reviewed-narration.mjs';
@@ -187,6 +187,34 @@ function v11Payload() {
   return data;
 }
 
+test('destination opt-in is materialized only from the supported private V11 evidence', t => {
+  assert.equal(materialize(v11Payload()).spec.destinationMediaContract, undefined);
+  const contract = { destinationMediaContract: TIP_DESTINATION_MEDIA_CONTRACT, mediaStorageMode: 'job_owned_v1' };
+  for (const fields of [{ destinationMediaContract: TIP_DESTINATION_MEDIA_CONTRACT },
+    { ...contract, destinationMediaContract: 'unexpected-contract' }, { ...contract, mediaStorageMode: 'shared' }]) {
+    const candidate = v11Payload();
+    Object.assign(candidate.evidence, fields);
+    assert.throws(() => materialize(candidate), /private V11 destination delivery contract/);
+  }
+  const legacy = payload();
+  Object.assign(legacy.evidence, contract);
+  assert.throws(() => materializeDispatchedTip(legacy), /private V11 destination delivery contract/);
+  const candidate = v11Payload();
+  Object.assign(candidate.evidence, contract);
+  assert.equal(materialize(candidate).spec.destinationMediaContract, TIP_DESTINATION_MEDIA_CONTRACT);
+  const temporary = mkdtempSync(join(tmpdir(), 'tip-destination-dispatch-'));
+  t.after(() => rmSync(temporary, { recursive: true, force: true }));
+  const event = join(temporary, 'event.json');
+  const spec = join(temporary, 'spec.json');
+  const env = join(temporary, 'env');
+  writeFileSync(event, JSON.stringify({ client_payload: candidate }));
+  const cli = fileURLToPath(new URL('./materialize-dispatched-tip.mjs', import.meta.url));
+  const result = spawnSync(process.execPath, [cli, '--event', event, '--spec', spec, '--env', env], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(readFileSync(spec, 'utf8')).destinationMediaContract, TIP_DESTINATION_MEDIA_CONTRACT);
+  assert.match(readFileSync(env, 'utf8'), /^TIP_DESTINATION_MEDIA_CONTRACT=tip-v11-destination-manifest-v1$/m);
+});
+
 test('V11 consumes exactly the French advice and adds the reviewed brand narration', () => {
   const input = v11Payload();
   const { spec, uploadUrl } = materialize(input);
@@ -256,6 +284,11 @@ test('reviewed V11 dispatch requires the exact renderer and cannot downgrade to 
   assert.throws(() => materialize(input), /narration contract/);
   input.evidence.reviewedNarration = { ...pin, source: 'private-attempt' };
   assert.deepEqual(materialize(input, { rendererSha: pin.rendererSha }).spec.reviewedNarration, input.evidence.reviewedNarration);
+  input.evidence.destinationMediaContract = TIP_DESTINATION_MEDIA_CONTRACT;
+  input.evidence.mediaStorageMode = 'job_owned_v1';
+  const optedIn = materialize(input, { rendererSha: pin.rendererSha }).spec;
+  assert.equal(optedIn.destinationMediaContract, TIP_DESTINATION_MEDIA_CONTRACT);
+  assert.deepEqual(optedIn.reviewedNarration, input.evidence.reviewedNarration);
   for (const source of [null, 'provider', 'checkout', true]) {
     input.evidence.reviewedNarration = { ...pin, source };
     assert.throws(() => materialize(input, { rendererSha: pin.rendererSha }), /narration contract/);

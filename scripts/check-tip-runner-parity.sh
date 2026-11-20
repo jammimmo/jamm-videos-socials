@@ -100,7 +100,7 @@ fi
 
 "${clean[@]}" npm exec --offline -- remotion browser ensure
 run_isolated "${clean[@]}" OFFLINE_SMOKE_NETWORK_ISOLATED=1 bash -euo pipefail -c '
-  node scripts/offline-tip-v11-smoke.mjs | tee "$1"
+  node scripts/offline-tip-v11-smoke.mjs --destination-layouts | tee "$1"
   node scripts/write-tip-runner-parity.mjs "$@"
 ' _ "$scratch/fixture.log" "$scratch/receipt.json" "$expected" "$ffmpeg" "$ffprobe"
 git diff --exit-code HEAD --quiet --

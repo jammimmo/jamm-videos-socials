@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { postTipDelivery, readTipDeliveryTarget, readTipVideo } from './deliver-tip-video.mjs';
+import { confirmsDelivery, postTipDelivery, readTipDeliveryTarget, readTipVideo } from './deliver-tip-video.mjs';
 import { requestTipDestinationManifestOidc, TIP_DESTINATION_MANIFEST_HEADER_LIMIT } from './tip-v11-workflow-oidc.mjs';
 import {
   CAPTION_GEOMETRY_CONTRACT, FRAME_RATE, VIDEO_HEIGHT, VIDEO_WIDTH, MAX_CAPTION_CUES,
@@ -54,7 +54,7 @@ function captionEvidence(proof, destination, duration) {
   };
 }
 
-function prepareDestinations(masterSha256, directory, receipt, env) {
+export function prepareTipDestinations({ masterSha256, directory, receipt }, env) {
   if (typeof masterSha256 !== 'string' || !digestPattern.test(masterSha256) || typeof directory !== 'string' || !directory
     || receipt?.scope !== 'offline-destination-layouts' || !Array.isArray(receipt.videos)
     || receipt.videos.length !== destinations.length
@@ -89,19 +89,31 @@ function prepareDestinations(masterSha256, directory, receipt, env) {
   return header.length <= TIP_DESTINATION_MANIFEST_HEADER_LIMIT ? { header, videos } : null;
 }
 
-/** Candidate transport only. One manifest covers every upload. The caller owns
- * resume with a confirmed server-side inventory and eventual batch visibility. */
-export async function deliverTipDestinations({ masterSha256, directory, receipt }, env, {
+async function reconcileTipDestination(url, headers, matchesReceipt, request) {
+  try {
+    const response = await request(url, {
+      method: 'GET', headers, redirect: 'manual', signal: AbortSignal.timeout(7_500),
+    });
+    if (response.redirected || response.status !== 200) {
+      await response.body?.cancel().catch(() => {});
+      return false;
+    }
+    return await confirmsDelivery(response, matchesReceipt);
+  } catch {
+    return false;
+  }
+}
+
+/** One prepared manifest covers all uploads. An ambiguous POST gets one
+ * readback only. Even a missing proof never authorizes resending bytes. */
+export async function deliverPreparedTipDestinations(prepared, env, {
   request = fetch, fetchToken = fetch,
 } = {}) {
   const target = readTipDeliveryTarget(env);
   const confirmed = [];
-  if (!target) return { status: 'rejected', confirmed };
-  let prepared;
+  if (!target || !prepared) return { status: 'rejected', confirmed };
   let oidc;
   try {
-    prepared = prepareDestinations(masterSha256, directory, receipt, env);
-    if (!prepared) return { status: 'rejected', confirmed };
     oidc = await requestTipDestinationManifestOidc(target.jobId, target.url.searchParams.get('attempt'),
       prepared.header, env, fetchToken);
   } catch {
@@ -111,15 +123,28 @@ export async function deliverTipDestinations({ masterSha256, directory, receipt 
     const url = new URL(target.url);
     url.searchParams.set('destination', destination);
     const headers = {
-      Authorization: `Bearer ${target.token}`, 'Content-Type': 'video/mp4', 'Content-Length': String(body.length),
-      'X-Job-Id': target.jobId, 'X-Kind': 'tip', 'X-Media-Sha256': digest,
+      Authorization: `Bearer ${target.token}`, 'X-Job-Id': target.jobId, 'X-Kind': 'tip',
       'X-Tip-Destination-Manifest': prepared.header, 'X-Tip-Workflow-OIDC': oidc,
     };
-    const status = await postTipDelivery(url, { headers, body, timeout: 60_000 },
-      reply => reply?.ok === true && reply.jobId === target.jobId && reply.destination === destination
-        && reply.media_sha256 === digest && reply.media_bytes === body.length, { request, allowReplay: false });
-    if (status !== 'confirmed') return { status, confirmed, destination };
+    const matchesReceipt = reply => reply?.ok === true && reply.jobId === target.jobId && reply.destination === destination
+      && reply.media_sha256 === digest && reply.media_bytes === body.length;
+    const status = await postTipDelivery(url, {
+      headers: { ...headers, 'Content-Type': 'video/mp4', 'Content-Length': String(body.length), 'X-Media-Sha256': digest },
+      body, timeout: 60_000,
+    }, matchesReceipt, { request, allowReplay: false });
+    const recovered = status === 'temporarily_unavailable' && await reconcileTipDestination(url, headers, matchesReceipt, request);
+    if (status !== 'confirmed' && !recovered) return { status, confirmed, destination };
     confirmed.push(destination);
   }
   return { status: 'confirmed', confirmed };
+}
+
+export async function deliverTipDestinations(input, env, transport) {
+  let prepared;
+  try {
+    prepared = prepareTipDestinations(input, env);
+  } catch {
+    return { status: 'rejected', confirmed: [] };
+  }
+  return deliverPreparedTipDestinations(prepared, env, transport);
 }
