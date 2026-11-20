@@ -3,8 +3,8 @@ import {AbsoluteFill, Artifact, Audio, Img, staticFile, useCurrentFrame, useDela
 import {TipV11Outro} from './TipV11Outro';
 import {ServicesScene, ToolsScene} from './TipV11Project';
 import {WaterIllustration} from './TipV11Water';
-import {CAPTION_GEOMETRY_MASK, captionSampleFrames, geometryArtifactDirectory, mergeBounds, pixelBounds,
-  type CaptionCue, type Bounds} from './tip-v11-caption-geometry';
+import {captionSampleFrames, containsBounds, geometryArtifactDirectory, mergeBounds, pixelBounds, tipV11CaptionMask,
+  tipV11Layout, type CaptionCue, type Bounds, type TipV11Destination} from './tip-v11-caption-geometry';
 
 export type TipV11Segment = {id: string; start: number; end: number; text: string};
 export type TipV11FrProps = {
@@ -17,6 +17,7 @@ export type TipV11FrProps = {
   assistantEnabled: boolean;
   phoneGroups?: Array<{start: number; end: number}>;
   visualTopic?: 'water' | 'general';
+  destination?: TipV11Destination;
 };
 
 const cream = '#FFF1DC';
@@ -25,10 +26,6 @@ const navy = '#072451';
 const orange = '#FD7E00';
 const muted = '#BFD2F0';
 const edge = '#5277AD';
-const shortFeedContent = {left: 84, top: 135, scale: .8};
-const captionTop = 1570;
-// 1570px starts at 1391px in the video. Keep a little separation from the
-// observed feed caption line at 1515px after the common 80% scale.
 const captionHeight = 146;
 const weights = [600, 700, 800];
 const progress = (value: number) => Math.min(1, Math.max(0, value));
@@ -135,9 +132,12 @@ export function fitTipV11Caption(measure: (size: number) => number): boolean {
   return false;
 }
 
-function TipCaption({text, fontsReady, sample, viewport}: {
+function TipCaption({text, fontsReady, sample, viewport, top, safeBounds, mask}: {
   text: string; fontsReady: boolean; sample?: {frame: number; cue: number; run: string};
   viewport: React.RefObject<HTMLDivElement>;
+  top: number;
+  safeBounds?: Bounds;
+  mask: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [measurement, setMeasurement] = useState<{
@@ -161,18 +161,30 @@ function TipCaption({text, fontsReady, sample, viewport}: {
       return;
     }
     const canvas = viewport.current?.getBoundingClientRect();
-    if (!canvas || sampleFrame === undefined || sampleCue === undefined || !sampleRun) return;
+    const sampleRequested = sampleFrame !== undefined && sampleCue !== undefined && !!sampleRun;
+    if (!canvas || (!sampleRequested && !safeBounds)) return;
     const card = pixelBounds(element.getBoundingClientRect(), canvas);
     const range = document.createRange();
     range.selectNodeContents(element);
     const lines = Array.from(range.getClientRects()).filter(line => line.width > 0 && line.height > 0)
       .map(line => pixelBounds(line, canvas));
-    if (!card || !lines.length || lines.some(line => !line)) return;
-    setMeasurement({frame: sampleFrame, cue: sampleCue, run: sampleRun, mask: CAPTION_GEOMETRY_MASK,
-      card, text: (lines as Bounds[]).reduce(mergeBounds)});
-  }, [cancelRender, fontsReady, text, sampleFrame, sampleCue, sampleRun, viewport]);
+    const validLines = lines.filter((line): line is Bounds => line !== null);
+    if (!card || !validLines.length || validLines.length !== lines.length) {
+      if (safeBounds) cancelRender(new Error('Cannot measure the destination caption'));
+      return;
+    }
+    const textBounds = validLines.reduce(mergeBounds);
+    if (safeBounds && (!containsBounds(safeBounds, card) || !containsBounds(card, textBounds))) {
+      cancelRender(new Error('Subtitle exceeds its destination layout'));
+      return;
+    }
+    if (sampleFrame !== undefined && sampleCue !== undefined && sampleRun) {
+      setMeasurement({frame: sampleFrame, cue: sampleCue, run: sampleRun, mask,
+        card, text: textBounds});
+    }
+  }, [cancelRender, fontsReady, text, sampleFrame, sampleCue, sampleRun, viewport, safeBounds, mask]);
   return (
-    <div style={{position: 'absolute', left: 64, right: 120, top: captionTop, display: 'flex', justifyContent: 'flex-start'}}>
+    <div style={{position: 'absolute', left: 64, right: 120, top, display: 'flex', justifyContent: 'flex-start'}}>
       <div ref={ref} data-fit-region="caption" style={{
         fontSize: 49, lineHeight: 1.2, fontWeight: 700, whiteSpace: 'pre-line', background: navy,
         padding: '13px 20px', borderRadius: 15, borderLeft: `5px solid ${orange}`, maxWidth: '100%',
@@ -186,8 +198,10 @@ function TipCaption({text, fontsReady, sample, viewport}: {
 }
 
 export const TipV11Fr: React.FC<TipV11FrProps> = ({
-  title, segments, captions, audio, assistantEnabled, phoneGroups, visualTopic, captionGeometryRunId,
+  title, segments, captions, audio, assistantEnabled, phoneGroups, visualTopic, captionGeometryRunId, destination,
 }) => {
+  const layout = tipV11Layout(destination);
+  const captionMask = React.useMemo(() => tipV11CaptionMask(destination), [destination]);
   const frame = useCurrentFrame();
   const {fps, durationInFrames} = useVideoConfig();
   const viewport = useRef<HTMLDivElement>(null);
@@ -225,7 +239,7 @@ export const TipV11Fr: React.FC<TipV11FrProps> = ({
   let scene: React.ReactNode = null;
   if (outro && time >= outro.start) {
     scene = <TipV11Outro time={time} segments={segments} start={outro.start} end={durationInFrames / fps}
-      assistantEnabled={assistantEnabled} phoneGroups={phoneGroups} />;
+      assistantEnabled={assistantEnabled} phoneGroups={phoneGroups} compactSocials={destination !== undefined} />;
   } else if (active) {
     // Hold the current drawing across pauses between voice sections.
     const visualTime = Math.max(active.start, Math.min(time, active.end - .001));
@@ -247,12 +261,12 @@ export const TipV11Fr: React.FC<TipV11FrProps> = ({
     <AbsoluteFill ref={viewport} style={{fontFamily: 'Poppins, sans-serif', color: cream, background: '#062B73', overflow: 'hidden'}}>
       <style>{fontCss() + '*{box-sizing:border-box}'}</style>
       <AbsoluteFill style={{background: 'radial-gradient(ellipse at 65% 35%,#0B46B6 0%,#062B73 58%,#041D4C 100%)'}} />
-      {/* Keep content clear of the top tabs, right controls and bottom metadata in short-video feeds. */}
-      <AbsoluteFill style={{transform: `translate(${shortFeedContent.left}px, ${shortFeedContent.top}px) scale(${shortFeedContent.scale})`,
+      <AbsoluteFill style={{transform: `translate(${layout.left}px, ${layout.top}px) scale(${layout.scale})`,
         transformOrigin: 'top left'}}>
         <Header signature={showSignature} />
         {scene}
-        {caption && <TipCaption text={caption.text} fontsReady={fontsReady} sample={geometrySample} viewport={viewport} />}
+        {caption && <TipCaption text={caption.text} fontsReady={fontsReady} sample={geometrySample} viewport={viewport}
+          top={layout.captionTop} safeBounds={destination ? captionMask.bounds : undefined} mask={captionMask.id} />}
       </AbsoluteFill>
       <ProgressFrame value={progress(frame / Math.max(1, durationInFrames - 1))} />
       {audio && <Audio src={staticFile(audio)} />}

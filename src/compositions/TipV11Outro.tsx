@@ -86,13 +86,14 @@ function AssistantDemo({time, start, end}: {time: number; start: number; end: nu
   );
 }
 
-export function TipV11Outro({time, start, end, segments, assistantEnabled, phoneGroups}: {
+export function TipV11Outro({time, start, end, segments, assistantEnabled, phoneGroups, compactSocials}: {
   time: number;
   start: number;
   end: number;
   segments: TipV11Segment[];
   assistantEnabled: boolean;
   phoneGroups?: TipV11FrProps['phoneGroups'];
+  compactSocials?: boolean;
 }) {
   const get = (id: string) => segments.find(segment => segment.id === id);
   const domain = get('domain')?.start ?? start;
@@ -151,14 +152,23 @@ export function TipV11Outro({time, start, end, segments, assistantEnabled, phone
       </div>
       <div data-fit-region="outro-socials" style={{...content, top: 1160, opacity: appear(socials)}}>
         <div style={{fontSize: 30, fontWeight: 600, lineHeight: 1.15, color: muted, marginBottom: 14}}>Retrouvez Jamm Immo</div>
-        <div style={{display: 'grid', gridTemplateColumns: '1fr', gap: 8}}>
+        <div style={{display: 'grid', gridTemplateColumns: compactSocials ? 'repeat(2, minmax(0, 1fr))' : '1fr', gap: 8}}>
           {networks.map(([platform, account], index) => (
             <div key={platform} style={{height: 76, display: 'flex', alignItems: 'center', gap: 18, padding: '6px 14px',
               background: 'rgba(7,36,81,.76)', borderRadius: 14, border: '1px solid rgba(82,119,173,.5)',
               transform: `translateY(${6 * (1 - appear(socials + index * .045))}px)`}}>
               <div style={{width: 62, height: 62, flexShrink: 0}}><SocialSymbol platform={platform}/></div>
-              <div style={{width: 176, flexShrink: 0, fontSize: 28, fontWeight: 600, lineHeight: 1.15, color: muted}}>{platform}</div>
-              <div style={{fontSize: 43, fontWeight: 700, lineHeight: 1.15, color: light, letterSpacing: -.7, whiteSpace: 'nowrap'}}>{account}</div>
+              {compactSocials ? (
+                <div>
+                  <div style={{fontSize: 22, fontWeight: 600, color: muted}}>{platform}</div>
+                  <div style={{fontSize: 32, fontWeight: 700, color: light, whiteSpace: 'nowrap'}}>{account}</div>
+                </div>
+              ) : (
+                <>
+                  <div style={{width: 176, flexShrink: 0, fontSize: 28, fontWeight: 600, lineHeight: 1.15, color: muted}}>{platform}</div>
+                  <div style={{fontSize: 43, fontWeight: 700, lineHeight: 1.15, color: light, letterSpacing: -.7, whiteSpace: 'nowrap'}}>{account}</div>
+                </>
+              )}
             </div>
           ))}
         </div>
