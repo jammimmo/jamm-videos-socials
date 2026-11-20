@@ -20,7 +20,7 @@ function readReport(path) {
   }
 }
 
-export async function deliverTipV11Report(report, env, request = fetch) {
+export async function deliverTipV11Report(report, env, request = fetch, { requireEditorialPreflight = false } = {}) {
   try {
     if (!report || report.length === 0 || report.length > MAX_REPORT_BYTES
       || typeof env.TIP_JOB_ID !== 'string' || !UUID.test(env.TIP_JOB_ID)
@@ -52,7 +52,9 @@ export async function deliverTipV11Report(report, env, request = fetch) {
       }
       await response.body?.cancel().catch(() => undefined);
       if (response.redirected) return false;
-      if (response.status === 204) return true;
+      if (response.status === 204) {
+        return !requireEditorialPreflight || response.headers.get('X-Tip-Editorial-Preflight') === 'recorded';
+      }
       if (response.status !== 429 && (response.status < 500 || response.status > 599)) return false;
     }
     return false;

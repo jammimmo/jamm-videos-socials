@@ -213,7 +213,7 @@ test('native delivery confirms the master before variants and the exact private 
     narration_wav_sha256: manifest.narration_wav_sha256, mix_wav_sha256: manifest.mix_wav_sha256,
   }));
   const prepared = prepareTipDestinations({ ...input, masterSha256: sha256 }, env);
-  for (const stop of ['invalid', 'master', 'instagram', 'report', 'none']) {
+  for (const stop of ['invalid', 'master', 'instagram', 'report', 'no_preflight', 'manual_review', 'none']) {
     const phases = [];
     const result = await deliverTipDestinationAttempt({ master, sha: sha256, duration: 61,
       report: stop === 'invalid' ? Buffer.from('{}') : report, prepared }, env, {
@@ -239,7 +239,11 @@ test('native delivery confirms the master before variants and the exact private 
         phases.push('report');
         assert.equal(url.searchParams.get('action'), 'tip-v11-report');
         assert.deepEqual(options.body, report);
-        return new Response(null, { status: stop === 'report' ? 422 : 204 });
+        if (stop === 'report') return new Response(null, { status: 422 });
+        const headers = stop === 'no_preflight' ? undefined : {
+          'X-Tip-Editorial-Preflight': stop === 'manual_review' ? 'manual_review' : 'recorded',
+        };
+        return new Response(null, { status: 204, headers });
       },
     });
     const started = ['master-identity', 'marked', 'master'];
@@ -250,6 +254,8 @@ test('native delivery confirms the master before variants and the exact private 
       master: { result: 'master_unconfirmed', phases: started },
       instagram: { result: 'destination_unconfirmed', phases: [...variants, 'GET:instagram'] },
       report: { result: 'report_unconfirmed', phases: completed },
+      no_preflight: { result: 'report_unconfirmed', phases: completed },
+      manual_review: { result: 'report_unconfirmed', phases: completed },
       none: { result: 'confirmed', phases: completed },
     }[stop]);
   }

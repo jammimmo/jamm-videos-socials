@@ -46,7 +46,8 @@ export async function deliverTipDestinationAttempt({ master, sha, duration, repo
   if (uploaded !== 'attached') return 'master_unconfirmed';
   const result = await deliverPreparedTipDestinations(prepared, env, { request, fetchToken });
   if (result.status !== 'confirmed') return 'destination_unconfirmed';
-  return await deliverTipV11Report(report, env, request) ? 'confirmed' : 'report_unconfirmed';
+  return await deliverTipV11Report(report, env, request, { requireEditorialPreflight: true })
+    ? 'confirmed' : 'report_unconfirmed';
 }
 
 function masterFrames(masterPath) {
