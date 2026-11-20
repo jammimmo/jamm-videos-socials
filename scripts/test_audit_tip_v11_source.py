@@ -63,6 +63,19 @@ class SourceScoringTest(unittest.TestCase):
         self.assertEqual(diagnostic['outcome'], 'completed')
         self.assertGreater(diagnostic['recognized_row_count'], 0)
 
+    def test_source_replays_three_ordinary_edits_in_a_twelve_word_scene(self):
+        changes = {'logement': 'bien', 'observations': 'remarques', 'utiles': 'pratiques'}
+        rows = [(changes.get(row['word'], row['word']) if 4 <= i < 16 else row['word'],
+                 row['start'], row['end'], .95) for i, row in enumerate(speech(SEGMENTS))]
+        report = self.run_source(rows)
+        self.assertEqual(report['status'], 'matched')
+        self.assertEqual(report['warnings'], ['french_transcript_variation'])
+        self.assertEqual(report['segments'][0]['observed_words'][3:9], ['bien', 'commence', 'par', 'des', 'remarques', 'pratiques'])
+        word, start, end, confidence = rows[13]
+        self.assertEqual(word, 'pendant')
+        rows[13] = ('durant', start, end, confidence)
+        self.assertEqual(self.run_source(rows)['status'], 'inconclusive')
+
     def test_positional_opening_preserves_the_french_score_and_exact_input_pcm(self):
         rows = [(r['word'], r['start'], r['end'], .95) for r in speech(SEGMENTS)[4:]]
         end_sample = int(rows[0][1] * SAMPLE_RATE)

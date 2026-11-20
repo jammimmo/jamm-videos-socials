@@ -115,7 +115,7 @@ class V11FinalSpeechTest(unittest.TestCase):
         self.assertIsNone(accepted['segments'][0]['observed_words'][4])
         self.assertNotIn('observed_sha256', accepted['segments'][0])
 
-        short = 'maison quartier calme proche ecole transport'.split()
+        short = 'maison quartier calme'.split()
         short_scenes = [
             {'id': 'hook', 'text': ' '.join(short) + '.', 'start': 0, 'end': 4},
             {'id': 'step1', 'text': ' '.join(support) + '.', 'start': 4, 'end': 9},
@@ -156,17 +156,23 @@ class V11FinalSpeechTest(unittest.TestCase):
         self.assertNotIn('accuracy', json.dumps(matched))
         self.assertNotIn('edit', json.dumps(matched))
 
-        two_edits = [*second[:5], 'apres', *second[6:]]
-        global_failure = self.measure_scenes(scenes, [one_edit, two_edits])
+        two_edits = [*second[:5], 'apres', 'ici', *second[7:]]
+        boundary = self.measure_scenes(scenes, [one_edit, two_edits])
+        self.assertEqual(boundary['status'], 'matched')  # 17/20 words
+        self.assertEqual(boundary['warnings'], ['french_transcript_variation'])
+        global_failure = self.measure_scenes(scenes, [['logement', *one_edit[1:]], two_edits])
         self.assertEqual([row['status'] for row in global_failure['segments']], ['matched', 'matched'])
         self.assertEqual(global_failure['status'], 'inconclusive')
 
-        short = 'maison quartier calme proche ecole transport'.split()
+        short = 'maison quartier calme'.split()
         long = 'dossier complet solide verifie fiable durable conforme utile clair simple rapide exact'.split()
         uneven = [
             {'id': 'hook', 'text': ' '.join(short) + '.', 'start': 0, 'end': 4},
             {'id': 'step1', 'text': ' '.join(long) + '.', 'start': 4, 'end': 9},
         ]
+        uneven[0]['text'] = ' '.join([*short, 'proche'])
+        self.assertEqual(self.measure_scenes(uneven, [[*short, 'voisine'], long])['status'], 'matched')
+        uneven[0]['text'] = ' '.join(short)
         segment_failure = self.measure_scenes(uneven, [[*short[:-1], 'gare'], long])
         self.assertEqual(segment_failure['segments'][0]['status'], 'inconclusive')
         self.assertEqual(segment_failure['status'], 'inconclusive')
@@ -222,6 +228,20 @@ class V11FinalSpeechTest(unittest.TestCase):
             with self.subTest(held_domain=held_domain):
                 held = self.measure_scenes(scenes, [held_domain, support])
                 self.assertEqual(held['segments'][0]['status'], 'inconclusive')
+
+    def test_official_domain_without_point_can_have_an_uncertain_prefix_word(self):
+        from audit_tip_v11_speech import FIXED_DOMAIN_WORDS
+        domain = {'id': 'domain', 'text': ' '.join(FIXED_DOMAIN_WORDS), 'start': 0, 'end': 4}
+        observed = [word for word in FIXED_DOMAIN_WORDS if word != 'point']
+        rows = [(word, i / 3, (i + .8) / 3, .54 if i == 0 else .98) for i, word in enumerate(observed)]
+        [row] = compare_french_segments([domain], rows, 0)
+        self.assertEqual(row['status'], 'matched')
+        self.assertEqual(row['observed_words'], [None, *observed[1:]])
+        for i in (-3, -2, -1):
+            weak = rows.copy()
+            weak[0] = (*rows[0][:3], .98)
+            weak[i] = (*rows[i][:3], .54)
+            self.assertEqual(compare_french_segments([domain], weak, 0)[0]['status'], 'inconclusive')
 
     def test_v2_bounds_private_observed_words_fail_closed(self):
         segment = {'id': 'hook', 'text': 'conseil utile.', 'start': 0, 'end': 3}
@@ -316,7 +336,8 @@ class V11FinalSpeechTest(unittest.TestCase):
                 self.assertEqual(rejected.get('reason'), 'mixed_language_boundary')
 
         [without_crossing] = compare_french_segments(scenes, rows(crossing=None), 0)
-        self.assertEqual(without_crossing['status'], 'inconclusive')
+        self.assertEqual(without_crossing['status'], 'matched')
+        self.assertEqual(without_crossing['observed_words'][:3], ['aussi', 'jam', 'imo'])
         self.assertNotIn('measurement', without_crossing)
 
         variable = [{**scenes[0], 'id': 'hook'}, scenes[1]]
@@ -402,7 +423,7 @@ class V11FinalSpeechTest(unittest.TestCase):
         for name, incompatible in cases.items():
             with self.subTest(name=name):
                 [rejected] = compare_french_segments([services], incompatible, 0)
-                self.assertEqual(rejected['status'], 'inconclusive')
+                self.assertEqual(rejected['status'], 'matched' if name == 'partial alias' else 'inconclusive')
                 self.assertNotIn('measurement', rejected)
         [other_scene] = compare_french_segments([{**services, 'id': 'hook'}], words, 0)
         self.assertEqual(other_scene['status'], 'inconclusive')
@@ -414,6 +435,20 @@ class V11FinalSpeechTest(unittest.TestCase):
         ], 0)
         self.assertEqual(mixed_language['reason'], 'mixed_language_boundary')
         self.assertNotIn('measurement', mixed_language)
+
+    def test_owner_approved_services_scene_preserves_the_unrecognized_name(self):
+        from audit_tip_v11_speech import FIXED_SERVICES_WORDS, SAMPLE_RATE, speech_edits
+        fixture = json.loads((Path(__file__).parent / 'fixtures/tip-v11-9c1-services.json').read_text())
+        start, end = fixture['scene_samples']
+        scene = {'id': 'services', 'text': ' '.join(FIXED_SERVICES_WORDS),
+                 'start': start / SAMPLE_RATE, 'end': end / SAMPLE_RATE}
+        rows = [(word, a / SAMPLE_RATE, b / SAMPLE_RATE, confidence / 1000)
+                for word, a, b, confidence in fixture['rows']]
+        [row] = compare_french_segments([scene], rows, 0)
+        self.assertEqual(row['status'], 'matched')
+        self.assertEqual(row['observed_words'], fixture['observed_words'])
+        self.assertEqual(speech_edits(FIXED_SERVICES_WORDS, row['observed_words']), 2)
+        self.assertNotIn('measurement', row)
 
     def test_fused_brand_requires_the_entire_confident_timed_socials_line(self):
         socials = {'id': 'socials', 'start': 1, 'end': 5,
@@ -452,13 +487,15 @@ class V11FinalSpeechTest(unittest.TestCase):
         for label, observed in cases.items():
             with self.subTest(label=label):
                 [held] = compare_french_segments([socials, signature], observed, 0)
-                self.assertEqual(held['status'], 'inconclusive')
+                self.assertEqual(held['status'], 'inconclusive' if label == 'ambiguous excluded boundary' else 'matched')
+                self.assertNotEqual(held['observed_words'], expected)
                 self.assertNotIn('measurement', held)
         for scene, observations in [({**socials, 'id': 'services'}, rows),
                                     ({**socials, 'text': socials['text'].replace('aussi ', '')}, [rows[0], *rows[2:]])]:
             with self.subTest(scene=scene):
                 [held] = compare_french_segments([scene, signature], observations, 0)
-                self.assertEqual(held['status'], 'inconclusive')
+                self.assertEqual(held['status'], 'matched')
+                self.assertIn('jamimo', held['observed_words'])
                 self.assertNotIn('measurement', held)
 
     def test_centre_ville_spelling_requires_one_confident_row_in_an_exact_french_body_sentence(self):
@@ -703,7 +740,8 @@ class V11FinalSpeechTest(unittest.TestCase):
             reader = Mock(side_effect=verify_scene)
             result = audit_words(full, reader)
             reader.assert_called_once()
-            self.assertEqual(result['status'], 'inconclusive', 'recovery cannot mark the neighboring scene matched')
+            self.assertEqual(result['status'], 'matched')
+            self.assertEqual(result['segments'][2]['observed_words'], ['aussi', 'jamm', 'immo'])
             self.assertEqual(result['segments'][1]['status'], 'matched')
             self.assertEqual(result['segments'][1]['measurement'], {
                 'method': 'phone_exact_neighbor_window', 'start_sample': first, 'end_sample': last,
@@ -758,7 +796,7 @@ class V11FinalSpeechTest(unittest.TestCase):
         for changed in (
             [*left[:-2], ('même', *left[-2][1:3], .59), left[-1]],
             [*left[:-3], ('au', *left[-3][1:3], .59), *left[-2:]],
-            [left[0], ('pouvez', *left[1][1:3], .2), *left[2:]],
+            [(w, a, b, .2) if i < 4 else (w, a, b, p) for i, (w, a, b, p) in enumerate(left)],
             [('autre', *left[0][1:]), *left[1:]],
             [left[0], ('pouvez', .20, .50, .98), *left[2:]],
         ):
@@ -1081,11 +1119,16 @@ class FullAudioSocialsCreditTest(unittest.TestCase):
         first, last = [round(v * 24000) for v in self.fixture.full[4][1:3]]
         muted = self.fixture.decoded[:first * 2] + bytes(2 * (last - first)) + self.fixture.decoded[last * 2:]
         self.assertNotEqual(self.fixture.measure(crop=self.focused(), pcm=muted)[0]['status'], 'matched')
-        for i in [3, 4, 6]:
+        for i in [3, 4]:
             full = deepcopy(self.fixture.full)
             full[i][3] = .599
             with self.subTest(weak_full_row=i):
                 self.assertNotEqual(self.fixture.measure(full=full, crop=self.focused())[0]['status'], 'matched')
+        full = deepcopy(self.fixture.full)
+        full[6][3] = .599
+        result, _ = self.fixture.measure(full=full, crop=self.focused())
+        self.assertEqual(result['status'], 'matched')
+        self.assertEqual(result['segments'][1]['observed_words'].count(None), 2)
         for index, spelling in ((3, ' Sam'), (4, ' Imu')):
             with self.subTest(contradictory_full_brand=spelling):
                 full = deepcopy(self.fixture.full)
@@ -1143,9 +1186,9 @@ class OrdinaryPointTest(unittest.TestCase):
         self.assertEqual([r['measurement']['full_row_indices'] for r in split['segments']], [[2], [21]])
 
     def test_scene_and_global_percentages_are_independently_enforced(self):
-        scene, _ = self.audit_points([self.words, self.words], {(0, 2), (0, 6), (0, 10)})
+        scene, _ = self.audit_points([self.words, self.words], {(0, 2), (0, 4), (0, 6), (0, 10)})
         self.assertEqual(scene['segments'][0]['status'], 'inconclusive')
-        overall, _ = self.audit_points([self.words, self.words], {(0, 2), (0, 6), (1, 6)})
+        overall, _ = self.audit_points([self.words, self.words], {(0, 2), (0, 6), (0, 10), (1, 2), (1, 6)})
         self.assertEqual([r['status'] for r in overall['segments']], ['matched', 'matched'])
         self.assertEqual(overall['status'], 'inconclusive')
 
