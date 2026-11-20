@@ -753,8 +753,10 @@ def _align_with_phone_retry(segments, words, duration, sound, recognize_tail, re
 
 
 def recognize_words(model, wav_path, beam_size, time_offset=0):
-    result, _ = model.transcribe(str(wav_path), language='fr', beam_size=beam_size,
-                                 word_timestamps=True, condition_on_previous_text=False)
+    result, _ = model.transcribe(
+        str(wav_path), language='fr', beam_size=beam_size, word_timestamps=True,
+        condition_on_previous_text=False, initial_prompt=None, hotwords=None, vad_filter=False,
+    )
     rows = []
     for segment in result:
         for word in segment.words:
@@ -764,6 +766,11 @@ def recognize_words(model, wav_path, beam_size, time_offset=0):
                 row['probability'] = float(probability)
             rows.append(row)
     return rows
+
+
+def recognize_initial_words(model, wav_path, reviewed_source=False):
+    """Keep reviewed-source decoding identical to the qualifying decoder."""
+    return recognize_words(model, wav_path, beam_size=5 if reviewed_source else 1)
 
 
 def recognize_audio_window(model, wav_path, start, end=None, *, end_before=False):
@@ -793,6 +800,8 @@ def main():
     parser.add_argument('--failure-code-file', help='Write an allowlisted classification for a failed render')
     parser.add_argument('--defer-domain-to-final', action='store_true',
                         help='Locate a bounded standard domain CTA; final MP4 audio and visible checks remain required')
+    parser.add_argument('--reviewed-source', action='store_true',
+                        help='Decode an already-qualified source with the qualifier beam settings')
     args = parser.parse_args()
     with open(args.spec, encoding='utf8') as source:
         spec = json.load(source)
@@ -812,7 +821,7 @@ def main():
         model_path = download_model(ASR_REPO, revision=ASR_REVISION)
         model = WhisperModel(model_path, device='cpu', compute_type='int8',
                              local_files_only=True, cpu_threads=4)
-        words = recognize_words(model, args.wav, beam_size=1)
+        words = recognize_initial_words(model, args.wav, reviewed_source=args.reviewed_source)
         try:
             alignment = align_with_phone_retry(
                 spec['segments'], words, duration, sound,

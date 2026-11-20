@@ -9,9 +9,10 @@ from unittest.mock import Mock
 
 from align_tip_v11 import (
     DOMAIN_BOUNDARY_METHOD, PHONE_WINDOW_EVIDENCE, PhoneEvidenceError, SignatureEvidenceError, align, align_with_phone_retry,
-    align_with_signature_retry, recognize_words, report_alignment_failure, tokens,
+    align_with_signature_retry, recognize_initial_words, recognize_words, report_alignment_failure, tokens,
     alignment_failure_diagnostics, audible_windows, bounded_domain_boundary, canonical_signature_brand,
 )
+from audit_tip_v11_speech import recognize_model_wav
 
 
 SEGMENTS = [
@@ -347,7 +348,25 @@ class V11AlignmentTest(unittest.TestCase):
         self.assertIs(type(observed[0]['start']), float)
         self.assertIs(type(observed[0]['end']), float)
         model.transcribe.assert_called_once_with('local.wav', language='fr', beam_size=5,
-                                                word_timestamps=True, condition_on_previous_text=False)
+                                                word_timestamps=True, condition_on_previous_text=False,
+                                                initial_prompt=None, hotwords=None, vad_filter=False)
+
+    def test_reviewed_source_uses_qualifier_beam_without_changing_legacy_decode(self):
+        words = [SimpleNamespace(word='plus', start=.25, end=.5, probability=.79)]
+        model = Mock()
+        model.transcribe.return_value = ([SimpleNamespace(words=words)], None)
+
+        list(recognize_model_wav(model, 'reviewed.wav'))
+        qualifier_call = model.transcribe.call_args
+        model.reset_mock()
+        model.transcribe.return_value = ([SimpleNamespace(words=words)], None)
+        recognize_initial_words(model, 'reviewed.wav', reviewed_source=True)
+        self.assertEqual(model.transcribe.call_args, qualifier_call)
+
+        model.reset_mock()
+        model.transcribe.return_value = ([SimpleNamespace(words=words)], None)
+        recognize_initial_words(model, 'legacy.wav', reviewed_source=False)
+        self.assertEqual(model.transcribe.call_args.kwargs['beam_size'], 1)
 
     def test_phone_recovery_does_not_exempt_the_signature_gate(self):
         full, phone, _, sound = phone_gap()

@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { normalizeTipV11Narration, padShortNgorNarration } from './render-tip-v11.mjs';
+import { normalizeTipV11Narration, padShortNgorNarration, tipV11AlignmentArguments } from './render-tip-v11.mjs';
 import { NORMALIZED_NARRATION_PROCESSING, readStagedPrivateReviewedNarration, reviewedPcmData, stagePrivateReviewedNarration } from './tip-v11-reviewed-narration.mjs';
 
 function wav(samples = 60 * 24_000) {
@@ -15,6 +15,13 @@ function wav(samples = 60 * 24_000) {
   bytes.writeUInt16LE(16, 34); bytes.write('data', 36); bytes.writeUInt32LE(bytes.length - 44, 40);
   return bytes;
 }
+
+test('only reviewed sources request qualifier-parity alignment decoding', () => {
+  const legacy = tipV11AlignmentArguments('n.wav', 's.json', 'a.json');
+  const reviewed = tipV11AlignmentArguments('n.wav', 's.json', 'a.json', { reviewedSource: true });
+  assert.equal(legacy.includes('--reviewed-source'), false);
+  assert.equal(reviewed.filter(value => value === '--reviewed-source').length, 1);
+});
 
 test('Ngor tail padding preserves RIFF metadata and the original PCM through the last sample', () => {
   const target = 58.5 * 24_000;

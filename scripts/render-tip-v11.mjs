@@ -28,6 +28,17 @@ function run(command, args, cwd) {
   });
 }
 
+export function tipV11AlignmentArguments(normalizedPath, specPath, alignPath, {
+  reviewedSource = false, localWordTimings, failureCodePath,
+} = {}) {
+  return ['scripts/align_tip_v11.py', '--wav', normalizedPath,
+    '--spec', specPath, '--output', alignPath,
+    '--defer-domain-to-final',
+    ...(reviewedSource ? ['--reviewed-source'] : []),
+    ...(localWordTimings ? ['--transcript', resolve(localWordTimings)] : []),
+    ...(failureCodePath ? ['--failure-code-file', failureCodePath] : [])];
+}
+
 async function getNarration(root, audioDir, plan) {
   const raw = resolve(audioDir, `${plan.id}.wav`);
   const hashPath = resolve(audioDir, `${plan.id}.sha256`);
@@ -165,11 +176,9 @@ export async function renderTipV11(spec, {
     throw error;
   }
   await writeFile(specPath, JSON.stringify(plan), { mode: 0o600 });
-  await run('python3', ['scripts/align_tip_v11.py', '--wav', normalizedPath,
-    '--spec', specPath, '--output', alignPath,
-    '--defer-domain-to-final',
-    ...(localWordTimings ? ['--transcript', resolve(localWordTimings)] : []),
-    ...(failureCodePath ? ['--failure-code-file', failureCodePath] : [])], root);
+  await run('python3', tipV11AlignmentArguments(normalizedPath, specPath, alignPath, {
+    reviewedSource: Boolean(spec.reviewedNarration), localWordTimings, failureCodePath,
+  }), root);
   const alignment = JSON.parse(await readFile(alignPath, 'utf8'));
   const effectsPath = resolve(audioDir, `${plan.id}-v11-fx.wav`);
   const mixed = `audio/voiceovers/${plan.id}-v11-mix.wav`;
