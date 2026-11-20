@@ -6,7 +6,7 @@ import test from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { fitTipV11Caption, GeneralScene } from '../src/compositions/TipV11Fr.tsx';
-import { CAPTION_GEOMETRY_MASK, captionSampleFrames, containsBounds, pixelBounds, tipV11Layout } from '../src/compositions/tip-v11-caption-geometry.ts';
+import { CAPTION_GEOMETRY_MASK, captionSampleFrames, containsBounds, pixelBounds, tipV11CaptionMask, tipV11Layout } from '../src/compositions/tip-v11-caption-geometry.ts';
 import { summarizeCaptionGeometry } from './tip-v11-caption-geometry.mjs';
 import { renderTipV11Destinations } from './render-tip-v11-destinations.mjs';
 
@@ -110,6 +110,25 @@ test('caption geometry requires every cue sample from the exact render run and m
     assert.equal((await summarizeCaptionGeometry(geometryProps, directory)).status, 'inconclusive');
     await rm(join(directory, 'frame-8.json'));
     assert.equal((await summarizeCaptionGeometry(geometryProps, directory)).status, 'inconclusive');
+  });
+});
+
+test('destination proof rejects visually fitting samples from another destination or the shared master', async () => {
+  await withCaptionArtifacts(async (directory, write) => {
+    const props = { ...geometryProps, destination: 'instagram' };
+    const instagram = tipV11CaptionMask('instagram');
+    const facebook = tipV11CaptionMask('facebook');
+    const shared = await summarizeCaptionGeometry(props, directory);
+    assert.equal(shared.status, 'inconclusive');
+    assert.equal(shared.mask, instagram.id);
+    await Promise.all([[0, 0], [2, 0], [5, 0], [6, 1], [8, 1], [11, 1]].map(([frame, cue]) =>
+      write(frame, cue, { mask: instagram.id, card: [140, 1400, 850, 1500], text: [150, 1410, 840, 1490] })));
+    const measured = await summarizeCaptionGeometry(props, directory);
+    assert.equal(measured.status, 'matched');
+    assert.deepEqual(measured.mask_bounds, instagram.bounds);
+    assert.equal((await summarizeCaptionGeometry({ ...props, destination: 'facebook' }, directory)).status, 'inconclusive');
+    await write(2, 0, { mask: facebook.id, card: [140, 1400, 850, 1500], text: [150, 1410, 840, 1490] });
+    assert.equal((await summarizeCaptionGeometry(props, directory)).status, 'inconclusive');
   });
 });
 

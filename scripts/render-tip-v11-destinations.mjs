@@ -1,9 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { FRAME_RATE, VIDEO_HEIGHT, VIDEO_WIDTH, tipV11Layout } from '../src/compositions/tip-v11-caption-geometry.ts';
+import { FRAME_RATE, VIDEO_HEIGHT, VIDEO_WIDTH, geometryArtifactDirectory, tipV11Layout } from '../src/compositions/tip-v11-caption-geometry.ts';
 import { decodedTipMediaFingerprints } from './tip-decoded-media-fingerprint.mjs';
+import { summarizeCaptionGeometry } from './tip-v11-caption-geometry.mjs';
 
 // The caller supplies one already aligned composition and its mixed audio.
 // This receipt belongs to local layout QA, outside render delivery.
@@ -28,12 +29,24 @@ export async function renderTipV11Destinations({ root, outputDirectory, props, s
   for (const destination of selectedDestinations) {
     const propsPath = join(outputDirectory, `${destination}.props.json`);
     const videoPath = join(outputDirectory, `${destination}.mp4`);
-    await writeFile(propsPath, JSON.stringify({ ...baseProps, destination }), { flag: 'wx', mode: 0o600 });
-    execFileSync(join(root, 'node_modules/.bin/remotion'), [
-      'render', 'src/index.ts', 'TipV11Fr', videoPath, `--props=${propsPath}`,
-      '--config=remotion.tip-v11.config.ts', '--codec=h264', '--audio-codec=aac',
-      '--image-format=jpeg', '--concurrency=3', '--log=error',
-    ], { cwd: root, stdio: 'inherit', timeout: 15 * 60 * 1000 });
+    const renderProps = { ...baseProps, destination, captionGeometryRunId: randomUUID() };
+    const propsBytes = JSON.stringify(renderProps);
+    const geometryDirectory = join(root, 'out', 'TipV11Fr', geometryArtifactDirectory(renderProps.captionGeometryRunId));
+    await writeFile(propsPath, propsBytes, { flag: 'wx', mode: 0o600 });
+    let captionGeometry;
+    try {
+      execFileSync(join(root, 'node_modules/.bin/remotion'), [
+        'render', 'src/index.ts', 'TipV11Fr', videoPath, `--props=${propsPath}`,
+        '--config=remotion.tip-v11.config.ts', '--codec=h264', '--audio-codec=aac',
+        '--image-format=jpeg', '--concurrency=3', '--log=error',
+      ], { cwd: root, stdio: 'inherit', timeout: 15 * 60 * 1000 });
+      captionGeometry = await summarizeCaptionGeometry(renderProps, geometryDirectory);
+    } finally {
+      await rm(geometryDirectory, { recursive: true, force: true });
+    }
+    if (captionGeometry.status !== 'matched') {
+      throw new Error(`Missing caption coverage for ${destination}`);
+    }
     const probe = JSON.parse(execFileSync('ffprobe', [
       '-v', 'error', '-show_entries', 'format=duration,size:stream=codec_type,codec_name,width,height,r_frame_rate',
       '-of', 'json', videoPath,
@@ -49,6 +62,7 @@ export async function renderTipV11Destinations({ root, outputDirectory, props, s
     }
     videos.push({ destination, width: video.width, height: video.height, duration, size,
       layout: tipV11Layout(destination), mediaSha256: sha256(await readFile(videoPath)),
+      propsSha256: sha256(propsBytes), captionGeometry,
       ...decodedTipMediaFingerprints(videoPath) });
   }
   if (new Set(videos.map(video => video.decodedVideoSha256)).size !== videos.length

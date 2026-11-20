@@ -40,6 +40,15 @@ export function tipV11Layout(destination?: TipV11Destination): TipV11Layout {
   throw new Error('Unknown V11 video destination');
 }
 
+export function tipV11CaptionMask(destination?: TipV11Destination): {id: string; bounds: Bounds} {
+  if (destination === undefined) return {id: CAPTION_GEOMETRY_MASK, bounds: MASK_BOUNDS};
+  const layout = tipV11Layout(destination);
+  if (!layout.safeBounds) throw new Error('Missing V11 destination safe area');
+  const top = Math.floor(layout.top + layout.captionTop * layout.scale);
+  const [left, , right, bottom] = layout.safeBounds;
+  return {id: `tip-v11-${destination}-caption-20261120-v1`, bounds: [left, top, right, bottom]};
+}
+
 export function geometryArtifactDirectory(runId: string): string {
   if (!RUN_ID.test(runId)) throw new Error('invalid caption geometry run');
   return `caption-geometry-${runId}`;

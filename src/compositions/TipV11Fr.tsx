@@ -3,7 +3,7 @@ import {AbsoluteFill, Artifact, Audio, Img, staticFile, useCurrentFrame, useDela
 import {TipV11Outro} from './TipV11Outro';
 import {ServicesScene, ToolsScene} from './TipV11Project';
 import {WaterIllustration} from './TipV11Water';
-import {CAPTION_GEOMETRY_MASK, captionSampleFrames, containsBounds, geometryArtifactDirectory, mergeBounds, pixelBounds,
+import {captionSampleFrames, containsBounds, geometryArtifactDirectory, mergeBounds, pixelBounds, tipV11CaptionMask,
   tipV11Layout, type CaptionCue, type Bounds, type TipV11Destination} from './tip-v11-caption-geometry';
 
 export type TipV11Segment = {id: string; start: number; end: number; text: string};
@@ -132,11 +132,12 @@ export function fitTipV11Caption(measure: (size: number) => number): boolean {
   return false;
 }
 
-function TipCaption({text, fontsReady, sample, viewport, top, safeBounds}: {
+function TipCaption({text, fontsReady, sample, viewport, top, safeBounds, mask}: {
   text: string; fontsReady: boolean; sample?: {frame: number; cue: number; run: string};
   viewport: React.RefObject<HTMLDivElement>;
   top: number;
   safeBounds?: Bounds;
+  mask: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [measurement, setMeasurement] = useState<{
@@ -178,10 +179,10 @@ function TipCaption({text, fontsReady, sample, viewport, top, safeBounds}: {
       return;
     }
     if (sampleFrame !== undefined && sampleCue !== undefined && sampleRun) {
-      setMeasurement({frame: sampleFrame, cue: sampleCue, run: sampleRun, mask: CAPTION_GEOMETRY_MASK,
+      setMeasurement({frame: sampleFrame, cue: sampleCue, run: sampleRun, mask,
         card, text: textBounds});
     }
-  }, [cancelRender, fontsReady, text, sampleFrame, sampleCue, sampleRun, viewport, safeBounds]);
+  }, [cancelRender, fontsReady, text, sampleFrame, sampleCue, sampleRun, viewport, safeBounds, mask]);
   return (
     <div style={{position: 'absolute', left: 64, right: 120, top, display: 'flex', justifyContent: 'flex-start'}}>
       <div ref={ref} data-fit-region="caption" style={{
@@ -199,10 +200,8 @@ function TipCaption({text, fontsReady, sample, viewport, top, safeBounds}: {
 export const TipV11Fr: React.FC<TipV11FrProps> = ({
   title, segments, captions, audio, assistantEnabled, phoneGroups, visualTopic, captionGeometryRunId, destination,
 }) => {
-  if (destination !== undefined && captionGeometryRunId) {
-    throw new Error('A destination layout needs its own geometry attestation');
-  }
   const layout = tipV11Layout(destination);
+  const captionMask = React.useMemo(() => tipV11CaptionMask(destination), [destination]);
   const frame = useCurrentFrame();
   const {fps, durationInFrames} = useVideoConfig();
   const viewport = useRef<HTMLDivElement>(null);
@@ -267,7 +266,7 @@ export const TipV11Fr: React.FC<TipV11FrProps> = ({
         <Header signature={showSignature} />
         {scene}
         {caption && <TipCaption text={caption.text} fontsReady={fontsReady} sample={geometrySample} viewport={viewport}
-          top={layout.captionTop} safeBounds={layout.safeBounds} />}
+          top={layout.captionTop} safeBounds={destination ? captionMask.bounds : undefined} mask={captionMask.id} />}
       </AbsoluteFill>
       <ProgressFrame value={progress(frame / Math.max(1, durationInFrames - 1))} />
       {audio && <Audio src={staticFile(audio)} />}
