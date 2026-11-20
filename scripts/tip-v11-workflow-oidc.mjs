@@ -20,6 +20,20 @@ export async function requestTipWorkflowOidc(evidenceHeader, env, fetchToken = f
   return requestGithubOidc(audience, env, fetchToken);
 }
 
+export const TIP_DESTINATION_MANIFEST_HEADER_LIMIT = 98_304;
+
+export function tipDestinationManifestAudience(jobId, attemptToken, header) {
+  if (!UUID.test(jobId) || !UUID.test(attemptToken) || typeof header !== 'string'
+    || header.length > TIP_DESTINATION_MANIFEST_HEADER_LIMIT || !/^[A-Za-z0-9_-]+$/.test(header)) {
+    throw new Error('V11 destination manifest binding is invalid');
+  }
+  return `urn:jammimmo:tip-v11:destination-manifest:${sha256(JSON.stringify([jobId, attemptToken, sha256(header)]))}`;
+}
+
+export async function requestTipDestinationManifestOidc(jobId, attemptToken, header, env, fetchToken = fetch) {
+  return requestGithubOidc(tipDestinationManifestAudience(jobId, attemptToken, header), env, fetchToken);
+}
+
 export function tipNarrationAudience(jobId, attemptToken, wavSha256) {
   if (!UUID.test(jobId) || !UUID.test(attemptToken) || !SHA256.test(wavSha256)) {
     throw new Error('V11 narration audience is invalid');

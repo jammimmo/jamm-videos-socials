@@ -48,19 +48,21 @@ export async function renderTipV11Destinations({ root, outputDirectory, props, s
       throw new Error(`Missing caption coverage for ${destination}`);
     }
     const probe = JSON.parse(execFileSync('ffprobe', [
-      '-v', 'error', '-show_entries', 'format=duration,size:stream=codec_type,codec_name,width,height,r_frame_rate',
+      '-v', 'error', '-show_entries', 'format=duration,size:stream=codec_type,codec_name,width,height,r_frame_rate,nb_frames',
       '-of', 'json', videoPath,
     ], { encoding: 'utf8', timeout: 20_000 }));
     const video = probe.streams.find(stream => stream.codec_type === 'video');
     const audio = probe.streams.find(stream => stream.codec_type === 'audio');
     const duration = Number(probe.format.duration);
     const size = Number(probe.format.size);
+    const videoFrames = Number(video?.nb_frames);
     if (video?.width !== VIDEO_WIDTH || video.height !== VIDEO_HEIGHT || video.r_frame_rate !== `${FRAME_RATE}/1`
       || video.codec_name !== 'h264' || audio?.codec_name !== 'aac' || !(size > 0 && size <= 50 * 1024 * 1024)
+      || videoFrames !== baseProps.durationInFrames || videoFrames !== captionGeometry.duration_frames
       || !(Math.abs(duration - expected) <= .12) || !(duration >= 3 && duration <= maxSeconds[destination])) {
       throw new Error(`Invalid V11 layout export for ${destination}`);
     }
-    videos.push({ destination, width: video.width, height: video.height, duration, size,
+    videos.push({ destination, width: video.width, height: video.height, duration, size, videoFrames,
       layout: tipV11Layout(destination), mediaSha256: sha256(await readFile(videoPath)),
       propsSha256: sha256(propsBytes), captionGeometry,
       ...decodedTipMediaFingerprints(videoPath) });
