@@ -12,12 +12,12 @@ const UPLOAD_TIMEOUT_MS = 60_000;
 const RETRY_DELAYS_MS = [250, 1000];
 const MAX_RETRY_DELAY_MS = 10_000;
 
-function readVideo(path) {
+export function readTipVideo(path, maximum = MAX_VIDEO_BYTES) {
   const fd = openSync(path, 'r');
   try {
     const file = fstatSync(fd);
     const { size } = file;
-    if (!file.isFile() || size < 1 || size > MAX_VIDEO_BYTES) return null;
+    if (!file.isFile() || size < 1 || size > maximum) return null;
     const bytes = Buffer.alloc(size + 1);
     return readSync(fd, bytes, 0, bytes.length, 0) === size ? bytes.subarray(0, size) : null;
   } finally {
@@ -77,16 +77,18 @@ export function readTipDeliveryTarget(env) {
 }
 
 export async function postTipDelivery(url, { headers, body, timeout }, matchesReceipt, {
-  request = fetch, sleep = wait, now = Date.now,
+  request = fetch, sleep = wait, now = Date.now, allowReplay = true,
 } = {}) {
-  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+  const retryCount = allowReplay ? RETRY_DELAYS_MS.length : 0;
+  for (let attempt = 0; attempt <= retryCount; attempt++) {
     let response;
     try {
       response = await request(url, {
         method: 'POST', headers, body, redirect: 'manual', signal: AbortSignal.timeout(timeout),
       });
       if (response.redirected) return 'rejected';
-      if (response.status === 200) return await confirmsDelivery(response, matchesReceipt) ? 'confirmed' : 'rejected';
+      if (response.status === 200) return await confirmsDelivery(response, matchesReceipt)
+        ? 'confirmed' : allowReplay ? 'rejected' : 'temporarily_unavailable';
       await response.body?.cancel().catch(() => {});
       const status = response.status;
       if (status !== 408 && status !== 429 && (status < 500 || status > 599)) return 'rejected';
@@ -94,7 +96,7 @@ export async function postTipDelivery(url, { headers, body, timeout }, matchesRe
       // The Worker may already have recorded this request. Reuse the same
       // attempt and payload to recover its receipt.
     }
-    if (attempt === RETRY_DELAYS_MS.length) break;
+    if (attempt === retryCount) break;
     const delay = retryDelay(response, RETRY_DELAYS_MS[attempt], now);
     if (delay === null) break;
     await sleep(delay);
@@ -131,7 +133,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   let result = 'rejected';
   try {
     const [, , path, digest, duration] = process.argv;
-    result = await deliverTipVideo({ video: readVideo(path), digest, duration: Number(duration) }, process.env);
+    result = await deliverTipVideo({ video: readTipVideo(path), digest, duration: Number(duration) }, process.env);
   } catch {
     // Keep renderer credentials, Worker reply content and draft URLs out of logs.
   }
