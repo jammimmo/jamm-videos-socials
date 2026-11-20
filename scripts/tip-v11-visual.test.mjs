@@ -6,8 +6,9 @@ import test from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { fitTipV11Caption, GeneralScene } from '../src/compositions/TipV11Fr.tsx';
-import { CAPTION_GEOMETRY_MASK, captionSampleFrames, pixelBounds } from '../src/compositions/tip-v11-caption-geometry.ts';
+import { CAPTION_GEOMETRY_MASK, captionSampleFrames, containsBounds, pixelBounds, tipV11Layout } from '../src/compositions/tip-v11-caption-geometry.ts';
 import { summarizeCaptionGeometry } from './tip-v11-caption-geometry.mjs';
+import { renderTipV11Destinations } from './render-tip-v11-destinations.mjs';
 
 test('V11 shows the full advice heading, including the end of a long sentence', () => {
   const text = 'Mandatez un agent immobilier local de confiance pour visiter les biens et évaluer leur état.';
@@ -27,6 +28,30 @@ test('V11 keeps regular captions at full size and sizes wide words to their meas
   assert.equal(fitTipV11Caption(size => { wide.push(size); return size > 45 ? 202 : 134; }), true);
   assert.deepEqual(wide, [49, 48, 47, 46, 45]);
   assert.equal(fitTipV11Caption(() => 160), false);
+});
+
+test('destination layouts reserve space for overlays and reject unknown profiles', () => {
+  const layouts = ['tiktok', 'instagram', 'facebook'].map(tipV11Layout);
+  assert.equal(new Set(layouts.map(layout => layout.scale)).size, 3);
+  assert.throws(() => tipV11Layout('linkedin'), /unknown/i);
+  assert.throws(() => tipV11Layout('constructor'), /unknown/i);
+  assert.deepEqual(tipV11Layout(), { left: 84, top: 135, scale: .8, captionTop: 1570 });
+
+  for (const { left, top, scale, captionTop, safeBounds } of layouts) {
+    for (const [x1, y1, x2, y2] of [[64, 160, 960, 258], [64, captionTop, 960, captionTop + 146]]) {
+      const bounds = [Math.floor(left + x1 * scale), Math.floor(top + y1 * scale),
+        Math.ceil(left + x2 * scale), Math.ceil(top + y2 * scale)];
+      assert.ok(containsBounds(safeBounds, bounds), `Out of layout: ${bounds}`);
+    }
+  }
+  assert.ok(layouts[0].safeBounds[2] < layouts[1].safeBounds[2]);
+  assert.ok(layouts[0].safeBounds[3] < layouts[1].safeBounds[3]);
+});
+
+test('destination export rules reject duplicates and long Facebook clips before reading audio', async () => {
+  const props = { durationInFrames: 90 * 30 + 1 };
+  await assert.rejects(renderTipV11Destinations({ props, selectedDestinations: ['facebook'] }), /narration length/i);
+  await assert.rejects(renderTipV11Destinations({ props, selectedDestinations: ['tiktok', 'tiktok'] }), /distinct/i);
 });
 
 const geometryRun = '44444444-4444-4444-8444-444444444444';

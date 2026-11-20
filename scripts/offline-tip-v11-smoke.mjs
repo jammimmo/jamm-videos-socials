@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { buildTipV11Narration } from './tip-v11-contract.mjs';
 import { decodedTipMediaFingerprints } from './tip-decoded-media-fingerprint.mjs';
 import { renderTipV11 } from './render-tip-v11.mjs';
+import { renderTipV11Destinations } from './render-tip-v11-destinations.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const forbiddenCredentials = [
@@ -198,6 +199,13 @@ async function main() {
       ...decodedTipMediaFingerprints(video),
       mediaSha256: manifest.media_sha256, retainedArtifact: false,
     };
+    if (process.argv.slice(2).includes('--destination-layouts')) {
+      const layouts = await renderTipV11Destinations({
+        root, outputDirectory: join(scratch, 'destination-layouts'), props,
+      });
+      assert.equal(layouts.audioSha256, manifest.mix_wav_sha256);
+      receipt.destinationLayouts = layouts.videos;
+    }
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }

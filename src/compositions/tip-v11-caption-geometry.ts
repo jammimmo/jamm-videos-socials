@@ -12,6 +12,34 @@ export const FRAME_RATE = 30;
 export const MAX_CAPTION_CUES = 100;
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
+export type TipV11Destination = 'tiktok' | 'instagram' | 'facebook';
+type TipV11Layout = {
+  left: number;
+  top: number;
+  scale: number;
+  captionTop: number;
+  safeBounds?: Bounds;
+};
+
+const sharedLayout: TipV11Layout = {left: 84, top: 135, scale: .8, captionTop: 1570};
+
+// The raster stays 1080×1920. These are composition margins, not provider
+// upload limits. TikTok includes extra clearance from the observed iPhone
+// right rail and description. The two Reels layouts require in-app QA.
+const destinationLayouts: Record<TipV11Destination, TipV11Layout> = {
+  tiktok: {left: 68, top: 138, scale: .77, captionTop: 1500, safeBounds: [110, 255, 830, 1420]},
+  instagram: {left: 84, top: 140, scale: .84, captionTop: 1490, safeBounds: [130, 265, 910, 1520]},
+  facebook: {left: 93, top: 150, scale: .81, captionTop: 1530, safeBounds: [135, 270, 885, 1520]},
+};
+
+export function tipV11Layout(destination?: TipV11Destination): TipV11Layout {
+  if (destination === undefined) return sharedLayout;
+  if (destination === 'tiktok' || destination === 'instagram' || destination === 'facebook') {
+    return destinationLayouts[destination];
+  }
+  throw new Error('Unknown V11 video destination');
+}
+
 export function geometryArtifactDirectory(runId: string): string {
   if (!RUN_ID.test(runId)) throw new Error('invalid caption geometry run');
   return `caption-geometry-${runId}`;
