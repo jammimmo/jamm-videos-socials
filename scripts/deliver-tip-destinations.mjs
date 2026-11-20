@@ -68,6 +68,7 @@ function prepareDestinations(masterSha256, directory, receipt, env) {
   };
   const videos = [];
   const digests = new Set([masterSha256]);
+  let commonFrames;
   for (const destination of destinations) {
     const row = receipt.videos.find(value => value?.destination === destination);
     if (!row || !Number.isFinite(row.duration) || row.duration <= 60
@@ -75,7 +76,9 @@ function prepareDestinations(masterSha256, directory, receipt, env) {
       || !Number.isSafeInteger(row.size) || row.size < 12 || row.size > maxMediaBytes
       || typeof row.mediaSha256 !== 'string' || !digestPattern.test(row.mediaSha256) || digests.has(row.mediaSha256)) return null;
     const geometry = captionEvidence(row.captionGeometry, destination, row.duration);
-    if (!geometry || (videos.length && geometry.duration_frames !== manifest.destinations.facebook.caption_geometry.duration_frames)) return null;
+    if (!geometry || row.videoFrames !== geometry.duration_frames
+      || (commonFrames !== undefined && row.videoFrames !== commonFrames)) return null;
+    commonFrames = row.videoFrames;
     const body = readTipVideo(join(directory, `${destination}.mp4`), maxMediaBytes);
     if (!body || body.length !== row.size || sha256(body) !== row.mediaSha256) return null;
     manifest.destinations[destination] = { media_sha256: row.mediaSha256, media_bytes: row.size, caption_geometry: geometry };

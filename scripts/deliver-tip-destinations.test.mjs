@@ -30,7 +30,7 @@ async function fixture(t, duration = 90) {
     await writeFile(join(directory, destination + '.mp4'), body);
     const mask = tipV11CaptionMask(destination);
     const last = Math.round(duration * 30) - 1;
-    videos.push({ destination, duration, size: body.length, mediaSha256: sha(body),
+    videos.push({ destination, duration, size: body.length, mediaSha256: sha(body), videoFrames: last + 1,
       captionGeometry: {
         contract: 'tip-v11-caption-geometry-v1', scope: 'caption_card_and_text_bounds', status: 'matched',
         coverage: 'first_middle_last_frame_per_cue', mask: mask.id, mask_bounds: mask.bounds,
@@ -110,6 +110,26 @@ test('Facebook duration must be over 60 seconds and no longer than 90', async t 
     const result = await deliverTipDestinations(await fixture(t, duration), env, noIo);
     assert.deepEqual(result, { status: 'rejected', confirmed: [] });
   }
+});
+
+test('the encoded and measured frame counts must agree across the complete batch before network calls', async t => {
+  const input = await fixture(t, 61);
+  const tiktok = input.receipt.videos[2];
+  const individualProof = (await fixture(t, 61 + 1 / 30)).receipt.videos[2];
+  const requests = [];
+  const transport = {
+    fetchToken: () => { requests.push('OIDC'); return Response.json({ value: 'oidc.example.token' }); },
+    request: (url, options) => { requests.push('Worker'); return receipt(url, options); },
+  };
+  const rejected = { status: 'rejected', confirmed: [] };
+  tiktok.videoFrames = individualProof.videoFrames;
+  assert.deepEqual(await deliverTipDestinations(input, env, transport), rejected);
+  // Both proofs now agree for TikTok alone. The final export still differs
+  // from Facebook and Instagram by one frame inside the duration tolerance.
+  tiktok.captionGeometry = individualProof.captionGeometry;
+  tiktok.duration = individualProof.duration;
+  assert.deepEqual(await deliverTipDestinations(input, env, transport), rejected);
+  assert.deepEqual(requests, []);
 });
 
 test('invalid attempt URL, workflow run identity and identity token cannot send to the Worker', async t => {
