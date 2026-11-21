@@ -1,4 +1,4 @@
-name: Render one synthetic V11 master with SwiftShader (hosted)
+name: Capture the first 132 synthetic V11 frames (hosted)
 
 # This diagnostic is confined to its carrier branch. The ordinary renderer
 # checks and the production renderer ref keep their existing workflows.
@@ -7,13 +7,13 @@ on:
     branches: [diagnose/v11-motion-hosted-20261121]
     paths:
       - .github/workflows/diagnose-advice-three-stills.yml
-      - scripts/qa/advice-master-motion/**
+      - scripts/qa/advice-motion-prefix/**
 
 permissions:
   contents: read
 
 concurrency:
-  group: advice-v11-motion-hosted-33d46b8
+  group: advice-v11-prefix-hosted-33d46b8
   cancel-in-progress: false
 
 env:
@@ -21,7 +21,7 @@ env:
 
 jobs:
   capture:
-    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/diagnose/v11-motion-hosted-20261121' && (github.event.created || github.event.before == '3c3d6669879a1afbf31a4046b716a3533041db60')
+    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/diagnose/v11-motion-hosted-20261121' && (github.event.created || github.event.before == '7c46abb6512d41674a037a21b958dd7e023ebcfd')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -60,12 +60,12 @@ jobs:
           env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm_config_userconfig=/dev/null \
             npm_config_globalconfig="$npm_global" npm ci --ignore-scripts --no-audit --no-fund
           test -z "$(git status --porcelain --untracked-files=normal)"
-      - name: Verify Chromium and render one synthetic master offline
+      - name: Verify Chromium and capture the 132-frame synthetic slice offline
         shell: bash
         run: |
           set -euo pipefail
           umask 077
-          harness="$GITHUB_WORKSPACE/carrier/scripts/qa/advice-master-motion"
+          harness="$GITHUB_WORKSPACE/carrier/scripts/qa/advice-motion-prefix"
           (cd "$harness" && sha256sum --check --strict SHA256SUMS)
           runtime_dir=$(mktemp -d "$RUNNER_TEMP/advice-three-stills-browser.XXXXXXXX")
           trap 'rm -rf -- "$runtime_dir"' EXIT
@@ -87,13 +87,14 @@ jobs:
           printf '%s  %s\n' '47e823e3a14b431ffa8dc88f97db6a854cd92e04800c01fc765c16a18d393d72' "$browser" | sha256sum --check --strict
           test "$("$browser" --version)" = 'Chromium 149.0.7790.0'
           printf '%s\n' '149.0.7790.0' > "$browser_cache/../VERSION"
-          bash "$harness/capture-motion-linux.sh" "$GITHUB_WORKSPACE/renderer" "$RUNNER_TEMP/advice-master-motion" "$browser"
+          bash "$harness/capture-prefix-linux.sh" "$GITHUB_WORKSPACE/renderer" "$RUNNER_TEMP/advice-motion-prefix" "$browser"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: success() || failure()
         with:
-          name: advice-v11-motion-hosted-33d46b8
+          name: advice-v11-prefix-hosted-33d46b8
           path: |
-            ${{ runner.temp }}/advice-master-motion/receipt.json
-            ${{ runner.temp }}/advice-master-motion/trace.json
+            ${{ runner.temp }}/advice-motion-prefix/*.json
+            ${{ runner.temp }}/advice-motion-prefix/*.jpg
+            ${{ runner.temp }}/advice-motion-prefix/*.png
           if-no-files-found: warn
           retention-days: 7
