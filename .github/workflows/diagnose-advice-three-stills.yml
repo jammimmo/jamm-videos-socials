@@ -21,7 +21,7 @@ env:
 
 jobs:
   capture:
-    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/diagnose/v11-motion-hosted-20261121' && (github.event.created || github.event.before == '31593ba804998c4ab21fd44b6a21f5dc91be09aa')
+    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/diagnose/v11-motion-hosted-20261121' && (github.event.created || github.event.before == '00f81c57ecd5a9d4a388278b98183061a3db5d38')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -86,6 +86,7 @@ jobs:
           test -x "$browser"
           printf '%s  %s\n' '47e823e3a14b431ffa8dc88f97db6a854cd92e04800c01fc765c16a18d393d72' "$browser" | sha256sum --check --strict
           test "$("$browser" --version)" = 'Chromium 149.0.7790.0'
+          printf '%s\n' '149.0.7790.0' > "$browser_cache/../VERSION"
           bash "$harness/capture-motion-linux.sh" "$GITHUB_WORKSPACE/renderer" "$RUNNER_TEMP/advice-master-motion" "$browser"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
