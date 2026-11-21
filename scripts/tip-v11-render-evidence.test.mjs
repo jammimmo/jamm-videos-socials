@@ -6,11 +6,13 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { deliverTipV11Report } from './deliver-tip-v11-report.mjs';
+import { tipV11SpokenScript } from './generate-gemini-voiceover.mjs';
 import { renderEvidence } from './tip-v11-render-evidence.mjs';
 import {
   buildTipV11RenderManifest, collectTipV11StaticFiles, digestTipValue, manifestHasProductionInputs,
 } from './tip-v11-render-manifest.mjs';
 import { requestTipWorkflowOidc, tipWorkflowAudience } from './tip-v11-workflow-oidc.mjs';
+import { voicePrompt } from './voice-profile.mjs';
 
 const mediaSha = 'a'.repeat(64);
 const workflow = { sha: 'b'.repeat(40), runId: '1234', runAttempt: '2' };
@@ -105,6 +107,8 @@ test('records the actual render inputs and only hashes of the script, audio, pro
     assert.ok(manifestHasProductionInputs(captured));
     assert.equal(captured.source_script_sha256, sourceScriptSha256);
     assert.equal(captured.narration_text_sha256, digestTipValue(plan.script));
+    assert.equal(captured.voice.prompt_sha256,
+      digestTipValue(voicePrompt(tipV11SpokenScript(plan.script, 'tip-v11-fr'), '', 'tip-v11-fr')));
     assert.equal(captured.assistant_enabled, true);
     assert.equal(captured.visual_topic, 'water');
     assert.equal(captured.raw_wav_sha256, digestTipValue('private fixture raw'));

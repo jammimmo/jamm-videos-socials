@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { allocateSceneFrames, assertSceneVoiceFits, pcmWavDuration, sceneVoiceSpecs, continuousSceneFrames } from './scene-voice.mjs';
-import { generateSpeechPcm } from './generate-gemini-voiceover.mjs';
+import { generateSpeechPcm, tipV11SpokenScript } from './generate-gemini-voiceover.mjs';
+import { buildTipV11Narration } from './tip-v11-contract.mjs';
 import { TIP_V11_VOICE_HTTP_OPTIONS, TIP_V11_VOICE_SDK_VERSION, voiceCacheHash, voicePrompt } from './voice-profile.mjs';
 
 function wav(seconds) {
@@ -37,15 +38,30 @@ test('narrator cache includes the shared profile and context, with no per-scene 
   assert.match(voicePrompt('Bonjour.', 'Contexte.'), /continuity only \(do not read\)/);
   const generator = await readFile(new URL('./generate-gemini-voiceover.mjs', import.meta.url), 'utf8');
   assert.doesNotMatch(generator, /FALLBACK_MODEL/);
-  assert.match(generator, /voiceCacheHash\(script, args.context, profile\)/);
+  assert.match(generator, /voiceCacheHash\(tipV11SpokenScript\(script, profile\), args.context, profile\)/);
 });
 
 test('automatic advice sends one exact Ngor V8 request through the pinned SDK', async t => {
   const profile = 'tip-v11-fr';
-  const script = 'Bonjour. Kër gu baax, xel mu dal !';
-  const prompt = voicePrompt(script, '', profile);
+  const sentence = 'Vérifiez chaque document avant de réserver votre prochaine visite immobilière à Dakar.';
+  const script = buildTipV11Narration({
+    id: 'tip-debbc55c-8da4-4c74-a336-d0fc838ec04a', title: 'Vérifier les documents', body: Array(5).fill(sentence),
+  }).script;
+  const spokenScript = tipV11SpokenScript(script, profile);
+  const prompt = voicePrompt(spokenScript, '', profile);
   const [direction, passage] = prompt.split('\n\n');
-  assert.equal(passage, script);
+  assert.equal(passage, spokenScript);
+  assert.match(script, /Suivez aussi Jamm Immo sur nos réseaux sociaux/u);
+  assert.doesNotMatch(script, /Suivez aussi, Jamm Immo, sur nos réseaux sociaux/u);
+  assert.match(spokenScript, /Suivez aussi, Jamm Immo, sur nos réseaux sociaux/u);
+  assert.notEqual(voiceCacheHash(script, '', profile), voiceCacheHash(spokenScript, '', profile));
+  const normalized = value => value.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase().match(/[a-z0-9]+/gu);
+  assert.deepEqual(normalized(spokenScript), normalized(script));
+  assert.equal(tipV11SpokenScript(script, ''), script);
+  assert.equal(tipV11SpokenScript(`${script} Texte après la fermeture.`, profile), `${script} Texte après la fermeture.`);
+  assert.equal(tipV11SpokenScript(`${script} ${script}`, profile), `${script} ${script}`);
+  assert.equal(tipV11SpokenScript('Suivez aussi Jamm Immo sur nos réseaux sociaux pour retrouver nos prochains conseils.', profile),
+    'Suivez aussi Jamm Immo sur nos réseaux sociaux pour retrouver nos prochains conseils.');
   assert.equal(createHash('sha256').update(direction).digest('hex'),
     'f3f015c3bcf53b58162a94fd357fc612b774897de352586cfce3509afe033265');
   assert.throws(() => voicePrompt(script, 'Consigne supplémentaire.', profile), /additional context/);

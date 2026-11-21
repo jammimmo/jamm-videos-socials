@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { materializeDispatchedTip as materialize, TIP_DESTINATION_MEDIA_CONTRACT } from './materialize-dispatched-tip.mjs';
+import { tipV11SpokenScript } from './generate-gemini-voiceover.mjs';
 import { renderTipV11, tipV11NarrationTempo } from './render-tip-v11.mjs';
 import { tipV11Effects } from './tip-v11-effects.mjs';
 import { readStagedPrivateReviewedNarration, stagePrivateReviewedNarration, stageReviewedNarration, REVIEWED_NARRATION_DISPATCH } from './tip-v11-reviewed-narration.mjs';
@@ -51,7 +52,8 @@ test('a cached automatic Ngor take reports the measured duration failure before 
   mkdirSync(audioDir, { recursive: true });
   execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=350:sample_rate=24000:duration=57',
     '-c:a', 'pcm_s16le', join(audioDir, `${plan.id}.wav`)]);
-  writeFileSync(join(audioDir, `${plan.id}.sha256`), voiceCacheHash(plan.script, '', 'tip-v11-fr'));
+  writeFileSync(join(audioDir, `${plan.id}.sha256`),
+    voiceCacheHash(tipV11SpokenScript(plan.script, 'tip-v11-fr'), '', 'tip-v11-fr'));
   await assert.rejects(renderTipV11(spec, { root }), /normalized narration outside 58\.5–119 s.*tempo 1\.03×/);
   assert.equal(readFileSync(failurePath, 'utf8'), 'narration_duration_out_of_range\n');
   assert.ok(!existsSync(join(root, 'out', 'batch', `${plan.id}.mp4`)));
@@ -238,11 +240,17 @@ test('V11 consumes exactly the French advice and adds the reviewed brand narrati
   assert.match(enabled.script, /retrouver une annonce.*parler à un conseiller/u);
   assert.match(enabled.script, /jamm immo point com/u);
   assert.match(enabled.script, /nos réseaux sociaux/u);
+  const socials = enabled.segments.find(segment => segment.id === 'socials');
+  assert.deepEqual(socials, {
+    id: 'socials', text: 'Suivez aussi Jamm Immo sur nos réseaux sociaux pour retrouver nos prochains conseils.',
+  });
+  const spokenScript = tipV11SpokenScript(enabled.script, 'tip-v11-fr');
+  assert.match(spokenScript, /Suivez aussi, Jamm Immo, sur nos réseaux sociaux/u);
   assert.ok(enabled.script.endsWith(TIP_V11_SLOGAN));
   assert.equal(enabled.segments.find(segment => segment.id === 'phone').caption, '+221 76 944 48 49');
   assert.equal(disabled.segments.some(segment => segment.id === 'assistant'), false);
   assert.notEqual(voiceCacheHash(enabled.script), voiceCacheHash(enabled.script, '', 'tip-v11-fr'));
-  assert.equal(voicePrompt(enabled.script, '', 'tip-v11-fr').split('\n\n')[1], enabled.script);
+  assert.equal(voicePrompt(spokenScript, '', 'tip-v11-fr').split('\n\n')[1], spokenScript);
   assert.equal(buildTipV11Narration({ ...spec, title: 'Lire un dossier locatif' }).visualTopic, 'general');
 });
 

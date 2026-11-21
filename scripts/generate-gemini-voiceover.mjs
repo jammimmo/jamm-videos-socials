@@ -11,11 +11,12 @@
 //
 // Writes:
 //   public/audio/voiceovers/<id>.wav
-//   public/audio/voiceovers/<id>.sha256   (hash of the input script, for cache invalidation)
+//   public/audio/voiceovers/<id>.sha256   (hash of the exact provider passage, for cache invalidation)
 
 import { writeFile, mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { TIP_V11_TEMPLATE } from './tip-v11-contract.mjs';
 import { VOICE_NAME, TIP_V11_VOICE_NAME, TIP_V11_VOICE_HTTP_OPTIONS, PRIMARY_MODEL, voiceCacheHash, voicePrompt } from './voice-profile.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -25,6 +26,19 @@ const ROOT = resolve(__dirname, '..');
 const SAMPLE_RATE = 24000;
 const NUM_CHANNELS = 1;
 const BITS_PER_SAMPLE = 16;
+
+const TIP_V11_SOCIALS_TEXT = 'Suivez aussi Jamm Immo sur nos réseaux sociaux pour retrouver nos prochains conseils.';
+const TIP_V11_SOCIALS_SPOKEN = 'Suivez aussi, Jamm Immo, sur nos réseaux sociaux pour retrouver nos prochains conseils.';
+const TIP_V11_FIXED_CLOSE = `Plus deux cent vingt et un, soixante-seize, neuf cent quarante-quatre, quarante-huit, quarante-neuf. ${TIP_V11_SOCIALS_TEXT} À bientôt ! Jamm Immo ! Kër gu baax, xel mu dal !`;
+
+/** Add two natural pauses only to the exact fixed V11 close sent to TTS. */
+export function tipV11SpokenScript(script, profile = '') {
+  if (profile !== TIP_V11_TEMPLATE || typeof script !== 'string') return script;
+  const suffixStart = script.length - TIP_V11_FIXED_CLOSE.length;
+  if (suffixStart < 0 || script.indexOf(TIP_V11_FIXED_CLOSE) !== suffixStart) return script;
+  const spokenClose = TIP_V11_FIXED_CLOSE.replace(TIP_V11_SOCIALS_TEXT, TIP_V11_SOCIALS_SPOKEN);
+  return `${script.slice(0, suffixStart)}${spokenClose}`;
+}
 
 function parseArgs(argv) {
   const out = {};
@@ -97,7 +111,7 @@ function decodeTipVoice(response) {
 export async function generateSpeechPcm({ apiKey, profile, script, context }) {
   const exactTourV8 = profile === 'tip-v11-fr';
   const voiceName = exactTourV8 ? TIP_V11_VOICE_NAME : VOICE_NAME;
-  const prompt = voicePrompt(script, context, profile);
+  const prompt = voicePrompt(tipV11SpokenScript(script, profile), context, profile);
   const { GoogleGenAI } = exactTourV8 ? await import('@google/genai-ngor-v8') : await import('@google/genai');
   const ai = new GoogleGenAI({ apiKey, ...(exactTourV8 && { httpOptions: { ...TIP_V11_VOICE_HTTP_OPTIONS } }) });
   const response = await ai.models.generateContent({
@@ -153,7 +167,7 @@ async function main() {
   await mkdir(outDir, { recursive: true });
   const wavPath = resolve(outDir, `${id}.wav`);
   const hashPath = resolve(outDir, `${id}.sha256`);
-  const hash = voiceCacheHash(script, args.context, profile);
+  const hash = voiceCacheHash(tipV11SpokenScript(script, profile), args.context, profile);
 
   await writeFile(wavPath, wav);
   await writeFile(hashPath, `${hash}\n`);
