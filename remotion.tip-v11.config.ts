@@ -2,6 +2,7 @@ import './remotion.config';
 import { Config } from '@remotion/cli/config';
 
 Config.setAudioBitrate('128k');
+Config.setChromiumOpenGlRenderer('swangle');
 
 Config.overrideFfmpegCommand(({ type, args }) => {
   // Facebook Reels requires closed GOPs of 2–5 seconds. V11 runs at 30 fps.
