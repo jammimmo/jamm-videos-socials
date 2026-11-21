@@ -1,4 +1,4 @@
-name: Capture 132 synthetic V11 frames with one page (hosted)
+name: Verify 132 synthetic PNG captures on hosted V11
 
 # This diagnostic is confined to its carrier branch. The ordinary renderer
 # checks and the production renderer ref keep their existing workflows.
@@ -7,7 +7,7 @@ on:
     branches: [diagnose/v11-motion-hosted-20261121]
     paths:
       - .github/workflows/diagnose-advice-three-stills.yml
-      - scripts/qa/advice-motion-prefix/**
+      - scripts/qa/advice-png-prefix/**
 
 permissions:
   contents: read
@@ -21,7 +21,7 @@ env:
 
 jobs:
   capture:
-    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/diagnose/v11-motion-hosted-20261121' && (github.event.created || github.event.before == '13edd53ca77318b3143e3ef1967629a0d571d3db')
+    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/diagnose/v11-motion-hosted-20261121' && (github.event.created || github.event.before == 'ce2901a8b4e10b9f5cd7b485f5033183ae49320a')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -65,7 +65,7 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          harness="$GITHUB_WORKSPACE/carrier/scripts/qa/advice-motion-prefix"
+          harness="$GITHUB_WORKSPACE/carrier/scripts/qa/advice-png-prefix"
           (cd "$harness" && sha256sum --check --strict SHA256SUMS)
           runtime_dir=$(mktemp -d "$RUNNER_TEMP/advice-three-stills-browser.XXXXXXXX")
           trap 'rm -rf -- "$runtime_dir"' EXIT
@@ -87,14 +87,12 @@ jobs:
           printf '%s  %s\n' '47e823e3a14b431ffa8dc88f97db6a854cd92e04800c01fc765c16a18d393d72' "$browser" | sha256sum --check --strict
           test "$("$browser" --version)" = 'Chromium 149.0.7790.0'
           printf '%s\n' '149.0.7790.0' > "$browser_cache/../VERSION"
-          bash "$harness/capture-prefix-linux.sh" "$GITHUB_WORKSPACE/renderer" "$RUNNER_TEMP/advice-motion-prefix" "$browser"
+          bash "$harness/capture-png-prefix-linux.sh" "$GITHUB_WORKSPACE/renderer" "$RUNNER_TEMP/advice-png-prefix" "$browser"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: success() || failure()
         with:
-          name: advice-v11-prefix-serial-hosted-33d46b8
+          name: advice-v11-png-prefix-hosted-33d46b8
           path: |
-            ${{ runner.temp }}/advice-motion-prefix/*.json
-            ${{ runner.temp }}/advice-motion-prefix/*.jpg
-            ${{ runner.temp }}/advice-motion-prefix/*.png
+            ${{ runner.temp }}/advice-png-prefix/*.json
           if-no-files-found: warn
           retention-days: 7
