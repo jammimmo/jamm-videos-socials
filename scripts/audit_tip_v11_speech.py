@@ -742,6 +742,40 @@ def ordinary_point_scene(segment, indexed_rows, lag_samples):
             }}
 
 
+def held_fixed_socials_point_scene(segment, indexed_rows, lag_samples):
+    """Keep other scene scores when the supported socials point cannot be credited."""
+    expected = normalized_words('socials', segment['text'])
+    rows = [row for _, row in indexed_rows]
+    points = [i for i, row in enumerate(rows) if row[1] == row[2]]
+    if (segment['id'] != 'socials' or tuple(expected) != FIXED_SOCIALS_WORDS
+        or len(points) != 1 or not 0 < points[0] < len(rows) - 1):
+        return None
+    index = points[0]
+    raw, start, _, probability = rows[index]
+    point = round(start * SAMPLE_RATE)
+    scene_start = round(segment['start'] * SAMPLE_RATE) + lag_samples
+    scene_end = round(segment['end'] * SAMPLE_RATE) + lag_samples
+    before, after = rows[index - 1], rows[index + 1]
+    if (normalized_words('socials', raw) != ['aussi'] or not raw.strip().islower()
+        or not re.fullmatch(r'[^\W\d_]+[.,!?]?', raw.strip())
+        or probability < MIN_WORD_PROBABILITY or not scene_start < point < scene_end
+        or round(before[2] * SAMPLE_RATE) != point or round(after[1] * SAMPLE_RATE) != point
+        or not before[1] < before[2] or not after[1] < after[2]):
+        return None
+    # This report is deliberately unable to match. It assigns the structurally
+    # bounded point only so all other scenes retain their independent scores.
+    held = [None] * len(expected)
+    edits = speech_edits(expected, held)
+    return {'segment': 'socials', 'status': 'inconclusive',
+            'expected_token_count': len(expected), 'observed_token_count': len(held), 'observed_words': held,
+            'expected_sha256': sha256(' '.join(expected).encode()), 'measurement': {
+                'method': ORDINARY_POINT_METHOD, 'full_row_indices': [indexed_rows[index][0]],
+                'expected_token_indices': [1], 'point_samples': [point], 'edit_count': edits,
+                'point_words_credited': 0, 'protected_names_credited': 0, 'diagnostic_only': True,
+                'admission_eligible': False, 'scene_start_sample': scene_start, 'scene_end_sample': scene_end,
+            }}
+
+
 def ordinary_point_reports(segments, rows, lag_samples, decoded_pcm, wav_path, specialized):
     if not decoded_pcm or not isinstance(rows, (list, tuple)) or not 0 < len(rows) <= MAX_RECOGNIZED_WORDS:
         return {}
@@ -779,6 +813,8 @@ def ordinary_point_reports(segments, rows, lag_samples, decoded_pcm, wav_path, s
             previous = right
         else:
             result = ordinary_point_scene(part, inside, lag_samples)
+            if result is None:
+                result = held_fixed_socials_point_scene(part, inside, lag_samples)
             if result:
                 result['measurement'].update(full_timed_rows_sha256=timed_rows_digest(rows),
                                              decoded_pcm_sha256=sha256(decoded_pcm))

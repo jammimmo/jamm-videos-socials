@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { tipV11SpokenScript } from './generate-gemini-voiceover.mjs';
 import { PRIMARY_MODEL, TIP_V11_VOICE_NAME, voicePrompt } from './voice-profile.mjs';
 import { TIP_V11_TEMPLATE } from './tip-v11-contract.mjs';
 import { REVIEWED_NARRATION_MODEL } from './tip-v11-reviewed-narration.mjs';
@@ -81,7 +82,7 @@ export async function buildTipV11RenderManifest({
     voice: {
       model: reviewed ? REVIEWED_NARRATION_MODEL : PRIMARY_MODEL, name: TIP_V11_VOICE_NAME,
       source: voiceSource, profile_sha256: voiceProfile,
-      prompt_sha256: digestTipValue(voicePrompt(plan.script, '', TIP_V11_TEMPLATE)),
+      prompt_sha256: digestTipValue(voicePrompt(tipV11SpokenScript(plan.script, TIP_V11_TEMPLATE), '', TIP_V11_TEMPLATE)),
     },
     asset_manifest_sha256: inventory.sha256,
     static_files: inventory.files,
