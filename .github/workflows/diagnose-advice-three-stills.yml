@@ -21,7 +21,7 @@ env:
 
 jobs:
   capture:
-    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/diagnose/v11-motion-hosted-20261121' && (github.event.created || github.event.before == '00f81c57ecd5a9d4a388278b98183061a3db5d38')
+    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/diagnose/v11-motion-hosted-20261121' && (github.event.created || github.event.before == '3c3d6669879a1afbf31a4046b716a3533041db60')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -89,10 +89,11 @@ jobs:
           printf '%s\n' '149.0.7790.0' > "$browser_cache/../VERSION"
           bash "$harness/capture-motion-linux.sh" "$GITHUB_WORKSPACE/renderer" "$RUNNER_TEMP/advice-master-motion" "$browser"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: success() || failure()
         with:
           name: advice-v11-motion-hosted-33d46b8
           path: |
             ${{ runner.temp }}/advice-master-motion/receipt.json
             ${{ runner.temp }}/advice-master-motion/trace.json
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7

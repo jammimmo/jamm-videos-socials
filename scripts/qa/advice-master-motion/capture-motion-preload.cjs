@@ -3,8 +3,8 @@ const { AsyncLocalStorage } = require('node:async_hooks');
 const childProcess = require('node:child_process');
 const { createHash } = require('node:crypto');
 const { readFileSync, realpathSync, writeFileSync } = require('node:fs');
-const { basename, dirname, isAbsolute, join } = require('node:path');
-const { verifyGraphicsLaunch, verifiedSwiftShader } = require('./capture-graphics.mjs');
+const { dirname, isAbsolute, join } = require('node:path');
+const { identifyChromeLaunch, verifyGraphicsLaunch, verifiedSwiftShader } = require('./capture-graphics.mjs');
 
 // NODE_OPTIONS is inherited by the synthetic fixture and its children. Observe
 // only the actual V11 Remotion command. The output path is supplied by the
@@ -23,26 +23,35 @@ const expectedBrowser = realpathSync(pinnedBrowser);
 const frameContext = new AsyncLocalStorage();
 const pictures = new Map();
 const browserLaunches = [];
+const browserLaunchers = [];
 const browsers = [];
 const encoders = [];
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 
 const spawn = childProcess.spawn;
 childProcess.spawn = function (executable, args, options) {
-  const isBrowser = isAbsolute(executable) && basename(executable) === 'chrome-headless-shell';
-  if (isBrowser) {
-    assert.equal(realpathSync(executable), expectedBrowser);
-    verifyGraphicsLaunch(args);
+  const requestedBrowser = identifyChromeLaunch(executable, args);
+  if (requestedBrowser) {
+    assert.equal(realpathSync(requestedBrowser.browserExecutable), expectedBrowser);
+    verifyGraphicsLaunch(requestedBrowser.browserArgs);
   }
   const child = spawn.call(this, executable, args, options);
-  if (isBrowser) {
-    const flags = child.spawnargs.filter(arg => /^--(?:use-gl|use-angle|disable-gpu)(?:=|$)/u.test(arg));
+  if (requestedBrowser) {
+    const [actualExecutable, ...actualArgs] = child.spawnargs;
+    const actualBrowser = identifyChromeLaunch(actualExecutable, actualArgs);
+    assert.equal(actualBrowser?.launcher, requestedBrowser.launcher);
+    assert.equal(realpathSync(actualBrowser.browserExecutable), expectedBrowser);
+    const flags = actualBrowser.browserArgs.filter(arg => /^--(?:use-gl|use-angle|disable-gpu)(?:=|$)/u.test(arg));
     verifyGraphicsLaunch(flags);
     browserLaunches.push(flags);
+    browserLaunchers.push(actualBrowser.launcher);
   }
   if (Array.isArray(args) && args.includes('libx264')) {
-    const value = option => args.includes(option) ? args[args.lastIndexOf(option) + 1] : null;
-    encoders.push({ sha256: digest(readFileSync(executable)), x264Params: value('-x264-params'),
+    const [actualExecutable, ...actualArgs] = child.spawnargs;
+    assert.equal(realpathSync(actualExecutable), realpathSync(executable));
+    assert.ok(actualArgs.includes('libx264'));
+    const value = option => actualArgs.includes(option) ? actualArgs[actualArgs.lastIndexOf(option) + 1] : null;
+    encoders.push({ sha256: digest(readFileSync(actualExecutable)), x264Params: value('-x264-params'),
       videoThreads: value('-threads:v'), genericThreads: value('-threads') });
   }
   return child;
@@ -107,7 +116,7 @@ HeadlessBrowser.create = async function (options) {
 
 process.once('exit', code => {
   if (code !== 0) return;
-  writeFileSync(tracePath, JSON.stringify({ browserLaunches, browsers, encoders,
+  writeFileSync(tracePath, JSON.stringify({ browserLaunches, browserLaunchers, browsers, encoders,
     frames: [...pictures.entries()].sort((left, right) => left[0] - right[0]) }) + '\n',
   { flag: 'wx', mode: 0o600 });
 });

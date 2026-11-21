@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 
 const swiftShaderFiles = {
   'libEGL.so': '042b405bacc7fa05972709f675565d13a2eac14caa78b8409fa58b94a0122c96',
@@ -24,6 +24,19 @@ export function verifyGraphicsLaunch(launchFlags) {
   const flags = launchFlags.filter(flag => /^--(?:use-gl|use-angle|disable-gpu)(?:=|$)/u.test(flag));
   assert.deepEqual(flags, ['--use-gl=angle', '--use-angle=swiftshader'],
     'The actual Remotion browser launch did not exclusively request SwiftShader');
+}
+
+export function identifyChromeLaunch(executable, args) {
+  if (!isAbsolute(executable) || !Array.isArray(args)) return null;
+  if (basename(executable) === 'chrome-headless-shell') {
+    return { browserExecutable: executable, browserArgs: args, launcher: 'direct' };
+  }
+  if (basename(executable) !== 'setpriv' || typeof args[2] !== 'string'
+    || !isAbsolute(args[2]) || basename(args[2]) !== 'chrome-headless-shell') return null;
+  // Remotion's Linux BrowserRunner uses this exact util-linux wrapper.
+  // Its compositor also uses setpriv, with a different executable.
+  assert.deepEqual(args.slice(0, 2), ['--pdeathsig', 'SIGKILL']);
+  return { browserExecutable: args[2], browserArgs: args.slice(3), launcher: 'setpriv' };
 }
 
 export function verifiedSwiftShader(backend) {
