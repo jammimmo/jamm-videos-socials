@@ -8,7 +8,7 @@ import { verifyGraphicsLaunch, verifiedSwiftShader, verifySwiftShaderFiles } fro
 import { prepareSmokeInput, sha256 } from './prepare-smoke-input.mjs';
 import settings from './prefix-settings.cjs';
 
-const { sourceSha, frameCount, divergent, controls, pairedFrames } = settings;
+const { sourceSha, frameCount, concurrency, divergent, controls, pairedFrames } = settings;
 const here = dirname(fileURLToPath(import.meta.url));
 const browserHash = '47e823e3a14b431ffa8dc88f97db6a854cd92e04800c01fc765c16a18d393d72';
 const assetHash = 'bdfe127c1e7896f14b4d02bbb5d8dae08b583e4769b273c0af14387805e0225c';
@@ -22,7 +22,7 @@ export function prefixRenderOptions(root, scratch, output, browser) {
       join(root, 'node_modules/.bin/remotion'), 'render', 'src/index.ts', 'TipV11Fr', join(scratch, 'prefix.mp4'),
       `--props=${join(root, 'out/batch/tip-00000000-0000-4000-8000-000000000019.props.json')}`,
       '--config=remotion.tip-v11.config.ts', '--codec=h264', '--audio-codec=aac',
-      '--image-format=jpeg', '--concurrency=3', '--log=error', `--frames=0-${frameCount - 1}`,
+      '--image-format=jpeg', `--concurrency=${concurrency}`, '--log=error', `--frames=0-${frameCount - 1}`,
       `--browser-executable=${browser}`,
     ],
     env: { ...process.env, JAMM_OFFLINE_MOTION_BROWSER: browser,
@@ -89,7 +89,7 @@ async function main([repository, output, browser, ...rest]) {
     validatePrefixEvidence(output, motion, page);
     assert.equal(git('status', '--porcelain', '--untracked-files=normal'), '');
     const receipt = { schema: 'jamm-v11-swangle-prefix-v1', syntheticOnly: true, publishable: false,
-      sourceSha, assetHash, browserHash, graphicsFiles, frames: frameCount, divergent, controls, input,
+      sourceSha, assetHash, browserHash, graphicsFiles, frames: frameCount, concurrency, divergent, controls, input,
       prefixMp4Sha256: hashFile(join(scratch, 'prefix.mp4')),
       motionTraceSha256: hashFile(join(output, 'trace.json')), pageTraceSha256: hashFile(join(output, 'page-trace.json')) };
     writeFileSync(join(output, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n', { flag: 'wx', mode: 0o600 });

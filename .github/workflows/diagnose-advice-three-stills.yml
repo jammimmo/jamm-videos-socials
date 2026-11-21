@@ -1,4 +1,4 @@
-name: Capture the first 132 synthetic V11 frames (hosted)
+name: Capture 132 synthetic V11 frames with one page (hosted)
 
 # This diagnostic is confined to its carrier branch. The ordinary renderer
 # checks and the production renderer ref keep their existing workflows.
@@ -21,7 +21,7 @@ env:
 
 jobs:
   capture:
-    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/diagnose/v11-motion-hosted-20261121' && (github.event.created || github.event.before == '7c46abb6512d41674a037a21b958dd7e023ebcfd')
+    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/diagnose/v11-motion-hosted-20261121' && (github.event.created || github.event.before == '13edd53ca77318b3143e3ef1967629a0d571d3db')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -91,7 +91,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: success() || failure()
         with:
-          name: advice-v11-prefix-hosted-33d46b8
+          name: advice-v11-prefix-serial-hosted-33d46b8
           path: |
             ${{ runner.temp }}/advice-motion-prefix/*.json
             ${{ runner.temp }}/advice-motion-prefix/*.jpg

@@ -11,7 +11,7 @@ assert.equal(process.env.OFFLINE_SMOKE_NETWORK_ISOLATED, '1');
 assert.equal(process.argv[2], 'render');
 assert.equal(process.argv[4], 'TipV11Fr');
 assert.ok(process.argv.includes(`--frames=0-${frameCount - 1}`));
-assert.ok(process.argv.includes('--concurrency=3'));
+assert.ok(process.argv.includes(`--concurrency=${require('./prefix-settings.cjs').concurrency}`));
 const output = process.env.JAMM_OFFLINE_PREFIX_OUTPUT;
 assert.ok(isAbsolute(output));
 
