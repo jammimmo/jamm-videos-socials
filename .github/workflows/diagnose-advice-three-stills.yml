@@ -21,7 +21,7 @@ env:
 
 jobs:
   capture:
-    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/diagnose/v11-motion-hosted-20261121' && github.event.created
+    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/diagnose/v11-motion-hosted-20261121' && (github.event.created || github.event.before == '31593ba804998c4ab21fd44b6a21f5dc91be09aa')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -33,6 +33,7 @@ jobs:
         with:
           repository: jammimmo/jamm-videos-socials
           ref: ${{ env.RENDERER_SHA }}
+          fetch-depth: 2
           path: renderer
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
