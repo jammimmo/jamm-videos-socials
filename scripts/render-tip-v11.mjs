@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { buildTipV11Narration, TIP_V11_TEMPLATE } from './tip-v11-contract.mjs';
+import { tipV11SpokenScript } from './generate-gemini-voiceover.mjs';
 import { voiceCacheHash } from './voice-profile.mjs';
 import { tipV11Effects } from './tip-v11-effects.mjs';
 import { buildTipV11RenderManifest, collectTipV11StaticFiles } from './tip-v11-render-manifest.mjs';
@@ -42,7 +43,7 @@ export function tipV11AlignmentArguments(normalizedPath, specPath, alignPath, {
 async function getNarration(root, audioDir, plan) {
   const raw = resolve(audioDir, `${plan.id}.wav`);
   const hashPath = resolve(audioDir, `${plan.id}.sha256`);
-  const expected = voiceCacheHash(plan.script, '', TIP_V11_TEMPLATE);
+  const expected = voiceCacheHash(tipV11SpokenScript(plan.script, TIP_V11_TEMPLATE), '', TIP_V11_TEMPLATE);
   try {
     if ((await readFile(hashPath, 'utf8')).trim() === expected && (await stat(raw)).size > 44) {
       return { path: raw, source: 'cache' };

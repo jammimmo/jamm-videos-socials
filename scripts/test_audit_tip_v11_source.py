@@ -183,6 +183,30 @@ class SourceScoringTest(unittest.TestCase):
         self.assertEqual(held['status'], 'inconclusive')
         self.assertEqual([r['segment'] for r in held['segments'] if r['status'] != 'matched'], ['hook'])
 
+    def test_held_socials_point_preserves_other_scores_without_source_admission(self):
+        from audit_tip_v11_speech import FIXED_SOCIALS_WORDS, ORDINARY_POINT_METHOD
+        self.plan = {**self.plan, 'segments': [
+            {**segment, 'text': ' '.join(FIXED_SOCIALS_WORDS)} if segment['id'] == 'socials' else segment
+            for segment in SEGMENTS
+        ]}
+        rows = [[word['word'], word['start'], word['end'], .95] for word in speech(self.plan['segments'])]
+        first = next(index for index, row in enumerate(rows) if row[0] == 'suivez')
+        point = rows[first + 2][1]
+        rows[first][2] = point
+        rows[first + 1][1] = rows[first + 1][2] = point
+        rows[first + 2] = ['Djam', rows[first + 2][1], rows[first + 2][2], .485]
+        rows[first + 3] = ['Imo', rows[first + 3][1], rows[first + 3][2], .746]
+        report = self.run_source(rows=rows, window=Mock(return_value=[]))
+        self.assertEqual((report['status'], report['reason']), ('inconclusive', 'ordered_words_unconfirmed'))
+        self.assertEqual(len(report['segments']), 10)
+        held, = [item for item in report['segments'] if item['status'] != 'matched']
+        self.assertEqual(held['segment'], 'socials')
+        proof = held['measurement']
+        self.assertEqual((proof['method'], proof['diagnostic_only'], proof['admission_eligible']),
+                         (ORDINARY_POINT_METHOD, True, False))
+        self.assertEqual((proof['point_words_credited'], proof['protected_names_credited']), (0, 0))
+        self.assertEqual(held['observed_words'], [None] * len(FIXED_SOCIALS_WORDS))
+
     def test_pre_alignment_diagnostics_at_65183_ms(self):
         duration = 65.183
         samples = struct.pack('<h', 800) * round(duration * SAMPLE_RATE)
