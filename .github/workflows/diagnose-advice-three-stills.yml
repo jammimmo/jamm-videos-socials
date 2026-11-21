@@ -1,4 +1,4 @@
-name: Compare repeated V11 browser captures on GitHub
+name: Check low-cost capture stabilization for V11 on GitHub
 
 # This diagnostic is confined to its carrier branch. The ordinary renderer
 # checks and the production renderer ref keep their existing workflows.
@@ -7,7 +7,7 @@ on:
     branches: [diagnose/v11-motion-hosted-20261121]
     paths:
       - .github/workflows/diagnose-advice-three-stills.yml
-      - scripts/qa/advice-surface-repeat/**
+      - scripts/qa/advice-surface-precondition/**
 
 permissions:
   contents: read
@@ -21,7 +21,7 @@ env:
 
 jobs:
   capture:
-    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/diagnose/v11-motion-hosted-20261121' && github.event.before == '2f6a4c76f7a0672f9de840a401a3c72b33d96250'
+    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/diagnose/v11-motion-hosted-20261121' && github.event.before == 'c9cb05b3a9c3378bb0cdd58e03a7e037ce380e0c'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -60,12 +60,12 @@ jobs:
           env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm_config_userconfig=/dev/null \
             npm_config_globalconfig="$npm_global" npm ci --ignore-scripts --no-audit --no-fund
           test -z "$(git status --porcelain --untracked-files=normal)"
-      - name: Capture the synthetic frames twice and after a paint
+      - name: Compare the unmodified capture, a paint wait and a small warm-up
         shell: bash
         run: |
           set -euo pipefail
           umask 077
-          harness="$GITHUB_WORKSPACE/carrier/scripts/qa/advice-surface-repeat"
+          harness="$GITHUB_WORKSPACE/carrier/scripts/qa/advice-surface-precondition"
           (cd "$harness" && sha256sum --check --strict SHA256SUMS)
           runtime_dir=$(mktemp -d "$RUNNER_TEMP/advice-three-stills-browser.XXXXXXXX")
           trap 'rm -rf -- "$runtime_dir"' EXIT
@@ -87,12 +87,12 @@ jobs:
           printf '%s  %s\n' '47e823e3a14b431ffa8dc88f97db6a854cd92e04800c01fc765c16a18d393d72' "$browser" | sha256sum --check --strict
           test "$("$browser" --version)" = 'Chromium 149.0.7790.0'
           printf '%s\n' '149.0.7790.0' > "$browser_cache/../VERSION"
-          bash "$harness/capture-surface-repeat-linux.sh" "$GITHUB_WORKSPACE/renderer" "$RUNNER_TEMP/advice-surface-repeat" "$browser"
+          bash "$harness/capture-surface-precondition-linux.sh" "$GITHUB_WORKSPACE/renderer" "$RUNNER_TEMP/advice-surface-precondition" "$browser"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: success() || failure()
         with:
-          name: advice-v11-surface-repeat-hosted-33d46b8
+          name: advice-v11-surface-precondition-hosted-33d46b8
           path: |
-            ${{ runner.temp }}/advice-surface-repeat/*.json
+            ${{ runner.temp }}/advice-surface-precondition/*.json
           if-no-files-found: warn
           retention-days: 7

@@ -1,0 +1,5 @@
+1fa60c795903d420cc8aa1ebe0121042d615a4a68e2adbf3f2ed506d1af6e09d  ../advice-png-prefix/capture-graphics.mjs
+caca618a57645b7e46cff9d68f1ce27f594c3e7b1ad35c91bdc32672409c033c  ../advice-png-prefix/prepare-smoke-input.mjs
+8a37944be0a85be0fe6895421c35817805c04afe1bf5947526a605014ffad989  capture-surface-precondition-linux.sh
+3f6d0d9a76e91025da8645f5603b9ded02600c9cf95fd150a9a87fb4d46a2481  capture-surface-precondition.mjs
+9ba5058bc4afdb17dcb6020961a3abc5b41cfb5645c6d5c664fce8a32c6124d8  archive-reference.json

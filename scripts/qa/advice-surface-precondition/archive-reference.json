@@ -1,0 +1,46 @@
+{
+  "runReceipts": {
+    "hosted": "e0d1776fe7e89ca7496de8f3f17bf4cecbe71b52a46c1152fb7ccfe119af4a16",
+    "mini": "d7f82d7dcb569badf5271f44d7832a3d2a298fad00a7cfc61b72bcd829b012d3"
+  },
+  "runtime": {
+    "sourceSha": "33d46b8c8ff4862846c9ad92464172ede055a546",
+    "treeSha": "4ce21e6bcb5fb5c0f9281f21d367e3bedcf1203d",
+    "assetSha": "bdfe127c1e7896f14b4d02bbb5d8dae08b583e4769b273c0af14387805e0225c",
+    "browserSha": "47e823e3a14b431ffa8dc88f97db6a854cd92e04800c01fc765c16a18d393d72",
+    "ffmpegSha": "ed16af623947494a72e284b6eb8ff225f2da22b38b5d5069c2fd4b4ba3384e41",
+    "remotion": "4.0.464"
+  },
+  "inputPropertiesSha256": "c60d4d5ef446fa3046bdde5ddcaa663796a12cd9439b1c862831c663be50b04a",
+  "alignmentSha256": "06bde2c18db05bedee13972f93299633727c0788e6f867e7a18c913591a675ec",
+  "frames": {
+    "0": {
+      "rgbaSha256": "c6ab16f688025ddf1e841f1ef0662579974f7e792fe3dc8b66d5944ff2d70a05",
+      "domSha256": "2c3ea42fa126773b3c2a1c86cfb0fe23f04a9ef8e3038554f4f5a3c8707573a7"
+    },
+    "10": {
+      "rgbaSha256": "e963adeabf994071279f6ca61d1a66d51596d80facda6f6c847175acfe7944ca",
+      "domSha256": "a11a1ab0377e23f4e47c248dc505e392360c933c9e51217123c55a1dc520e266"
+    },
+    "32": {
+      "rgbaSha256": "4ad2159b370ac6373b1f186c2e296121ac23404f39027f065abb30db6a9725d9",
+      "domSha256": "832655ccb921e162808c27d37c7e96c12e9a6568d007fcd316e6321d79f99921"
+    },
+    "43": {
+      "rgbaSha256": "5725a747c1c002cf2a9490412d40991e34db94a6a14cbae59b9538a642e570d1",
+      "domSha256": "2786798bc61eae1e91e4d6d8e94de8a65503e8ec01e28d1b20c66fb380c17632"
+    },
+    "44": {
+      "rgbaSha256": "e4fc5f21100a238f981ddc2a832424dd0c92ebe31c9a77d70becb32891330e12",
+      "domSha256": "909023727549eed21e15ac4c67509e787153e953a44128eb66cf43f61f3d679e"
+    },
+    "77": {
+      "rgbaSha256": "2e921d5299b1bf621d84ff97c7ba59f4b49fb85ede2061a8a5b972672932d770",
+      "domSha256": "949c00ea0a72d04396df8d309cab2bc38a66436d3432f7c6ee06ff9d886a461d"
+    },
+    "120": {
+      "rgbaSha256": "e775c4dcf906bda578efa133fae08ab1b6fdad46c63348b438a1219bade56f32",
+      "domSha256": "3d3fbca94e12c9483a0bc17c62a7edc55f08f81066318f8f7ee7f8d130b8b85b"
+    }
+  }
+}
