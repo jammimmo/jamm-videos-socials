@@ -189,6 +189,7 @@ function v11Payload() {
 
 test('destination opt-in is materialized only from the supported private V11 evidence', t => {
   assert.equal(materialize(v11Payload()).spec.destinationMediaContract, undefined);
+  assert.equal(materialize(v11Payload()).strictDelivery, undefined);
   const contract = { destinationMediaContract: TIP_DESTINATION_MEDIA_CONTRACT, mediaStorageMode: 'job_owned_v1' };
   for (const fields of [{ destinationMediaContract: TIP_DESTINATION_MEDIA_CONTRACT },
     { ...contract, destinationMediaContract: 'unexpected-contract' }, { ...contract, mediaStorageMode: 'shared' }]) {
@@ -213,6 +214,7 @@ test('destination opt-in is materialized only from the supported private V11 evi
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(readFileSync(spec, 'utf8')).destinationMediaContract, TIP_DESTINATION_MEDIA_CONTRACT);
   assert.match(readFileSync(env, 'utf8'), /^TIP_DESTINATION_MEDIA_CONTRACT=tip-v11-destination-manifest-v1$/m);
+  assert.match(readFileSync(env, 'utf8'), /^TIP_REQUIRED_RENDER_ATTESTATION=1$/m);
 });
 
 test('V11 consumes exactly the French advice and adds the reviewed brand narration', () => {
@@ -349,6 +351,7 @@ test('materialization hands the private scratch path to the renderer and preserv
     };
     const ok = invoke('success', false);
     assert.equal(ok.execution.status, 0, ok.execution.stderr);
+    assert.equal(ok.assignments.TIP_REQUIRED_RENDER_ATTESTATION, '1');
     assert.deepEqual(JSON.parse(readFileSync(ok.spec, 'utf8')).reviewedNarration, pin);
     assert.deepEqual(await readStagedPrivateReviewedNarration(pin, { ...env, ...ok.assignments }),
       { path: ok.assignments.TIP_PRIVATE_NARRATION_FILE, source: 'reviewed-bundle' });

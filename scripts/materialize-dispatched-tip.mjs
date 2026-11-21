@@ -78,6 +78,7 @@ export function materializeDispatchedTip(raw, { legacy = false, rendererSha } = 
   if ((reviewed && !reviewedNarration) || (!reviewed && Object.hasOwn(evidence, 'reviewedNarration'))) {
     throw new Error('invalid reviewed V11 narration contract or renderer identity');
   }
+  const strictDelivery = v11 && (reviewed || destinations || evidence.mediaStorageMode === 'job_owned_v1');
 
   const jobId = text(job.id, 'job.id', 36).toLowerCase();
   if (!UUID_RE.test(jobId)) throw new Error('job.id must be a UUID');
@@ -121,7 +122,7 @@ export function materializeDispatchedTip(raw, { legacy = false, rendererSha } = 
       ...(reviewedNarration && { reviewedNarration }),
       ...(destinations && { destinationMediaContract: TIP_DESTINATION_MEDIA_CONTRACT }),
     };
-    return { jobId, callbackUrl, uploadUrl, callbackToken, spec };
+    return { jobId, callbackUrl, uploadUrl, callbackToken, spec, ...(strictDelivery && { strictDelivery: true }) };
   }
   const en = sentencesToFiveParts(scriptEn);
   const meterTopic = /\bcompteurs?\b/iu.test(`${title} ${scriptFr}`);
@@ -192,6 +193,7 @@ async function main() {
     `TIP_UPLOAD_URL=${result.uploadUrl}`,
     `TIP_CALLBACK_TOKEN=${result.callbackToken}`,
     `TIP_SPEC_FILE=${specFile}`,
+    ...(result.strictDelivery ? ['TIP_REQUIRED_RENDER_ATTESTATION=1'] : []),
     ...(result.spec.destinationMediaContract ? [`TIP_DESTINATION_MEDIA_CONTRACT=${result.spec.destinationMediaContract}`] : []),
     '',
   ].join('\n'));

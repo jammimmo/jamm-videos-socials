@@ -75,12 +75,22 @@ jobs:
       - name: Measure V11 audio, French speech, captions and CTA in the rendered MP4
         timeout-minutes: 6
         if: github.event.client_payload.contract == 'jamm-tip-render-v2' || github.event.client_payload.contract == 'jamm-tip-render-v3-reviewed-narration'
-        continue-on-error: true
+        continue-on-error: ${{ github.event.client_payload.contract == 'jamm-tip-render-v2' && github.event.client_payload.evidence.mediaStorageMode != 'job_owned_v1' }}
         run: |
-          sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-fra
+          failure_code_file="${RUNNER_TEMP}/tip-v11-alignment-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          record_audit_failure() {
+            case "$1" in
+              render_audit_dependency_unavailable|render_audit_unavailable|render_audit_rejected) ;;
+              *) return 2 ;;
+            esac
+            printf '%s\n' "$1" > "${failure_code_file}"
+            exit 1
+          }
+          python -I scripts/install_tip_ffmpeg.py --audit-tools || record_audit_failure render_audit_dependency_unavailable
           STEM="tip-${TIP_JOB_ID}"
           RAW_WAV="${TIP_PRIVATE_NARRATION_FILE:-public/audio/voiceovers/${STEM}.wav}"
-          python scripts/audit_tip_v11.py \
+          REPORT="out/batch/${STEM}.audit.json"
+          if python scripts/audit_tip_v11.py \
             --video "out/batch/${STEM}.mp4" \
             --alignment "out/batch/${STEM}.alignment.json" \
             --render-manifest "out/batch/${STEM}.manifest.json" \
@@ -89,12 +99,29 @@ jobs:
             --narration-wav "public/audio/voiceovers/${STEM}-v11.wav" \
             --mix-wav "public/audio/voiceovers/${STEM}-v11-mix.wav" \
             --ocr-language fra --measure-final-french \
-            --brand-logo public/tip-v11/logo.png --report "out/batch/${STEM}.audit.json"
+            --brand-logo public/tip-v11/logo.png --report "${REPORT}"; then
+            test -s "${REPORT}" || record_audit_failure render_audit_unavailable
+          elif [ -s "${REPORT}" ]; then
+            # Failed metrics leave their private report available for the
+            # bounded terminal classification, but never authorize an upload.
+            record_audit_failure render_audit_rejected
+          else
+            record_audit_failure render_audit_unavailable
+          fi
 
       - name: Stream the MP4 to the Jamm Immo Worker
         if: env.TIP_DESTINATION_MEDIA_CONTRACT != 'tip-v11-destination-manifest-v1'
         run: |
           set +x
+          failure_code_file="${RUNNER_TEMP}/tip-v11-alignment-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          record_delivery_failure() {
+            case "$1" in
+              render_audit_unavailable|render_audit_rejected|render_evidence_unavailable|render_attestation_unavailable) ;;
+              *) return 2 ;;
+            esac
+            printf '%s\n' "$1" > "${failure_code_file}"
+            exit 1
+          }
           VIDEO="out/batch/tip-${TIP_JOB_ID}.mp4"
           test -s "${VIDEO}"
           SHA256=$(sha256sum "${VIDEO}" | cut -d' ' -f1)
@@ -103,10 +130,19 @@ jobs:
           EVIDENCE=""
           ATTESTATION=""
           if [ -s "${REPORT}" ]; then
-            EVIDENCE=$(node scripts/tip-v11-render-evidence.mjs "${REPORT}" "${SHA256}") || EVIDENCE=""
+            EVIDENCE=$(node scripts/tip-v11-render-evidence.mjs "${REPORT}" "${SHA256}") \
+              || { EVIDENCE=""; [ "${TIP_REQUIRED_RENDER_ATTESTATION:-}" != 1 ] \
+                || record_delivery_failure render_evidence_unavailable; }
           fi
           if [ -n "${EVIDENCE}" ]; then
-            ATTESTATION=$(printf '%s' "${EVIDENCE}" | node scripts/tip-v11-workflow-oidc.mjs) || ATTESTATION=""
+            ATTESTATION=$(printf '%s' "${EVIDENCE}" | node scripts/tip-v11-workflow-oidc.mjs) \
+              || { ATTESTATION=""; [ "${TIP_REQUIRED_RENDER_ATTESTATION:-}" != 1 ] \
+                || record_delivery_failure render_attestation_unavailable; }
+          fi
+          if [ "${TIP_REQUIRED_RENDER_ATTESTATION:-}" = 1 ]; then
+            [ -s "${REPORT}" ] || record_delivery_failure render_audit_unavailable
+            [ -n "${EVIDENCE}" ] || record_delivery_failure render_evidence_unavailable
+            [ -n "${ATTESTATION}" ] || record_delivery_failure render_attestation_unavailable
           fi
           if TIP_RENDER_EVIDENCE="${EVIDENCE}" TIP_WORKFLOW_ATTESTATION="${ATTESTATION}" \
             node scripts/deliver-tip-video.mjs "${VIDEO}" "${SHA256}" "${DURATION}"; then
@@ -151,6 +187,9 @@ jobs:
                   ;;
                 signature_evidence_insufficient|signature_boundary_unconfirmed|signature_tail_too_quiet|signature_closing_unrecognized|signature_retry_insufficient|phone_evidence_unconfirmed|website_evidence_unconfirmed|script_evidence_unconfirmed|alignment_evidence_invalid)
                   reason="V11 speech alignment failed (${code})"
+                  ;;
+                render_audit_dependency_unavailable|render_audit_unavailable|render_audit_rejected|render_evidence_unavailable|render_attestation_unavailable)
+                  reason="V11 technical delivery proof failed (${code})"
                   ;;
               esac
             fi

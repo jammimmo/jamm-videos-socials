@@ -1,10 +1,12 @@
 import hashlib
 from pathlib import Path
+import subprocess
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from install_tip_ffmpeg import ARCHIVE, archive_sources, install
+from install_tip_ffmpeg import ARCHIVE, archive_sources, install, install_audit_tools
 
 MIRROR_URL = 'mirror+file:/etc/apt/apt-mirrors.txt'
 
@@ -46,3 +48,39 @@ class ArchiveTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     install({**lock, 'ffprobeSha256': '0'*64}, 'pinned', True, apt)
                 self.assertEqual(len(calls), 2)
+
+    def test_audit_packages_use_the_official_archive_and_bounded_retries(self):
+        with TemporaryDirectory() as dirname:
+            apt = Path(dirname)
+            (apt / 'sources.list.d').mkdir()
+            source = apt / 'sources.list.d/ubuntu.sources'
+            original = f'Types: deb\nURIs: {MIRROR_URL}\nSuites: noble\nComponents: main universe\n'
+            source.write_text(original)
+            returncodes = iter((100, 0, 100, 0))
+            calls, sleeps = [], []
+
+            def run(args, check):
+                self.assertFalse(check)
+                calls.append(args)
+                parts = Path(next(a.split('=', 1)[1] for a in args if a.startswith('Dir::Etc::sourceparts=')))
+                self.assertEqual((parts / 'ubuntu.sources').read_text(), original.replace(MIRROR_URL, ARCHIVE))
+                return SimpleNamespace(returncode=next(returncodes))
+
+            install_audit_tools(True, apt, run, sleeps.append)
+            self.assertEqual([call[-2:] for call in calls[:2]], [['update', '-qq'], ['update', '-qq']])
+            self.assertEqual(calls[2][-5:], ['install', '-y', '--no-install-recommends', 'tesseract-ocr', 'tesseract-ocr-fra'])
+            self.assertEqual(calls[3][-5:], calls[2][-5:])
+            self.assertEqual(sleeps, [1, 1])
+            self.assertEqual(source.read_text(), original)
+
+    def test_audit_package_retry_budget_is_terminal(self):
+        calls, sleeps = [], []
+
+        def run(args, check):
+            calls.append(args)
+            return SimpleNamespace(returncode=100)
+
+        with self.assertRaises(subprocess.CalledProcessError):
+            install_audit_tools(False, run=run, sleep=sleeps.append)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleeps, [1, 4])

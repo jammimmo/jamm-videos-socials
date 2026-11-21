@@ -114,7 +114,9 @@ export async function deliverTipVideo({ video, digest, duration }, env, transpor
 
   const evidence = env.TIP_RENDER_EVIDENCE ?? '';
   const attestation = env.TIP_WORKFLOW_ATTESTATION ?? '';
-  if (evidence.length > 1024 || /[\r\n]/.test(evidence)
+  const strict = env.TIP_REQUIRED_RENDER_ATTESTATION ?? '';
+  if ((strict && strict !== '1') || (strict === '1' && (!evidence || !attestation))
+    || evidence.length > 1024 || /[\r\n]/.test(evidence)
     || (attestation && (!evidence || attestation.length > 8192 || !/^[\w-]+\.[\w-]+\.[\w-]+$/.test(attestation)))) return 'rejected';
   const headers = {
     Authorization: `Bearer ${token}`, 'Content-Type': 'video/mp4', 'Content-Length': String(video.length),

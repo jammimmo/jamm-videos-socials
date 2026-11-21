@@ -110,6 +110,30 @@ test('stale claims, bad permissions, redirects and drifted local bytes are termi
     { request: forbidden }), 'rejected');
 });
 
+test('strict private delivery requires both evidence and OIDC before any network request', async () => {
+  const forbidden = async () => assert.fail('missing strict proof must not contact the Worker');
+  for (const changes of [
+    { TIP_RENDER_EVIDENCE: '', TIP_WORKFLOW_ATTESTATION: '' },
+    { TIP_WORKFLOW_ATTESTATION: '' },
+    { TIP_REQUIRED_RENDER_ATTESTATION: 'true' },
+  ]) {
+    assert.equal(await deliverTipVideo(input, { ...env, TIP_REQUIRED_RENDER_ATTESTATION: '1', ...changes },
+      { request: forbidden }), 'rejected');
+  }
+
+  const seen = [];
+  const legacy = { ...env, TIP_RENDER_EVIDENCE: '', TIP_WORKFLOW_ATTESTATION: '' };
+  assert.equal(await deliverTipVideo(input, legacy, {
+    request: async (_url, options) => {
+      seen.push(options.headers);
+      return Response.json(attached);
+    },
+  }), 'attached');
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]['X-Tip-Render-Evidence'], undefined);
+  assert.equal(seen[0]['X-Tip-Workflow-OIDC'], undefined);
+});
+
 const failure = 'V11 speech alignment failed (signature_retry_insufficient); GitHub run 123';
 const failed = { ok: true, jobId, status: 'failed' };
 
