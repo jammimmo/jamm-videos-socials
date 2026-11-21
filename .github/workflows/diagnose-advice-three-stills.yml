@@ -1,0 +1,96 @@
+name: Render one synthetic V11 master with SwiftShader (hosted)
+
+# This diagnostic is confined to its carrier branch. The ordinary renderer
+# checks and the production renderer ref keep their existing workflows.
+on:
+  push:
+    branches: [diagnose/v11-motion-hosted-20261121]
+    paths:
+      - .github/workflows/diagnose-advice-three-stills.yml
+      - scripts/qa/advice-master-motion/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: advice-v11-motion-hosted-33d46b8
+  cancel-in-progress: false
+
+env:
+  RENDERER_SHA: 33d46b8c8ff4862846c9ad92464172ede055a546
+
+jobs:
+  capture:
+    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/diagnose/v11-motion-hosted-20261121' && github.event.created
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: carrier
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: jammimmo/jamm-videos-socials
+          ref: ${{ env.RENDERER_SHA }}
+          path: renderer
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.20.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11.14'
+      - name: Prepare the verified renderer and isolation tools
+        working-directory: renderer
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RENDERER_SHA"
+          test -z "$(git status --porcelain --untracked-files=normal)"
+          test "$(node --version)" = v22.20.0
+          test "$(npm --version)" = 10.9.3
+          python -I scripts/install_tip_ffmpeg.py
+          if ! command -v ip >/dev/null || ! command -v unzip >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends iproute2 unzip
+          fi
+          npm_global=$(mktemp "$RUNNER_TEMP/advice-stills-npm-global.XXXXXXXX")
+          env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm_config_userconfig=/dev/null \
+            npm_config_globalconfig="$npm_global" npm ci --ignore-scripts --no-audit --no-fund
+          test -z "$(git status --porcelain --untracked-files=normal)"
+      - name: Verify Chromium and render one synthetic master offline
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          harness="$GITHUB_WORKSPACE/carrier/scripts/qa/advice-master-motion"
+          (cd "$harness" && sha256sum --check --strict SHA256SUMS)
+          runtime_dir=$(mktemp -d "$RUNNER_TEMP/advice-three-stills-browser.XXXXXXXX")
+          trap 'rm -rf -- "$runtime_dir"' EXIT
+          archive="$runtime_dir/chromium.zip"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --retry 3 --retry-all-errors --retry-max-time 120 \
+            --connect-timeout 10 --max-time 150 --max-filesize 96395776 \
+            --output "$archive" \
+            'https://remotion.media/chromium-headless-shell-linux-x64-149.0.7790.0.zip?clear'
+          test "$(wc -c < "$archive" | tr -d ' ')" = 96395776
+          printf '%s  %s\n' 'f11d8e76f043a8a70c7ebdae2834f94370ad329ed997ddcdfd5dbcd803f53f76' "$archive" | sha256sum --check --strict
+          unzip -q "$archive" -d "$runtime_dir"
+          browser_cache="$GITHUB_WORKSPACE/renderer/node_modules/.remotion/chrome-headless-shell/linux64"
+          mkdir -p "$browser_cache"
+          test ! -e "$browser_cache/chrome-headless-shell-linux64"
+          mv "$runtime_dir/chrome-headless-shell-linux64" "$browser_cache/"
+          browser="$browser_cache/chrome-headless-shell-linux64/chrome-headless-shell"
+          test -x "$browser"
+          printf '%s  %s\n' '47e823e3a14b431ffa8dc88f97db6a854cd92e04800c01fc765c16a18d393d72' "$browser" | sha256sum --check --strict
+          test "$("$browser" --version)" = 'Chromium 149.0.7790.0'
+          bash "$harness/capture-motion-linux.sh" "$GITHUB_WORKSPACE/renderer" "$RUNNER_TEMP/advice-master-motion" "$browser"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: advice-v11-motion-hosted-33d46b8
+          path: |
+            ${{ runner.temp }}/advice-master-motion/receipt.json
+            ${{ runner.temp }}/advice-master-motion/trace.json
+          if-no-files-found: error
+          retention-days: 7
