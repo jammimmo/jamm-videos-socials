@@ -2,8 +2,13 @@
 set -euo pipefail
 umask 077
 
-if [[ $# -ne 3 || "$1" != /* || "$2" != /* || "$3" != /* || -e "$2" || -L "$2" ]]; then
-  printf '%s\n' 'Usage: bash capture-linux.sh EXISTING_EXACT_CHECKOUT NEW_OUTPUT_DIRECTORY OFFICIAL_CHROMIUM' >&2
+if [[ $# -lt 3 || $# -gt 4 || "$1" != /* || "$2" != /* || "$3" != /* || -e "$2" || -L "$2" ]]; then
+  printf '%s\n' 'Usage: bash capture-linux.sh EXACT_CHECKOUT NEW_OUTPUT OFFICIAL_CHROMIUM [angle|swangle]' >&2
+  exit 2
+fi
+graphics=${4-angle}
+if [[ "$graphics" != angle && "$graphics" != swangle ]]; then
+  printf '%s\n' 'The graphics option must be angle or swangle.' >&2
   exit 2
 fi
 [[ "$(uname -sm)" == 'Linux x86_64' && "$(id -u)" != 0 ]]
@@ -51,4 +56,4 @@ run_isolated env -i "PATH=$PATH" "HOME=$scratch/home" "TMPDIR=$scratch/tmp" \
   LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC OFFLINE_SMOKE_NETWORK_ISOLATED=1 \
   "${python_runtime[@]}" \
   timeout --kill-after=5s 150s node --import "$repository/node_modules/tsx/dist/loader.mjs" \
-  "$harness/capture-three-stills.mjs" "$repository" "$output" "$browser"
+  "$harness/capture-three-stills.mjs" "$repository" "$output" "$browser" parity "$graphics"

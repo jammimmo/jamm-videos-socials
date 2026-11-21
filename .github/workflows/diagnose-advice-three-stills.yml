@@ -1,10 +1,10 @@
-name: Capture three synthetic advice stills (hosted)
+name: Capture three SwiftShader advice stills (hosted)
 
 # This diagnostic is confined to its carrier branch. The ordinary renderer
 # checks and the production renderer ref keep their existing workflows.
 on:
   push:
-    branches: [diagnose/advice-stills-hosted-20261121]
+    branches: [diagnose/advice-swiftshader-hosted-20261121]
     paths:
       - .github/workflows/diagnose-advice-three-stills.yml
       - scripts/qa/advice-three-stills/**
@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: advice-three-stills-hosted-482a390d
+  group: advice-swiftshader-hosted-482a390d
   cancel-in-progress: false
 
 env:
@@ -21,7 +21,7 @@ env:
 
 jobs:
   capture:
-    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/diagnose/advice-stills-hosted-20261121' && (github.event.created || github.event.before == 'c0a7662f9011c104a5e6dc4ecc3e6bb4323792bf')
+    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/diagnose/advice-swiftshader-hosted-20261121' && github.event.created
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -81,10 +81,10 @@ jobs:
           test -x "$browser"
           printf '%s  %s\n' '47e823e3a14b431ffa8dc88f97db6a854cd92e04800c01fc765c16a18d393d72' "$browser" | sha256sum --check --strict
           test "$("$browser" --version)" = 'Chromium 149.0.7790.0'
-          bash "$harness/capture-linux.sh" "$GITHUB_WORKSPACE/renderer" "$RUNNER_TEMP/advice-three-stills" "$browser"
+          bash "$harness/capture-linux.sh" "$GITHUB_WORKSPACE/renderer" "$RUNNER_TEMP/advice-three-stills" "$browser" swangle
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: advice-three-stills-hosted-482a390d
+          name: advice-swiftshader-hosted-482a390d
           path: |
             ${{ runner.temp }}/advice-three-stills/receipt.json
             ${{ runner.temp }}/advice-three-stills/50/frame.jpg

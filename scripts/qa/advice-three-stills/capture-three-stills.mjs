@@ -6,6 +6,7 @@ import { networkInterfaces, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { admitTipCaptureRenderer } from './admit-capture.mjs';
+import { resolveCaptureGraphics, verifiedSwiftShader, verifyGraphicsLaunch, verifySwiftShaderFiles } from './capture-graphics.mjs';
 import { snapshot } from './capture-page-state.mjs';
 import { prepareSmokeInput, sha256 } from './prepare-smoke-input.mjs';
 
@@ -13,8 +14,10 @@ const sourceSha = '482a390db547fca0734cb7ebc52363e5a6a07d54';
 const officialLinuxSha = '47e823e3a14b431ffa8dc88f97db6a854cd92e04800c01fc765c16a18d393d72';
 const frames = [50, 51, 70];
 const width = 1080, height = 1920;
-const [repositoryArg, outputArg, browserArg, mode = 'parity'] = process.argv.slice(2);
-assert.ok(repositoryArg && outputArg && browserArg && ['parity', 'mac-harness-validation'].includes(mode));
+const [repositoryArg, outputArg, browserArg, mode = 'parity', graphicsArg] = process.argv.slice(2);
+assert.ok(repositoryArg && outputArg && browserArg && process.argv.length <= 7);
+const requestedGl = resolveCaptureGraphics(mode, graphicsArg);
+const chromiumOptions = { gl: requestedGl };
 assert.equal(process.version, 'v22.20.0');
 assert.equal(process.env.OFFLINE_SMOKE_NETWORK_ISOLATED, '1');
 assert.ok(!process.env.DISABLE_FROM_SURFACE);
@@ -32,6 +35,7 @@ assert.equal(git('rev-parse', 'HEAD'), sourceSha);
 assert.equal(git('status', '--porcelain', '--untracked-files=normal'), '');
 const browserSha = sha256(readFileSync(browserExecutable));
 if (mode === 'parity') assert.equal(browserSha, officialLinuxSha);
+const graphicsFiles = requestedGl === 'swangle' ? verifySwiftShaderFiles(browserExecutable) : undefined;
 mkdirSync(output, { mode: 0o700 }); // Refuse a directory containing older evidence.
 
 const require = createRequire(join(repository, 'package.json'));
@@ -111,9 +115,10 @@ async function launchBrowser() {
     return child;
   };
   try {
-    browser = await openBrowser('chrome', { browserExecutable, chromiumOptions: { gl: 'angle' },
+    browser = await openBrowser('chrome', { browserExecutable, chromiumOptions,
       chromeMode: 'headless-shell', forceDeviceScaleFactor: 1, logLevel: 'error' });
     assert.equal(launches.length, 1, 'Expected the instrumented vendor browser launch');
+    verifyGraphicsLaunch(launches[0], requestedGl);
     return launches[0];
   } finally {
     childProcess.spawn = spawn;
@@ -139,6 +144,12 @@ async function mappedBrowserLibraries() {
   });
 }
 
+async function readBrowserGraphics() {
+  const { gpu } = (await browser.connection.send('SystemInfo.getInfo')).value;
+  assert.ok(gpu?.devices?.length && gpu.auxAttributes);
+  return gpu;
+}
+
 try {
   const { root, props, input } = await prepareSmokeInput(repository, scratch);
   const { collectTipV11StaticFiles } = await import(pathToFileURL(join(repository, 'scripts/tip-v11-render-manifest.mjs')).href);
@@ -154,17 +165,21 @@ try {
     puppeteerInstance: browser, timeoutInMilliseconds: 20_000, logLevel: 'error' });
   assert.deepEqual([composition.width, composition.height, composition.fps, composition.durationInFrames],
     [width, height, 30, input.durationInFrames]);
+  const expectedBackend = requestedGl === 'swangle'
+    ? verifiedSwiftShader((await readBrowserGraphics()).auxAttributes) : undefined;
   const captures = [];
   for (const frame of frames) {
     let pair;
     screenshotModule.screenshotTask = async options => {
       assert.equal(pair, undefined, 'Only the selected frame may be captured');
+      if (expectedBackend) assert.deepEqual(verifiedSwiftShader((await readBrowserGraphics()).auxAttributes), expectedBackend);
       pair = await picturePair(options);
+      if (expectedBackend) assert.deepEqual(verifiedSwiftShader((await readBrowserGraphics()).auxAttributes), expectedBackend);
       return pair.jpeg;
     };
     const piped = [];
     await renderFrames({ serveUrl, composition, inputProps: props, puppeteerInstance: browser,
-      imageFormat: 'jpeg', jpegQuality: 80, chromiumOptions: { gl: 'angle' }, concurrency: 3, scale: 1,
+      imageFormat: 'jpeg', jpegQuality: 80, chromiumOptions, concurrency: 3, scale: 1,
       frameRange: [frame, frame], outputDir: null, cancelSignal, timeoutInMilliseconds: 20_000,
       logLevel: 'error', onStart() {}, onFrameUpdate() {}, onArtifact() {},
       onFrameBuffer(bytes, index) { piped.push({ frame: index, sha256: sha256(bytes) }); } });
@@ -181,14 +196,15 @@ try {
     png: { sha256: sha256(pair.png), bytes: pair.png.length, pixels: filePixels(png, 'rgba', width * height * 4) },
     samePageBeforeAfter: true, state: pair.state, captureCommands: pair.commands });
   }
-  const observedGpu = (await browser.connection.send('SystemInfo.getInfo')).value.gpu;
+  const observedGpu = await readBrowserGraphics();
   const browserVersion = (await browser.connection.send('Browser.getVersion')).value;
-  assert.ok(observedGpu?.devices?.length && observedGpu.auxAttributes);
+  if (expectedBackend) assert.deepEqual(verifiedSwiftShader(observedGpu.auxAttributes), expectedBackend);
   if (mode === 'parity') assert.match(browserVersion.product, /\/149\.0\.7790\.0$/u);
-  const receipt = { schema: 'jamm-v11-three-still-capture-v1', mode, syntheticOnly: true, publishable: false,
+  const receipt = { schema: 'jamm-v11-three-still-capture-v2', mode, syntheticOnly: true, publishable: false,
     sourceSha, treeSha: git('rev-parse', 'HEAD^{tree}'), admission, input, inventory, overlayChanges,
     environment: { platform: process.platform, arch: process.arch, node: process.version,
-      requestedGl: 'angle', launchFlags, browser: { sha256: browserSha, version: browserVersion },
+      requestedGl, launchFlags, browser: { sha256: browserSha, version: browserVersion, graphicsFiles },
+      verifiedSwiftShader: expectedBackend,
       bundledFfmpeg: { sha256: sha256(readFileSync(ffmpeg)) },
       preparationTools: Object.fromEntries([['ffmpeg', '-version'], ['ffprobe', '-version'], ['python3', '--version']]
         .map(([tool, option]) => {
