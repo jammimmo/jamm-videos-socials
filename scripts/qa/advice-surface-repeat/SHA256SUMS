@@ -1,0 +1,4 @@
+1fa60c795903d420cc8aa1ebe0121042d615a4a68e2adbf3f2ed506d1af6e09d  ../advice-png-prefix/capture-graphics.mjs
+caca618a57645b7e46cff9d68f1ce27f594c3e7b1ad35c91bdc32672409c033c  ../advice-png-prefix/prepare-smoke-input.mjs
+06f1bb2cac80059b3c4f0e14089d0b5c9647b8c73797ff6b7e3ff5f199df3e84  capture-surface-repeat-linux.sh
+8018e664bc3a008065388b3d83c291390bb547b5a37c2f765cdf9b6926d77a2b  capture-png-repeat.mjs
