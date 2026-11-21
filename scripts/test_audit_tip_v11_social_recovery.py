@@ -10,7 +10,7 @@ import wave
 
 from audit_tip_v11_speech import (
     LOCAL_SPEECH_WINDOW_TIMEOUT_SECONDS, RECOGNITION_TIMEOUT_SECONDS, SAMPLE_RATE,
-    measure_final_french_speech, sha256,
+    SpeechComparisonError, compare_french_segments, french_speech_outcome, measure_final_french_speech, sha256,
 )
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures/tip-v11-final-aac-boundaries.json').read_text())
@@ -261,6 +261,51 @@ class UntimedSocialsTest(unittest.TestCase):
             first, last = [round(t * SAMPLE_RATE) + self.lag for t in (start, end)]
             muted = self.decoded[:first * 2] + bytes((last - first) * 2) + self.decoded[last * 2:]
             self.assertEqual(self.measure(pcm=muted)[1], 0)
+
+    def test_exact_held_point_keeps_other_scene_scores_without_admission(self):
+        from audit_tip_v11_speech import FIXED_SOCIALS_WORDS, ORDINARY_POINT_METHOD
+        samples = [
+            (1328160, 1362240, .991), (1362240, 1362240, .993),
+            (1362240, 1370880, .485), (1370880, 1377600, .746),
+            (1377600, 1381920, .976), (1381920, 1385760, .992),
+            (1385760, 1392480, .999), (1392480, 1398720, .985),
+            (1398720, 1406880, .963), (1406880, 1416000, .994),
+            (1416000, 1420320, .988), (1420320, 1431840, .998),
+            (1431840, 1441440, .998),
+        ]
+        words = list(FIXED_SOCIALS_WORDS)
+        words[2:4] = ['Djam', 'Imo']
+        rows = [('Conseil', 54.1, 54.4, .99), ('utile', 54.4, 54.8, .99), *[
+            (word, start / SAMPLE_RATE, end / SAMPLE_RATE, probability)
+            for word, (start, end, probability) in zip(words, samples)
+        ]]
+        segments = [
+            {'id': 'step1', 'text': 'Conseil utile', 'start': 54, 'end': 55.3},
+            {'id': 'socials', 'text': ' '.join(FIXED_SOCIALS_WORDS), 'start': 55.3, 'end': 60.1},
+        ]
+        pcm = b'\x00\x04' * 1_445_000
+        results = compare_french_segments(segments, rows, 0, ordinary_point_pcm=pcm)
+        self.assertEqual([item['status'] for item in results], ['matched', 'inconclusive'])
+        held = results[1]
+        proof = held['measurement']
+        self.assertEqual((proof['method'], proof['point_samples'], proof['point_words_credited']),
+                         (ORDINARY_POINT_METHOD, [1362240], 0))
+        self.assertEqual((proof['diagnostic_only'], proof['admission_eligible'], proof['protected_names_credited']),
+                         (True, False, 0))
+        self.assertEqual(held['observed_words'], [None] * len(FIXED_SOCIALS_WORDS))
+        outcome = french_speech_outcome(segments, results)
+        self.assertEqual((outcome['status'], outcome['reason']), ('inconclusive', 'ordered_words_unconfirmed'))
+        self.assertEqual(outcome['segments'][0]['status'], 'matched')
+
+        for label, row, column, value in (
+            ('wrong point', 3, 0, 'ici'), ('weak point', 3, 3, .599),
+            ('detached right neighbor', 4, 1, (1362241 / SAMPLE_RATE)),
+        ):
+            changed = [list(item) for item in rows]
+            changed[row][column] = value
+            with self.subTest(case=label), self.assertRaises(SpeechComparisonError) as error:
+                compare_french_segments(segments, changed, 0, ordinary_point_pcm=pcm)
+            self.assertEqual(error.exception.detail['predicate'], 'timestamp_zero_duration')
 
 
 if __name__ == '__main__':
