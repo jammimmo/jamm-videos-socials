@@ -21,7 +21,7 @@ env:
 
 jobs:
   capture:
-    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/diagnose/advice-stills-hosted-20261121' && github.event.created
+    if: github.repository == 'jammimmo/jamm-videos-socials' && github.ref == 'refs/heads/diagnose/advice-stills-hosted-20261121' && (github.event.created || github.event.before == 'c0a7662f9011c104a5e6dc4ecc3e6bb4323792bf')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -55,8 +55,9 @@ jobs:
             sudo apt-get update -qq
             sudo apt-get install -y --no-install-recommends iproute2 unzip
           fi
+          npm_global=$(mktemp "$RUNNER_TEMP/advice-stills-npm-global.XXXXXXXX")
           env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm_config_userconfig=/dev/null \
-            npm_config_globalconfig=/dev/null npm ci --ignore-scripts --no-audit --no-fund
+            npm_config_globalconfig="$npm_global" npm ci --ignore-scripts --no-audit --no-fund
           test -z "$(git status --porcelain --untracked-files=normal)"
       - name: Verify Chromium and capture three stills offline
         shell: bash
