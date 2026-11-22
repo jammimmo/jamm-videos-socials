@@ -35,6 +35,32 @@ test('refuses foreign destinations, revisions and malformed scripts before claim
   assert.throws(() => readTipSourceDispatch(event, { ...env, GITHUB_REF: 'refs/heads/feature' }));
 });
 
+test('accepts an optional opaque dispatch observation id without passing it to qualification', () => {
+  const { event, env } = fixture();
+  const withId = observationId => ({ ...event, client_payload: { ...event.client_payload, observationId } });
+  const id = '10203040-a1b2-4c3d-8e4f-102030405060';
+  assert.deepEqual(readTipSourceDispatch(withId(id), env), readTipSourceDispatch(event, env));
+  for (const invalid of [undefined, null, 42, [], {}, '', `${id}\n`, id.toUpperCase(),
+    id.replace('-4c3d-', '-1c3d-'), event.client_payload.source.postId,
+    event.client_payload.source.hookId, event.client_payload.sourceJob.claimToken, 'Sujet ou contact']) {
+    assert.throws(() => readTipSourceDispatch(withId(invalid), env), /Invalid source dispatch/);
+  }
+  const unrelatedId = { ...event, client_payload: { ...event.client_payload, unrelatedId: id } };
+  assert.throws(() => readTipSourceDispatch(unrelatedId, env), /Invalid source dispatch/);
+});
+
+test('uses only the trusted qualifier dispatch observation id in the public title', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/qualify-social-tip-source.yml', import.meta.url), 'utf8');
+  const runName = /\nrun-name: >-\n\s*\$\{\{([\s\S]*?)\}\}/u.exec(workflow)?.[1];
+  assert.ok(runName);
+  assert.match(runName, /github\.event\.action == 'inspect-jamm-tip-source' && 'Inspect a Jamm advice source'/u);
+  assert.match(runName, /github\.event\.action == 'qualify-jamm-tip-source' && github\.actor_id == '283219208'/u);
+  assert.match(runName, /github\.event\.client_payload\.observationId\s+&& github\.event\.client_payload\.observationId != /u);
+  assert.deepEqual([...runName.matchAll(/\bformat\([^)]*\)/gu)].map(([call]) => call),
+    ["format('Jamm advice source {0}', github.event.client_payload.observationId)"]);
+  assert.match(runName, /\|\| 'Qualify a Jamm advice source'\s*$/u);
+});
+
 test('one acknowledged source start calls the exact Ngor voice once and qualifies its normalized WAV', async () => {
   const { event, env, sourceJob, source, speech, wav } = fixture();
   const scratchRoot = await mkdtemp(join(tmpdir(), 'jamm-source-controller-test-'));

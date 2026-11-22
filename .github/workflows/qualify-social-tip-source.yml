@@ -1,5 +1,19 @@
 name: Qualify Jamm Immo advice source
 
+# GitHub evaluates the title before the runner can validate the payload. Only
+# the established dispatch actor supplies a correlation id in public titles.
+run-name: >-
+  ${{ github.event.action == 'inspect-jamm-tip-source' && 'Inspect a Jamm advice source'
+      || github.event.action == 'qualify-jamm-tip-source' && github.actor_id == '283219208'
+      && github.event.client_payload.contract == 'tip-v11-machine-source-dispatch-v1'
+      && github.event.client_payload.observationId
+      && github.event.client_payload.observationId != github.event.client_payload.sourceJob.id
+      && github.event.client_payload.observationId != github.event.client_payload.sourceJob.claimToken
+      && github.event.client_payload.observationId != github.event.client_payload.source.postId
+      && github.event.client_payload.observationId != github.event.client_payload.source.hookId
+      && format('Jamm advice source {0}', github.event.client_payload.observationId)
+      || 'Qualify a Jamm advice source' }}
+
 on:
   repository_dispatch:
     types: [qualify-jamm-tip-source, inspect-jamm-tip-source]

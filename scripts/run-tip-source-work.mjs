@@ -16,11 +16,15 @@ import { assertTipSourceRuntime } from './tip-runtime.mjs';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const hasExactKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+const observationUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 export function readTipSourceDispatch(event, env) {
   const payload = event?.client_payload;
+  const hasObservationId = Object.hasOwn(payload ?? {}, 'observationId');
+  const keys = ['contract', 'sourceJob', 'source', 'qualifierSha', 'delivery'];
+  if (hasObservationId) keys.push('observationId');
   if (event?.action !== 'qualify-jamm-tip-source'
-    || !hasExactKeys(payload, ['contract', 'sourceJob', 'source', 'qualifierSha', 'delivery'])
+    || !hasExactKeys(payload, keys)
     || payload.contract !== 'tip-v11-machine-source-dispatch-v1'
     || !validSourceJob(payload.sourceJob) || payload.sourceJob.id !== payload.source?.postId
     || typeof payload.qualifierSha !== 'string' || !/^[a-f0-9]{40}$/.test(payload.qualifierSha)
@@ -31,6 +35,10 @@ export function readTipSourceDispatch(event, env) {
     || payload.delivery.narrationUrl !== `${TIP_DELIVERY_ORIGIN}/api/social/advice/source-narration`
     || payload.delivery.qualificationUrl !== `${TIP_DELIVERY_ORIGIN}/api/social/advice/source-qualification`) throw new Error('Invalid source dispatch');
   const source = validateTipSourceJob(payload.source);
+  if (hasObservationId && (typeof payload.observationId !== 'string' || !observationUuid.test(payload.observationId)
+    || [source.postId, source.hookId, payload.sourceJob.claimToken].some(id => id.toLowerCase() === payload.observationId))) {
+    throw new Error('Invalid source dispatch');
+  }
   // Constructing the complete narration now rejects malformed scene input
   // before the durable attempt can be started or a provider can be called.
   const identity = buildSourceScoringInput(source.draft);
