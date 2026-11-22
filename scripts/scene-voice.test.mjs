@@ -41,7 +41,7 @@ test('narrator cache includes the shared profile and context, with no per-scene 
   assert.match(generator, /voiceCacheHash\(tipV11SpokenScript\(script, profile\), args.context, profile\)/);
 });
 
-test('automatic advice sends one exact Ngor V8 request through the pinned SDK', async t => {
+test('automatic advice sends one Dakar voice request with the mixed-language opening through the pinned SDK', async t => {
   const profile = 'tip-v11-fr';
   const sentence = 'Vérifiez chaque document avant de réserver votre prochaine visite immobilière à Dakar.';
   const script = buildTipV11Narration({
@@ -51,6 +51,10 @@ test('automatic advice sends one exact Ngor V8 request through the pinned SDK', 
   const prompt = voicePrompt(spokenScript, '', profile);
   const [direction, passage] = prompt.split('\n\n');
   assert.equal(passage, spokenScript);
+  assert.match(direction, /Speak the French passage with a distinctly pronounced Senegalese accent from Dakar/u);
+  assert.match(direction, /Speak the Arabic and Wolof greetings in that order, exactly as written/u);
+  assert.match(direction, /Finish both before the French advice starts and keep the same voice/u);
+  assert.doesNotMatch(direction, /Bonjour|Salam alikoum|Nanga def/u);
   assert.match(script, /Suivez aussi Jamm Immo sur nos réseaux sociaux/u);
   assert.doesNotMatch(script, /Suivez aussi, Jamm Immo, sur nos réseaux sociaux/u);
   assert.match(spokenScript, /Suivez aussi, Jamm Immo, sur nos réseaux sociaux/u);
@@ -62,8 +66,14 @@ test('automatic advice sends one exact Ngor V8 request through the pinned SDK', 
   assert.equal(tipV11SpokenScript(`${script} ${script}`, profile), `${script} ${script}`);
   assert.equal(tipV11SpokenScript('Suivez aussi Jamm Immo sur nos réseaux sociaux pour retrouver nos prochains conseils.', profile),
     'Suivez aussi Jamm Immo sur nos réseaux sociaux pour retrouver nos prochains conseils.');
-  assert.equal(createHash('sha256').update(direction).digest('hex'),
+  const tourDirection = voicePrompt(`Bonjour. ${spokenScript}`, '', profile).split('\n\n')[0];
+  assert.equal(createHash('sha256').update(tourDirection).digest('hex'),
     'f3f015c3bcf53b58162a94fd357fc612b774897de352586cfce3509afe033265');
+  const previousAdviceCacheKey = createHash('sha256').update(JSON.stringify({
+    version: 2, model: 'gemini-3.1-flash-tts-preview', voice: 'Algenib', sdk: '2.8.0',
+    prompt: `${tourDirection}\n\n${spokenScript}`,
+  })).digest('hex');
+  assert.notEqual(voiceCacheHash(spokenScript, '', profile), previousAdviceCacheKey);
   assert.throws(() => voicePrompt(script, 'Consigne supplémentaire.', profile), /additional context/);
   assert.deepEqual(TIP_V11_VOICE_HTTP_OPTIONS, { timeout: 240_000 });
   const lock = JSON.parse(await readFile(new URL('../package-lock.json', import.meta.url), 'utf8'));
