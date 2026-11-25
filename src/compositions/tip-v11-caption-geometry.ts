@@ -13,6 +13,7 @@ export const MAX_CAPTION_CUES = 100;
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export type TipV11Destination = 'tiktok' | 'instagram' | 'facebook';
+export const TIKTOK_CAPTION_MASK = 'tip-v11-tiktok-caption-20261125-v2';
 type TipV11Layout = {
   left: number;
   top: number;
@@ -27,7 +28,7 @@ const sharedLayout: TipV11Layout = {left: 84, top: 135, scale: .8, captionTop: 1
 // upload limits. TikTok includes extra clearance from the observed iPhone
 // right rail and description. The two Reels layouts require in-app QA.
 const destinationLayouts: Record<TipV11Destination, TipV11Layout> = {
-  tiktok: {left: 68, top: 138, scale: .77, captionTop: 1500, safeBounds: [110, 255, 830, 1420]},
+  tiktok: {left: 92, top: 184, scale: .685, captionTop: 1501, safeBounds: [129, 270, 812, 1340]},
   instagram: {left: 84, top: 140, scale: .84, captionTop: 1490, safeBounds: [130, 265, 910, 1520]},
   facebook: {left: 93, top: 150, scale: .81, captionTop: 1530, safeBounds: [135, 270, 885, 1520]},
 };
@@ -46,7 +47,8 @@ export function tipV11CaptionMask(destination?: TipV11Destination): {id: string;
   if (!layout.safeBounds) throw new Error('Missing V11 destination safe area');
   const top = Math.floor(layout.top + layout.captionTop * layout.scale);
   const [left, , right, bottom] = layout.safeBounds;
-  return {id: `tip-v11-${destination}-caption-20261120-v1`, bounds: [left, top, right, bottom]};
+  const id = destination === 'tiktok' ? TIKTOK_CAPTION_MASK : `tip-v11-${destination}-caption-20261120-v1`;
+  return {id, bounds: [left, top, right, bottom]};
 }
 
 export function geometryArtifactDirectory(runId: string): string {

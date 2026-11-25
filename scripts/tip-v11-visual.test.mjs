@@ -6,7 +6,7 @@ import test from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { fitTipV11Caption, GeneralScene } from '../src/compositions/TipV11Fr.tsx';
-import { CAPTION_GEOMETRY_MASK, captionSampleFrames, containsBounds, pixelBounds, tipV11CaptionMask, tipV11Layout } from '../src/compositions/tip-v11-caption-geometry.ts';
+import { CAPTION_GEOMETRY_MASK, TIKTOK_CAPTION_MASK, captionSampleFrames, containsBounds, pixelBounds, tipV11CaptionMask, tipV11Layout } from '../src/compositions/tip-v11-caption-geometry.ts';
 import { summarizeCaptionGeometry } from './tip-v11-caption-geometry.mjs';
 import { renderTipV11Destinations } from './render-tip-v11-destinations.mjs';
 
@@ -46,6 +46,16 @@ test('destination layouts reserve space for overlays and reject unknown profiles
   }
   assert.ok(layouts[0].safeBounds[2] < layouts[1].safeBounds[2]);
   assert.ok(layouts[0].safeBounds[3] < layouts[1].safeBounds[3]);
+});
+
+test('the TikTok caption mask is raised above the native description and keeps room for the scene', () => {
+  const layout = tipV11Layout('tiktok');
+  assert.deepEqual(tipV11CaptionMask('tiktok'), {
+    id: TIKTOK_CAPTION_MASK, bounds: [129, 1212, 812, 1340],
+  });
+  // The approved template stacks the artwork and captions on the same canvas.
+  assert.ok(layout.captionTop >= 1500);
+  assert.ok(layout.top + (layout.captionTop + 146) * layout.scale < 1340);
 });
 
 test('destination export rules reject duplicates and long Facebook clips before reading audio', async () => {
