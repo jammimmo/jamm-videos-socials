@@ -95,6 +95,24 @@ class BrandCtaEvidenceTest(unittest.TestCase):
         self.assertEqual(metrics['kind'], 'alpha_rgb_mae')
         self.assertGreater(metrics['worst_tile_error_milli'], metrics['mean_error_milli'])
 
+    def test_shorts_whatsapp_uses_red_channel_and_keeps_exact_mask_and_confidence(self):
+        bounds, _, _ = SHORTS_OCR_TARGETS['whatsapp']
+        left, top, right, bottom = bounds
+        count = (right - left) * (bottom - top)
+        rgb = bytes((245, 137, 44)) * count
+        with patch('audit_tip_v11_brand_cta.crop', return_value=rgb), \
+             patch('audit_tip_v11_brand_cta.run') as run_ocr:
+            run_ocr.return_value = tsv([(3, 14, 260, 33, 74.6, 'WhatsApp appels messages')])
+            passed, observed, _ = text_check(None, 'whatsapp', 'fra', shorts=True)
+            self.assertTrue(passed)
+            self.assertEqual(observed, (left + 3, top + 14, left + 263, top + 47))
+            header = f'P5\n{right - left} {bottom - top}\n255\n'.encode()
+            self.assertEqual(run_ocr.call_args.kwargs['data'], header + bytes((245,)) * count)
+            run_ocr.return_value = tsv([(3, 14, 260, 33, 53.2, 'WhatsApp appels messages')])
+            self.assertFalse(text_check(None, 'whatsapp', 'fra', shorts=True)[0])
+            run_ocr.return_value = tsv([(3, 14, 260, 33, 95., 'WhatsApp appels')])
+            self.assertFalse(text_check(None, 'whatsapp', 'fra', shorts=True)[0])
+
     def test_ffmpeg_receives_exact_frames_and_incomplete_output_stays_inconclusive(self):
         with patch('audit_tip_v11_brand_cta.run', return_value=b'bad') as command:
             with self.assertRaisesRegex(ValueError, 'do not match'):

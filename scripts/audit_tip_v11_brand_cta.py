@@ -198,7 +198,12 @@ def text_check(frame, label, language, *, shorts=False):
     left, top, right, bottom = bounds
     pixels = crop(frame, bounds)
     kind = 'P6'
-    if label in ('domain', 'phone'):
+    if shorts and label == 'whatsapp':
+        # The red channel separates the amber label from the blue background
+        # in the smaller Shorts footer. Keep the crop and confidence rule.
+        pixels = pixels[::3]
+        kind = 'P5'
+    elif label in ('domain', 'phone'):
         # Use the same luminance mapping for the two-tone URL and highlighted
         # phone digits. This keeps the URL divider from reading as punctuation
         # without changing the crop or the OCR box coordinates.
