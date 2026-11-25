@@ -21,6 +21,9 @@ test('only reviewed sources request qualifier-parity alignment decoding', () => 
   const reviewed = tipV11AlignmentArguments('n.wav', 's.json', 'a.json', { reviewedSource: true });
   assert.equal(legacy.includes('--reviewed-source'), false);
   assert.equal(reviewed.filter(value => value === '--reviewed-source').length, 1);
+  assert.deepEqual(tipV11AlignmentArguments('n.wav', 's.json', 'a.json', {
+    failureCodePath: '/tmp/code', failureDiagnosticPath: '/tmp/diagnostic',
+  }).slice(-4), ['--failure-code-file', '/tmp/code', '--failure-diagnostic-file', '/tmp/diagnostic']);
 });
 
 test('Ngor tail padding preserves RIFF metadata and the original PCM through the last sample', () => {
