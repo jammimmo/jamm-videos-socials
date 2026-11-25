@@ -10,7 +10,8 @@ import wave
 from audit_tip_v11 import audit
 from audit_tip_v11_speech import (
     ASR_REVISION, CONTRACT, MAX_RECOGNIZED_WORDS, RECOGNITION_TIMEOUT_SECONDS, compare_french_segments,
-    measure_final_french_speech, recognize_final_wav, recognize_with_timeout, sha256, verify_phone_context_samples,
+    measure_final_french_speech, recognize_final_wav, recognize_with_timeout, sha256,
+    verify_hook_samples, verify_phone_context_samples,
 )
 
 
@@ -672,6 +673,42 @@ class V11FinalSpeechTest(unittest.TestCase):
             domain_held = inspect(recognizer, words=[*full[:-1], ('jamimo com', 9.4, 10.8, .97)])
             self.assertEqual(domain_held['status'], 'inconclusive')
             self.assertEqual([item['status'] for item in domain_held['segments']], ['matched', 'inconclusive'])
+
+    def test_opening_hook_uses_the_same_measured_pause_when_the_nominal_cut_is_audible(self):
+        rate, nominal, lag = 24_000, 66_720, 1_024
+        source = [512] * (8 * rate)
+        final = [512] * (8 * rate + lag)
+        source[nominal - 10_080:nominal - 480] = [0] * 9_600
+        final[nominal + lag - 10_800:nominal + lag] = [0] * 10_800
+        decoded = struct.pack(f'<{len(final)}h', *final)
+        chosen = nominal - 4_320 + lag
+        last = 5 * rate + lag
+
+        with TemporaryDirectory() as folder:
+            def verify_clip(path):
+                with wave.open(str(path), 'rb') as audio:
+                    self.assertEqual(audio.readframes(audio.getnframes()), decoded[2 * chosen:2 * last])
+                return [('Il', .2, .5, .94), ('attend', .6, 1, .82)]
+
+            recognize = Mock(side_effect=verify_clip)
+            output = verify_hook_samples(source, decoded, lag, folder, nominal / rate, 5, ['il', 'attend'], recognize)
+            recognize.assert_called_once()
+            self.assertEqual(output['nominal_source_cut_sample'], nominal)
+            self.assertEqual(output['start_sample'], chosen)
+            self.assertEqual(output['end_sample'], last)
+            self.assertEqual(output['source_quiet']['cut_sample'], chosen - lag)
+            self.assertEqual(output['decoded_quiet']['cut_sample'], chosen)
+            self.assertEqual(output['bounded_min_word_probability'], .82)
+
+            for unavailable_final in (
+                source,  # The source pause shifted out of agreement with the decoded delay.
+                [512] * len(final),
+            ):
+                forbidden = Mock()
+                unavailable = struct.pack(f'<{len(unavailable_final)}h', *unavailable_final)
+                self.assertIsNone(verify_hook_samples(source, unavailable, lag, folder, nominal / rate, 5,
+                                                      ['il', 'attend'], forbidden))
+                forbidden.assert_not_called()
 
     def test_neighboring_french_scenes_use_one_exact_partition_without_reusing_brand_words(self):
         scenes = [
