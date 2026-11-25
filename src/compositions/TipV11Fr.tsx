@@ -38,12 +38,17 @@ const fontCss = () => weights.map(weight =>
 ).join('\n');
 
 const framePath = 'M540 24H1056V1896H24V24H540';
+// TikTok's search sits above the frame. Bend in before the right-side
+// controls and close the frame above the account, description and player bar.
+const tiktokFramePath = 'M526 270H872Q908 270 908 306V826C908 886 840 896 840 956V1342Q840 1378 804 1378H142Q106 1378 106 1342V306Q106 270 142 270H526Z';
 
-function ProgressFrame({value}: {value: number}) {
+function ProgressFrame({value, destination}: {value: number; destination?: TipV11Destination}) {
+  const isTikTok = destination === 'tiktok';
+  const path = isTikTok ? tiktokFramePath : framePath;
   return (
-    <svg width="1080" height="1920" style={{position: 'absolute', inset: 0, pointerEvents: 'none'}}>
-      <path d={framePath} fill="none" stroke="#6789C7" strokeWidth="2" opacity=".36" />
-      <path d={framePath} pathLength="1" fill="none" stroke={orange} strokeWidth="6"
+    <svg width="1080" height="1920" aria-hidden="true" style={{position: 'absolute', inset: 0, pointerEvents: 'none'}}>
+      <path d={path} fill="none" stroke="#6789C7" strokeWidth={isTikTok ? 3 : 2} opacity={isTikTok ? .58 : .36} />
+      <path d={path} pathLength="1" fill="none" stroke={orange} strokeWidth="6"
         strokeDasharray={`${value} 1`} strokeLinecap="round" />
     </svg>
   );
@@ -268,7 +273,7 @@ export const TipV11Fr: React.FC<TipV11FrProps> = ({
         {caption && <TipCaption text={caption.text} fontsReady={fontsReady} sample={geometrySample} viewport={viewport}
           top={layout.captionTop} safeBounds={destination ? captionMask.bounds : undefined} mask={captionMask.id} />}
       </AbsoluteFill>
-      <ProgressFrame value={progress(frame / Math.max(1, durationInFrames - 1))} />
+      <ProgressFrame value={progress(frame / Math.max(1, durationInFrames - 1))} destination={destination} />
       {audio && <Audio src={staticFile(audio)} />}
     </AbsoluteFill>
   );
