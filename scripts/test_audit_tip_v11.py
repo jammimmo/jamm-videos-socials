@@ -9,10 +9,40 @@ import wave
 from align_tip_v11 import ASR_REVISION, GREETING_WINDOW_EVIDENCE, PHONE_WINDOW_EVIDENCE, align, align_with_signature_retry, tokens
 from align_tip_v11 import GREETING_POSITION_EVIDENCE, GREETING_VAD_SHA256
 from audit_tip_v11 import (
-    AUDIO_PRESERVATION_WINDOW, CAPTION_SCENES, SAMPLE_RATE, bind_manifest, measure_audio,
-    measure_audio_preservation, normalized_ocr_text, sha256, verify_alignment,
+    AUDIO_PRESERVATION_WINDOW, CAPTION_SCENES, SAMPLE_RATE, SHORTS_CAPTION_HEIGHT, SHORTS_CAPTION_WIDTH,
+    bind_manifest, emphasize_shorts_word_gap, ink_ranges, measure_audio, measure_audio_preservation,
+    normalized_ocr_text, sha256, verify_alignment,
 )
 from test_align_tip_v11 import SEGMENTS, speech
+
+
+class ShortsCaptionPreprocessingTest(unittest.TestCase):
+    @staticmethod
+    def image(gap):
+        width, height = SHORTS_CAPTION_WIDTH, SHORTS_CAPTION_HEIGHT
+        rows = [bytearray([22]) * width for _ in range(height)]
+        # A bright decoration and three sets of glyph pixels. The space after
+        # the second glyph is the only possible short-word separation.
+        for row in rows:
+            row[7:11] = bytes([190]) * 4
+        for row in rows[20:45]:
+            for left, right in [(23, 28), (32, 37), (37 + gap, 54 + gap)]:
+                row[left:right] = bytes([240]) * (right - left)
+        return f'P5\n{width} {height}\n255\n'.encode() + b''.join(rows)
+
+    def test_changes_only_a_measured_gap_and_excludes_the_fixed_decoration(self):
+        transformed = emphasize_shorts_word_gap(self.image(9))
+        self.assertIsNotNone(transformed)
+        _, size, _, pixels = transformed.split(b'\n', 3)
+        width, height = map(int, size.split())
+        self.assertEqual((width, height), (728, 110))
+        row = pixels[32 * width:33 * width]
+        self.assertEqual(list(ink_ranges(value == 0 for value in row)), [(17, 22), (26, 31), (46, 63)])
+
+    def test_ordinary_letter_kerning_is_not_word_spacing(self):
+        self.assertIsNone(emphasize_shorts_word_gap(self.image(4)))
+        self.assertNotEqual(normalized_ocr_text('caption_step', 'Motlié'),
+                            normalized_ocr_text('caption_step', 'Mot lié'))
 
 
 class V11FinalEvidenceTest(unittest.TestCase):

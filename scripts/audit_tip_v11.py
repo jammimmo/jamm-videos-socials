@@ -5,7 +5,7 @@ from array import array
 import base64
 import hashlib
 import io
-from itertools import zip_longest
+from itertools import groupby, zip_longest
 import json
 import math
 import os
@@ -448,6 +448,51 @@ def high_contrast_caption(image, threshold, size=(CAPTION_WIDTH, CAPTION_HEIGHT)
     return b'\n'.join((signature, shape, depth, pixels.translate(lookup)))
 
 
+def ink_ranges(active):
+    start = 0
+    for ink, run in groupby(active):
+        end = start + sum(1 for _ in run)
+        if ink:
+            yield start, end
+        start = end
+
+
+def emphasize_shorts_word_gap(image):
+    """Widen a measured blank before OCR without consulting the expected words."""
+    width, height = SHORTS_CAPTION_WIDTH, SHORTS_CAPTION_HEIGHT
+    binary = high_contrast_caption(image, 175, (width, height)).split(b'\n', 3)[3]
+    # The first 18 pixels end at x=140, inside the left decoration and before
+    # the layout's text begins at x≈143.
+    rows = [binary[y * width + 18:(y + 1) * width] for y in range(height)]
+    lines = list(ink_ranges(row.count(0) >= 2 for row in rows))
+    if not 1 <= len(lines) <= 2 or any(not 12 <= bottom - top <= 38 for top, bottom in lines):
+        return None
+    seams = {}
+    for top, bottom in lines:
+        columns = list(ink_ranges(0 in column for column in zip(*rows[top:bottom])))
+        if len(columns) < 2 or columns[0][0] > 16:
+            continue
+        start = columns[0][0]
+        # Only a narrow leading word with one clearly separate physical gap.
+        # Intra-word kerning is intentionally too small to enter this range.
+        gaps = [(left, right) for (_, left), (right, _) in zip(columns, columns[1:])
+                if 8 <= left - start <= 26 and 8 <= right - left <= 16]
+        if len(gaps) == 1:
+            left, right = gaps[0]
+            seams.update({y: (left + right) // 2 for y in range(top, bottom)})
+    if not seams:
+        return None
+    extra = b'\xff' * 6
+    border = b'\xff' * 12
+    row_width = width - 18 + len(extra) + 2 * len(border)
+    edges = b'\xff' * (row_width * len(border))
+    framed = []
+    for y, row in enumerate(rows):
+        seam = seams.get(y, len(row))
+        framed.append(border + row[:seam] + extra + row[seam:] + border)
+    return f'P5\n{row_width} {height + 2 * len(border)}\n255\n'.encode() + edges + b''.join(framed) + edges
+
+
 def frame_at(start, end, portion=.5):
     return round((start + (end - start) * portion) * FPS)
 
@@ -488,8 +533,12 @@ def measure_text(video, alignment, language, *, shorts=False):
         attempts = []
         variants = [('grayscale', image)]
         if identity.startswith('caption_'):
-            variants.extend((f'caption_threshold_{threshold}', high_contrast_caption(image, threshold, caption_size))
-                            for threshold in (90, 190))
+            spaced = emphasize_shorts_word_gap(image) if shorts else None
+            variants.extend([
+                ('caption_threshold_90', high_contrast_caption(image, 90, caption_size)) if spaced is None
+                else ('shorts_measured_word_gap', spaced),
+                ('caption_threshold_190', high_contrast_caption(image, 190, caption_size)),
+            ])
         for variant, pixels in variants:
             recognized = command('tesseract', 'stdin', 'stdout', '-l', language, '--psm', str(psm), data=pixels)
             actual_text = normalized_ocr_text(identity, recognized.decode('utf-8'))
