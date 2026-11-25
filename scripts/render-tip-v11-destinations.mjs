@@ -13,7 +13,7 @@ const maxSeconds = { tiktok: 120, instagram: 120, facebook: 90 };
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
 export async function renderTipV11Destinations({ root, outputDirectory, props, selectedDestinations = destinations, deadline }) {
-  const { captionGeometryRunId: _sharedGeometryRun, ...baseProps } = props;
+  const { captionGeometryRunId: _masterGeometryRun, destination: _masterDestination, ...baseProps } = props;
   if (!selectedDestinations.length || new Set(selectedDestinations).size !== selectedDestinations.length
     || selectedDestinations.some(destination => !destinations.includes(destination))) {
     throw new Error('Expected one or more distinct supported destinations');

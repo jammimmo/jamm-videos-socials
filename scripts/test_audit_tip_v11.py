@@ -301,6 +301,19 @@ class V11FinalEvidenceTest(unittest.TestCase):
                          {'narration_text_sha256': mix}, {'props_sha256': mix}):
             with self.assertRaisesRegex(ValueError, 'differs from the audited render inputs'):
                 bind_manifest(json.dumps(manifest | override).encode(), *args)
+        shorts_props = json.dumps(props | {'destination': 'youtube'}).encode()
+        shorts = manifest | {'props_sha256': sha256(shorts_props), 'master_visual_profile': 'youtube-shorts-v1',
+                             'caption_geometry': {'status': 'matched',
+                                                  'mask': 'tip-v11-youtube-shorts-caption-20261125-v1',
+                                                  'mask_bounds': [76, 1286, 838, 1372]}}
+        self.assertEqual(bind_manifest(json.dumps(shorts).encode(), shorts_props, *args[1:])['master_visual_profile'],
+                         'youtube-shorts-v1')
+        for invalid in (None, 'shared', 'instagram'):
+            with self.subTest(profile=invalid), self.assertRaisesRegex(ValueError, 'visual profile'):
+                bind_manifest(json.dumps(shorts | {'master_visual_profile': invalid}).encode(), shorts_props, *args[1:])
+        with self.assertRaisesRegex(ValueError, 'visual profile'):
+            bind_manifest(json.dumps(shorts | {'caption_geometry': {'status': 'inconclusive'}}).encode(),
+                          shorts_props, *args[1:])
 
 
 if __name__ == '__main__':

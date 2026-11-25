@@ -7,7 +7,7 @@ import { tipV11SpokenScript } from './generate-gemini-voiceover.mjs';
 import { voiceCacheHash } from './voice-profile.mjs';
 import { tipV11Effects } from './tip-v11-effects.mjs';
 import { buildTipV11RenderManifest, collectTipV11StaticFiles } from './tip-v11-render-manifest.mjs';
-import { geometryArtifactDirectory } from '../src/compositions/tip-v11-caption-geometry.ts';
+import { geometryArtifactDirectory, YOUTUBE_SHORTS_PROFILE } from '../src/compositions/tip-v11-caption-geometry.ts';
 import { summarizeCaptionGeometry } from './tip-v11-caption-geometry.mjs';
 import { isReviewedPcm, NORMALIZED_NARRATION_PROCESSING, readStagedPrivateReviewedNarration, reviewedPcmData, stageReviewedNarration } from './tip-v11-reviewed-narration.mjs';
 
@@ -136,10 +136,14 @@ export async function normalizeTipV11Narration(root, raw, normalizedPath, option
 }
 
 export async function renderTipV11(spec, {
-  root, assistantEnabled = false, localNarration, localWordTimings,
+  root, assistantEnabled = false, localNarration, localWordTimings, offlineMasterDestination,
 } = {}) {
   if (!root) throw new Error('Renderer root is required');
   if (localWordTimings && !localNarration) throw new Error('Local word timings require local narration');
+  if (offlineMasterDestination !== undefined && (offlineMasterDestination !== 'youtube'
+    || !localNarration || !localWordTimings)) {
+    throw new Error('The Shorts master preview requires a synthetic local narration and word timings');
+  }
   if (spec.reviewedNarration && (localNarration || assistantEnabled)) throw new Error('Reviewed V11 narration requires the approved standard scenes');
   const plan = buildTipV11Narration(spec, { assistantEnabled });
   const outDir = resolve(root, 'out/batch');
@@ -200,6 +204,7 @@ export async function renderTipV11(spec, {
     assistantEnabled: plan.assistantEnabled,
     visualTopic: plan.visualTopic,
     phoneGroups: alignment.phoneGroups,
+    ...(offlineMasterDestination && { destination: offlineMasterDestination }),
   };
   await writeFile(propsPath, JSON.stringify(props), { mode: 0o600 });
   let captionGeometry;
@@ -234,6 +239,7 @@ export async function renderTipV11(spec, {
       plan, sourceScriptSha256: spec.sourceScriptSha256, voiceSource: narration.source, inventory, raw, captionGeometry,
       normalized: normalizedPath, mix: resolve(root, 'public', mixed), alignment: alignPath, props: propsPath, mp4: outFile,
       reviewedNarrationSha256: spec.reviewedNarration?.sha256,
+      masterVisualProfile: offlineMasterDestination === 'youtube' ? YOUTUBE_SHORTS_PROFILE : undefined,
     });
     await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`, { flag: 'wx', mode: 0o600 });
   } catch {

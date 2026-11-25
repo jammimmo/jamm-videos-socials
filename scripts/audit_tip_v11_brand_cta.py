@@ -12,10 +12,17 @@ import unicodedata
 CONTRACT = 'tip-v11-final-brand-cta-v1'
 MASK = 'tip-v11-observed-short-feed-brand-20261114-v1'
 MASK_BOUNDS = (120, 255, 870, 1511)
+SHORTS_PROFILE = 'youtube-shorts-v1'
+SHORTS_CAPTION_MASK = 'tip-v11-youtube-shorts-caption-20261125-v1'
+SHORTS_CAPTION_BOUNDS = (76, 1286, 838, 1372)
+SHORTS_BRAND_MASK = 'tip-v11-youtube-shorts-brand-20261125-v1'
+SHORTS_BRAND_BOUNDS = (76, 298, 838, 1372)
 LOGO_SHA256 = '15f03f17e635c11c1d0c8087ee12e9f1176668c4f61c89ddc05644c740f4c34e'
 WIDTH, HEIGHT, FPS = 1080, 1920, 30
 LOGO_WIDTH, LOGO_HEIGHT = 176, 78
 LOGO_CROP = (126, 250, 346, 370)
+SHORTS_LOGO_SIZE = (161, 72)
+SHORTS_LOGO_CROP = (114, 290, 320, 401)
 MAX_LOGO_MEAN_ERROR_MILLI = 22000
 MAX_LOGO_TILE_ERROR_MILLI = 35000
 MIN_OCR_CONFIDENCE_MILLI = 60000
@@ -29,6 +36,18 @@ OCR_TARGETS = {
     'brand_socials': ((132, 1056, 518, 1100), 7, 'Retrouvez Jamm Immo'),
     'brand_signature': ((132, 1056, 518, 1100), 7, 'Retrouvez Jamm Immo'),
 }
+
+
+def shorts_outro_bounds(bounds):
+    # Map the audited ROI from the shared transform onto the Shorts transform.
+    x1, y1, x2, y2 = bounds
+    scale = .73 / .8
+    return (math.floor(78 + (x1 - 84) * scale), math.floor(184 + (y1 - 135) * scale),
+            math.ceil(78 + (x2 - 84) * scale), math.ceil(184 + (y2 - 135) * scale))
+
+
+SHORTS_OCR_TARGETS = {label: (shorts_outro_bounds(bounds), psm, expected)
+                      for label, (bounds, psm, expected) in OCR_TARGETS.items()}
 FRAME_PLAN = (
     ('logo_intro', 'greeting', 0),
     ('cta_heading', 'domain', .4), ('domain', 'domain', .4),
@@ -87,25 +106,26 @@ def crop(frame, bounds):
     return b''.join(frame[(y * WIDTH + left) * 3:(y * WIDTH + right) * 3] for y in range(top, bottom))
 
 
-def opaque_logo_samples(logo_path):
+def opaque_logo_samples(logo_path, size=(LOGO_WIDTH, LOGO_HEIGHT)):
     with logo_path.open('rb') as source:
         original = source.read(2 * 1024 * 1024 + 1)
     if len(original) > 2 * 1024 * 1024 or digest(original) != LOGO_SHA256:
         raise ValueError('unrecognized logo asset')
+    width, height = size
     rgba = run('ffmpeg', ['-v', 'error', '-f', 'image2pipe', '-c:v', 'png', '-i', '-',
-                          '-vf', f'scale={LOGO_WIDTH}:{LOGO_HEIGHT}:flags=lanczos', '-frames:v', '1',
+                          '-vf', f'scale={width}:{height}:flags=lanczos', '-frames:v', '1',
                           '-f', 'rawvideo', '-pix_fmt', 'rgba', '-threads', '1', '-'], data=original)
-    if len(rgba) != LOGO_WIDTH * LOGO_HEIGHT * 4:
+    if len(rgba) != width * height * 4:
         raise ValueError('unexpected logo template shape')
     painted, samples = [], []
-    for row in range(LOGO_HEIGHT):
-        for column in range(LOGO_WIDTH):
-            offset = (row * LOGO_WIDTH + column) * 4
+    for row in range(height):
+        for column in range(width):
+            offset = (row * width + column) * 4
             red, green, blue, alpha = rgba[offset:offset + 4]
             if alpha >= 20:
                 painted.append((column, row))
             if column % 3 == 0 and alpha >= 240:
-                bucket = (row // (LOGO_HEIGHT // 2)) * 4 + column // (LOGO_WIDTH // 4)
+                bucket = row * 2 // height * 4 + column * 4 // width
                 samples.append((column, row, red, green, blue, bucket))
     if len(samples) < 500:
         raise ValueError('logo template lacks opaque landmarks')
@@ -114,9 +134,11 @@ def opaque_logo_samples(logo_path):
     return samples, bounds
 
 
-def logo_check(frame, samples, painted):
-    target = crop(frame, LOGO_CROP)
-    left, top, right, _ = LOGO_CROP
+def logo_check(frame, samples, painted, *, shorts=False):
+    logo_crop = SHORTS_LOGO_CROP if shorts else LOGO_CROP
+    mask = SHORTS_BRAND_BOUNDS if shorts else MASK_BOUNDS
+    target = crop(frame, logo_crop)
+    left, top, right, _ = logo_crop
     stride = right - left
     def errors(x, y):
         totals, counts = [0] * 8, [0] * 8
@@ -129,9 +151,11 @@ def logo_check(frame, samples, painted):
         return mean, worst
     # The observed asset box begins at (137,263). Search only its pinned local
     # vicinity. Compare several parts of the pattern to catch partial occlusion.
-    mean, worst, x, y = min((*errors(x, y), x, y) for x in range(7, 16) for y in range(9, 18))
+    x_range = range(9, 19) if shorts else range(7, 16)
+    y_range = range(8, 18) if shorts else range(9, 18)
+    mean, worst, x, y = min((*errors(x, y), x, y) for x in x_range for y in y_range)
     bounds = (left + x + painted[0], top + y + painted[1], left + x + painted[2], top + y + painted[3])
-    passed = inside(bounds, MASK_BOUNDS) and mean <= MAX_LOGO_MEAN_ERROR_MILLI and worst <= MAX_LOGO_TILE_ERROR_MILLI
+    passed = inside(bounds, mask) and mean <= MAX_LOGO_MEAN_ERROR_MILLI and worst <= MAX_LOGO_TILE_ERROR_MILLI
     return passed, bounds, {'kind': 'alpha_rgb_mae', 'mean_error_milli': mean, 'worst_tile_error_milli': worst}
 
 
@@ -143,7 +167,7 @@ def text_tokens(label, text):
     return ' '.join(re.findall(r'[^\W_]+', text))
 
 
-def check_tsv(label, bounds, expected, raw):
+def check_tsv(label, bounds, expected, raw, *, mask=MASK_BOUNDS):
     left, top, right, bottom = bounds
     words, boxes, confidences = [], [], []
     for row in csv.DictReader(io.StringIO(raw.decode('utf8')), delimiter='\t'):
@@ -164,13 +188,13 @@ def check_tsv(label, bounds, expected, raw):
     actual = text_tokens(label, ' '.join(words))
     expected = text_tokens(label, expected)
     minimum = min(confidences, default=0)
-    passed = actual == expected and union is not None and inside(union, MASK_BOUNDS) and minimum >= MIN_OCR_CONFIDENCE_MILLI
+    passed = actual == expected and union is not None and inside(union, mask) and minimum >= MIN_OCR_CONFIDENCE_MILLI
     return passed, union, {'kind': 'exact_ocr', 'expected_sha256': digest(expected.encode()),
                             'observed_sha256': digest(actual.encode()), 'min_confidence_milli': minimum}
 
 
-def text_check(frame, label, language):
-    bounds, psm, expected = OCR_TARGETS[label]
+def text_check(frame, label, language, *, shorts=False):
+    bounds, psm, expected = (SHORTS_OCR_TARGETS if shorts else OCR_TARGETS)[label]
     left, top, right, bottom = bounds
     pixels = crop(frame, bounds)
     kind = 'P6'
@@ -185,24 +209,25 @@ def text_check(frame, label, language):
     raw = run('tesseract', ['stdin', 'stdout', '-l', language, '--psm', str(psm), 'tsv'], data=pixels, timeout=12)
     if len(raw) > 8192:
         raise ValueError('excessive visibility OCR output')
-    return check_tsv(label, bounds, expected, raw)
+    return check_tsv(label, bounds, expected, raw, mask=SHORTS_BRAND_BOUNDS if shorts else MASK_BOUNDS)
 
 
-def measure_final_brand_cta(video, alignment, logo_path, language):
-    base = {'contract': CONTRACT, 'source': 'decoded_mp4_frames', 'mask': MASK, 'mask_bounds': MASK_BOUNDS,
+def measure_final_brand_cta(video, alignment, logo_path, language, *, shorts=False):
+    mask, bounds = (SHORTS_BRAND_MASK, SHORTS_BRAND_BOUNDS) if shorts else (MASK, MASK_BOUNDS)
+    base = {'contract': CONTRACT, 'source': 'decoded_mp4_frames', 'mask': mask, 'mask_bounds': bounds,
             'logo_asset_sha256': LOGO_SHA256, 'language': language, 'status': 'inconclusive', 'checks': []}
     try:
         plan = sample_plan(alignment)
         if not plan:
             return {**base, 'reason': 'unsupported_assistant_outro'}
         frames = decode_frames(video, [frame for _, frame in plan])
-        samples, logo_bounds = opaque_logo_samples(logo_path)
+        samples, logo_bounds = opaque_logo_samples(logo_path, SHORTS_LOGO_SIZE if shorts else (LOGO_WIDTH, LOGO_HEIGHT))
         results = []
         for label, frame in plan:
             if label.startswith('logo_'):
-                passed, bounds, metric = logo_check(frames[frame], samples, logo_bounds)
+                passed, bounds, metric = logo_check(frames[frame], samples, logo_bounds, shorts=shorts)
             else:
-                passed, bounds, metric = text_check(frames[frame], label, language)
+                passed, bounds, metric = text_check(frames[frame], label, language, shorts=shorts)
             results.append({'label': label, 'frame': frame, 'status': 'matched' if passed else 'inconclusive',
                             'bounds': bounds, 'metric': metric})
         return {**base, 'checks': results,

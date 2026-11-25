@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 from audit_tip_v11 import audit
 from audit_tip_v11_brand_cta import (
-    CONTRACT, FRAME_PLAN, HEIGHT, MASK, OCR_TARGETS, WIDTH, check_tsv, decode_frames, logo_check, measure_final_brand_cta,
-    sample_plan, text_check,
+    CONTRACT, FRAME_PLAN, HEIGHT, MASK, OCR_TARGETS, SHORTS_BRAND_BOUNDS, SHORTS_BRAND_MASK, SHORTS_OCR_TARGETS,
+    WIDTH, check_tsv, decode_frames, inside, logo_check, measure_final_brand_cta, sample_plan, text_check,
 )
 
 
@@ -22,6 +22,13 @@ def fixture_alignment():
 
 
 class BrandCtaEvidenceTest(unittest.TestCase):
+    def test_shorts_keeps_all_ocr_targets_inside_its_own_brand_mask(self):
+        self.assertTrue(all(inside(bounds, SHORTS_BRAND_BOUNDS) for bounds, _, _ in SHORTS_OCR_TARGETS.values()))
+        with patch('audit_tip_v11_brand_cta.decode_frames', side_effect=ValueError('fixture')):
+            result = measure_final_brand_cta('fixture.mp4', fixture_alignment(), Path('unread.png'), 'fra', shorts=True)
+        self.assertEqual((result['mask'], result['mask_bounds'], result['status']),
+                         (SHORTS_BRAND_MASK, SHORTS_BRAND_BOUNDS, 'inconclusive'))
+
     def test_samples_only_the_fixed_intro_and_fully_visible_outro_windows(self):
         alignment = fixture_alignment()
         plan = sample_plan(alignment)

@@ -11,6 +11,7 @@ import { buildTipV11Narration } from './tip-v11-contract.mjs';
 import { decodedTipMediaFingerprints } from './tip-decoded-media-fingerprint.mjs';
 import { renderTipV11 } from './render-tip-v11.mjs';
 import { renderTipV11Destinations } from './render-tip-v11-destinations.mjs';
+import { tipV11CaptionMask, YOUTUBE_SHORTS_PROFILE } from '../src/compositions/tip-v11-caption-geometry.ts';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const forbiddenCredentials = [
@@ -104,6 +105,7 @@ async function prepareScratchRoot(scratch) {
 
 async function main() {
   assertIsolatedProcess();
+  const shortsMaster = process.argv.slice(2).includes('--youtube-shorts-master');
   const scratch = await mkdtemp(join(tmpdir(), 'jamm-offline-render-smoke-'));
   let receipt;
   try {
@@ -121,6 +123,7 @@ async function main() {
 
     const video = await renderTipV11(fixture, {
       root, localNarration: narration, localWordTimings: transcript,
+      ...(shortsMaster && { offlineMasterDestination: 'youtube' }),
     });
     const output = join(root, 'out', 'batch');
     const [alignment, manifest, media, props, videoStat] = await Promise.all([
@@ -137,6 +140,11 @@ async function main() {
     assert.equal(manifest.voice.source, 'fixture');
     assert.equal(manifest.source_script_sha256, fixture.sourceScriptSha256);
     assert.equal(manifest.caption_geometry?.status, 'matched');
+    const masterMask = tipV11CaptionMask(shortsMaster ? 'youtube' : undefined);
+    assert.equal(manifest.caption_geometry.mask, masterMask.id);
+    assert.deepEqual(manifest.caption_geometry.mask_bounds, masterMask.bounds);
+    assert.equal(manifest.master_visual_profile, shortsMaster ? YOUTUBE_SHORTS_PROFILE : undefined);
+    assert.equal(props.destination, shortsMaster ? 'youtube' : undefined);
     assert.equal(media.template, fixture.template);
     assert.equal(media.reviewRequired, true);
     assert.equal(media.width, 1080);
@@ -198,6 +206,11 @@ async function main() {
       audioBitrate: Number(audio.bit_rate), closedGopKeyframes: keyframes.length, closedGopSeconds: 3,
       ...decodedTipMediaFingerprints(video),
       mediaSha256: manifest.media_sha256, retainedArtifact: false,
+      ...(shortsMaster && {
+        masterVisualProfile: manifest.master_visual_profile,
+        masterCaptionMask: masterMask.id,
+        masterCaptionMaskBounds: masterMask.bounds,
+      }),
     };
     if (process.argv.slice(2).includes('--destination-layouts')) {
       const layouts = await renderTipV11Destinations({

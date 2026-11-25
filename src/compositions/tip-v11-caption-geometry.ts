@@ -12,7 +12,10 @@ export const FRAME_RATE = 30;
 export const MAX_CAPTION_CUES = 100;
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
-export type TipV11Destination = 'tiktok' | 'instagram' | 'facebook';
+export type TipV11Destination = 'tiktok' | 'instagram' | 'facebook' | 'youtube';
+export const YOUTUBE_SHORTS_PROFILE = 'youtube-shorts-v1';
+export const YOUTUBE_SHORTS_CAPTION_MASK = 'tip-v11-youtube-shorts-caption-20261125-v1';
+export const YOUTUBE_SHORTS_SAFE_BOUNDS: Bounds = [76, 298, 838, 1372];
 export const TIKTOK_CAPTION_MASK = 'tip-v11-tiktok-caption-20261125-v2';
 type TipV11Layout = {
   left: number;
@@ -31,11 +34,13 @@ const destinationLayouts: Record<TipV11Destination, TipV11Layout> = {
   tiktok: {left: 92, top: 184, scale: .685, captionTop: 1501, safeBounds: [129, 270, 812, 1340]},
   instagram: {left: 84, top: 140, scale: .84, captionTop: 1490, safeBounds: [130, 265, 910, 1520]},
   facebook: {left: 93, top: 150, scale: .81, captionTop: 1530, safeBounds: [135, 270, 885, 1520]},
+  // Organic Shorts guide, with extra space inside the top, right and bottom margins.
+  youtube: {left: 78, top: 184, scale: .73, captionTop: 1510, safeBounds: YOUTUBE_SHORTS_SAFE_BOUNDS},
 };
 
 export function tipV11Layout(destination?: TipV11Destination): TipV11Layout {
   if (destination === undefined) return sharedLayout;
-  if (destination === 'tiktok' || destination === 'instagram' || destination === 'facebook') {
+  if (destination === 'tiktok' || destination === 'instagram' || destination === 'facebook' || destination === 'youtube') {
     return destinationLayouts[destination];
   }
   throw new Error('Unknown V11 video destination');
@@ -47,7 +52,9 @@ export function tipV11CaptionMask(destination?: TipV11Destination): {id: string;
   if (!layout.safeBounds) throw new Error('Missing V11 destination safe area');
   const top = Math.floor(layout.top + layout.captionTop * layout.scale);
   const [left, , right, bottom] = layout.safeBounds;
-  const id = destination === 'tiktok' ? TIKTOK_CAPTION_MASK : `tip-v11-${destination}-caption-20261120-v1`;
+  const masks = { tiktok: TIKTOK_CAPTION_MASK, youtube: YOUTUBE_SHORTS_CAPTION_MASK };
+  const id = destination === 'tiktok' || destination === 'youtube'
+    ? masks[destination] : `tip-v11-${destination}-caption-20261120-v1`;
   return {id, bounds: [left, top, right, bottom]};
 }
 
