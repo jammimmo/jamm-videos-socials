@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import { deliverTipVideo } from './deliver-tip-video.mjs';
-import { deliverTipFailure } from './deliver-tip-failure.mjs';
+import { canonicalVideoDiagnostic, deliverTipFailure } from './deliver-tip-failure.mjs';
 
 const jobId = '00000000-0000-4000-8000-000000000011';
 const attempt = '00000000-0000-4000-8000-000000000022';
@@ -160,6 +163,65 @@ test('terminal failure retries the unchanged signed callback after transport los
     assert.equal(options.body, undefined);
     assert.deepEqual(options.headers, { Authorization: 'Bearer ' + token, 'X-Job-Id': jobId, 'X-Error': failure });
   }
+});
+
+test('eligible signature failure retries the same closed diagnostic packet', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'jamm-tip-failure-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, 'diagnostic.json');
+  const receipt = { version: 1, stage: 'render', code: 'signature_retry_insufficient', checks: [{
+    key: 'audio_signature_words_recognized', actual: 2, threshold: 3, relation: 'gte',
+  }] };
+  await writeFile(path, JSON.stringify(receipt) + '\n', { mode: 0o600 });
+  const requests = [];
+  const result = await deliverTipFailure(failure, { ...env, TIP_VIDEO_DIAGNOSTIC_FILE: path }, {
+    request: async (_target, options) => {
+      requests.push(options.headers);
+      if (requests.length < 3) return new Response(null, { status: 503 });
+      return Response.json(failed);
+    },
+    sleep: async () => {},
+  });
+  assert.equal(result, 'recorded');
+  assert.equal(requests.length, 3);
+  const expected = '{"version":1,"stage":"render","code":"signature_retry_insufficient",'
+    + '"checks":[{"key":"audio_signature_words_recognized","actual":2,"threshold":3,"relation":"gte"}]}';
+  for (const headers of requests) {
+    assert.equal(headers['X-Video-Diagnostic'], expected);
+    assert.equal(headers['X-Error'], failure);
+  }
+});
+
+test('diagnostic receipt is closed, count-bounded and falls back to the compatible plain failure callback', async t => {
+  const base = actual => ({ version: 1, stage: 'render', code: 'signature_retry_insufficient', checks: [{
+    key: 'audio_signature_words_recognized', actual, threshold: 3, relation: 'gte',
+  }] });
+  for (const actual of [0, 1, 2]) {
+    assert.equal(JSON.parse(canonicalVideoDiagnostic(failure, base(actual))).checks[0].actual, actual);
+  }
+  const initialFailure = 'V11 speech alignment failed (signature_evidence_insufficient); GitHub run 1';
+  assert.equal(JSON.parse(canonicalVideoDiagnostic(initialFailure, {
+    ...base(1), code: 'signature_evidence_insufficient',
+  })).code, 'signature_evidence_insufficient');
+  for (const invalid of [base(3), base(-1), { ...base(2), rawTranscript: 'private' },
+    { ...base(2), code: 'signature_evidence_insufficient' },
+    { ...base(2), checks: [{ ...base(2).checks[0], threshold: 2 }] }]) {
+    assert.equal(canonicalVideoDiagnostic(failure, invalid), null);
+  }
+  assert.equal(canonicalVideoDiagnostic(failure.replace('run 123', 'run 0'), base(2)), null);
+
+  const directory = await mkdtemp(join(tmpdir(), 'jamm-tip-failure-fallback-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, 'diagnostic.json');
+  await writeFile(path, JSON.stringify({ ...base(2), code: 'signature_evidence_insufficient' }));
+  let observed;
+  assert.equal(await deliverTipFailure(failure, { ...env, TIP_VIDEO_DIAGNOSTIC_FILE: path }, {
+    request: async (_target, options) => {
+      observed = options.headers;
+      return Response.json(failed);
+    },
+  }), 'recorded');
+  assert.deepEqual(observed, { Authorization: 'Bearer ' + token, 'X-Job-Id': jobId, 'X-Error': failure });
 });
 
 test('terminal failure bounds retries and honors bounded Retry-After dates', async () => {

@@ -70,6 +70,7 @@ jobs:
           TIPS_V11_ASSISTANT_PUBLIC: ${{ vars.TIPS_V11_ASSISTANT_PUBLIC }}
         run: |
           export TIP_V11_ALIGNMENT_FAILURE_CODE_FILE="${RUNNER_TEMP}/tip-v11-alignment-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          export TIP_V11_ALIGNMENT_FAILURE_DIAGNOSTIC_FILE="${TIP_V11_ALIGNMENT_FAILURE_CODE_FILE}.diagnostic.json"
           npm run render:batch -- --spec-file "${TIP_SPEC_FILE}" --voice-only
 
       - name: Measure V11 audio, French speech, captions and CTA in the rendered MP4
@@ -195,7 +196,8 @@ jobs:
             fi
             case "${TIP_FAILURE_CONTRACT}" in
               jamm-tip-render-v2|jamm-tip-render-v3-reviewed-narration)
-                node scripts/deliver-tip-failure.mjs "${reason}; GitHub run ${GITHUB_RUN_ID}"
+                TIP_VIDEO_DIAGNOSTIC_FILE="${code_file}.diagnostic.json" \
+                  node scripts/deliver-tip-failure.mjs "${reason}; GitHub run ${GITHUB_RUN_ID}"
                 ;;
               jamm-tip-render-v1)
                 curl --silent --show-error --output /dev/null --write-out 'Renderer failure callback HTTP %{http_code}\n' \

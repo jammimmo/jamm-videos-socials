@@ -8,9 +8,11 @@ import unittest
 from unittest.mock import Mock
 
 from align_tip_v11 import (
-    DOMAIN_BOUNDARY_METHOD, PHONE_WINDOW_EVIDENCE, PhoneEvidenceError, SignatureEvidenceError, align, align_with_phone_retry,
+    AlignmentFailure, DOMAIN_BOUNDARY_METHOD, PHONE_WINDOW_EVIDENCE, PhoneEvidenceError, SignatureEvidenceError,
+    align, align_with_phone_retry,
     align_with_signature_retry, recognize_initial_words, recognize_words, report_alignment_failure, tokens,
-    alignment_failure_diagnostics, audible_windows, bounded_domain_boundary, canonical_signature_brand,
+    alignment_failure_diagnostics, alignment_failure_receipt, audible_windows, bounded_domain_boundary,
+    canonical_signature_brand,
 )
 from audit_tip_v11_speech import recognize_model_wav
 
@@ -534,6 +536,31 @@ class V11AlignmentTest(unittest.TestCase):
             self.assertNotIn('private transcript', stderr.getvalue())
             report_alignment_failure(ValueError('Exact contact pronunciation not recognized: phone'), marker)
             self.assertEqual(marker.read_text(), 'phone_evidence_unconfirmed\n')
+
+    def test_signature_failure_writes_only_the_closed_bounded_receipt(self):
+        with TemporaryDirectory() as directory, redirect_stderr(StringIO()) as stderr:
+            marker = Path(directory) / 'failure'
+            receipt = Path(directory) / 'failure.diagnostic.json'
+            failure = SignatureEvidenceError(57.1, 2, 10)
+            failure.reason = 'signature_retry_insufficient'
+            report_alignment_failure(failure, marker, receipt)
+            self.assertEqual(marker.read_text(), 'signature_retry_insufficient\n')
+            self.assertEqual(receipt.read_text(), '{"version":1,"stage":"render",'
+                             '"code":"signature_retry_insufficient","checks":[{'
+                             '"key":"audio_signature_words_recognized","actual":2,'
+                             '"threshold":3,"relation":"gte"}]}\n')
+            self.assertNotIn('transcript', receipt.read_text())
+            self.assertEqual(alignment_failure_receipt(SignatureEvidenceError(57.1, 0, 10))['checks'][0]['actual'], 0)
+            self.assertIsNone(alignment_failure_receipt(SignatureEvidenceError(57.1, 3, 10)))
+            self.assertIsNone(alignment_failure_receipt(SignatureEvidenceError(57.1, 2, 9)))
+            self.assertIsNone(alignment_failure_receipt(
+                AlignmentFailure('future unrelated check', 'signature_evidence_insufficient',
+                                 'signature_evidence_insufficient', matched_words=2, expected_words=10)))
+
+            # A later ineligible failure cannot leave an earlier eligible receipt behind.
+            report_alignment_failure(ValueError('Unexpected private transcript'), marker, receipt)
+            self.assertFalse(receipt.exists())
+            self.assertNotIn('private transcript', stderr.getvalue())
 
     def test_no_retry_after_a_short_but_silent_ending(self):
         words = speech(SEGMENTS)

@@ -46,6 +46,10 @@ SCENE_PREROLL_SECONDS = .08
 AUDIBLE_WINDOW_SECONDS = .1
 DEFERRED_DOMAIN_CHECKS = ('domain_audio', 'visible_domain_cta')
 DOMAIN_BOUNDARY_METHOD = 'bounded-domain-anchors-final-mp4'
+SIGNATURE_DIAGNOSTIC_REASONS = frozenset({
+    'signature_evidence_insufficient',
+    'signature_retry_insufficient',
+})
 
 
 PROTECTED_SPEECH_WORDS = frozenset('''
@@ -115,7 +119,31 @@ def alignment_failure_diagnostics(error):
     return {'reason': reason, 'alignment_code': code}
 
 
-def report_alignment_failure(error, code_path=None):
+def alignment_failure_receipt(error):
+    """Return the only bounded render diagnostic allowed to leave the aligner."""
+    diagnostics = alignment_failure_diagnostics(error)
+    reason = diagnostics.get('reason')
+    matched_words = diagnostics.get('matched_words')
+    expected_words = diagnostics.get('expected_words')
+    if (not isinstance(error, SignatureEvidenceError)
+            or reason not in SIGNATURE_DIAGNOSTIC_REASONS
+            or type(matched_words) is not int or not 0 <= matched_words <= 2
+            or type(expected_words) is not int or expected_words != 10):
+        return None
+    return {
+        'version': 1,
+        'stage': 'render',
+        'code': reason,
+        'checks': [{
+            'key': 'audio_signature_words_recognized',
+            'actual': matched_words,
+            'threshold': 3,
+            'relation': 'gte',
+        }],
+    }
+
+
+def report_alignment_failure(error, code_path=None, diagnostic_path=None):
     diagnostics = alignment_failure_diagnostics(error)
     print('V11 alignment: ' + json.dumps(diagnostics), file=sys.stderr)
     if code_path:
@@ -123,6 +151,15 @@ def report_alignment_failure(error, code_path=None):
             Path(code_path).write_text(diagnostics['reason'] + '\n', encoding='utf8')
         except OSError:
             print('V11 alignment: failure marker unavailable', file=sys.stderr)
+    if diagnostic_path:
+        try:
+            target = Path(diagnostic_path)
+            target.unlink(missing_ok=True)
+            receipt = alignment_failure_receipt(error)
+            if receipt is not None:
+                target.write_text(json.dumps(receipt, separators=(',', ':')) + '\n', encoding='utf8')
+        except OSError:
+            print('V11 alignment: failure diagnostic unavailable', file=sys.stderr)
 
 
 def tokens(text):
@@ -798,6 +835,8 @@ def main():
     parser.add_argument('--output', required=True)
     parser.add_argument('--transcript', help='Premeasured local QA word timings')
     parser.add_argument('--failure-code-file', help='Write an allowlisted classification for a failed render')
+    parser.add_argument('--failure-diagnostic-file',
+                        help='Write a bounded diagnostic receipt for an eligible fixed-signature failure')
     parser.add_argument('--defer-domain-to-final', action='store_true',
                         help='Locate a bounded standard domain CTA; final MP4 audio and visible checks remain required')
     parser.add_argument('--reviewed-source', action='store_true',
@@ -832,7 +871,7 @@ def main():
                 recognize_greeting=lambda boundary: recognize_audio_window(model, args.wav, 0, boundary, end_before=True),
             )
         except ValueError as error:
-            report_alignment_failure(error, args.failure_code_file)
+            report_alignment_failure(error, args.failure_code_file, args.failure_diagnostic_file)
             raise
         alignment['provenance'] = ASR_REVISION
         if alignment.get('phoneEvidenceMethod') == PHONE_WINDOW_EVIDENCE:

@@ -30,14 +30,15 @@ function run(command, args, cwd) {
 }
 
 export function tipV11AlignmentArguments(normalizedPath, specPath, alignPath, {
-  reviewedSource = false, localWordTimings, failureCodePath,
+  reviewedSource = false, localWordTimings, failureCodePath, failureDiagnosticPath,
 } = {}) {
   return ['scripts/align_tip_v11.py', '--wav', normalizedPath,
     '--spec', specPath, '--output', alignPath,
     '--defer-domain-to-final',
     ...(reviewedSource ? ['--reviewed-source'] : []),
     ...(localWordTimings ? ['--transcript', resolve(localWordTimings)] : []),
-    ...(failureCodePath ? ['--failure-code-file', failureCodePath] : [])];
+    ...(failureCodePath ? ['--failure-code-file', failureCodePath] : []),
+    ...(failureDiagnosticPath ? ['--failure-diagnostic-file', failureDiagnosticPath] : [])];
 }
 
 async function getNarration(root, audioDir, plan) {
@@ -167,6 +168,7 @@ export async function renderTipV11(spec, {
   const normalizedPath = resolve(root, 'public', normalized);
   if (raw === normalizedPath) throw new Error('Narration input must differ from processed output');
   const failureCodePath = process.env.TIP_V11_ALIGNMENT_FAILURE_CODE_FILE;
+  const failureDiagnosticPath = process.env.TIP_V11_ALIGNMENT_FAILURE_DIAGNOSTIC_FILE;
   const exactTourV8 = narration.source === 'provider' || narration.source === 'cache';
   try {
     await normalizeTipV11Narration(root, raw, normalizedPath, { exactTourV8, alreadyNormalized: narration.alreadyNormalized === true });
@@ -178,7 +180,7 @@ export async function renderTipV11(spec, {
   }
   await writeFile(specPath, JSON.stringify(plan), { mode: 0o600 });
   await run('python3', tipV11AlignmentArguments(normalizedPath, specPath, alignPath, {
-    reviewedSource: Boolean(spec.reviewedNarration), localWordTimings, failureCodePath,
+    reviewedSource: Boolean(spec.reviewedNarration), localWordTimings, failureCodePath, failureDiagnosticPath,
   }), root);
   const alignment = JSON.parse(await readFile(alignPath, 'utf8'));
   const effectsPath = resolve(audioDir, `${plan.id}-v11-fx.wav`);
