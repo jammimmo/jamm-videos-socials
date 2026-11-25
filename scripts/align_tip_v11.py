@@ -463,24 +463,43 @@ def canonical_signature_brand(tail, sound, duration, *, dakar=False):
     elif tokens(first['word'] + ' ' + second['word']) != ['jamm', 'immo']:
         return None
 
+    if not signature_has_audible_continuation(tail, i + 1, sound, duration):
+        return None
+    return [*tail[:i], {**first, 'word': 'jamm'}, {**second, 'word': 'immo'}, *tail[i + 2:]]
+
+
+def signature_has_audible_continuation(tail, brand_end_index, sound, duration):
     # Keep distinct time ownership, including the farewell before the brand.
     # The focused decoder may start up to one preroll before the scene boundary.
     previous_end = 0
     for row in tail:
         if not previous_end <= row['start'] < row['end'] <= duration + .1:
-            return None
+            return False
         previous_end = row['end']
     # An isolated French ending or words hypothesized over silence do not
     # establish continuation. This does not certify the Wolof words.
-    continuation = [row for row, group in zip(tail[i + 2:], words[i + 2:]) if group]
-    if (len(continuation) < 2 or voiced_overlap(sound, second['end'], continuation[-1]['end']) < .9
-        or any(voiced_overlap(sound, row['start'], row['end']) <= 0 for row in continuation)):
+    continuation = [row for row in tail[brand_end_index + 1:] if tokens(row['word'])]
+    return (len(continuation) >= 2
+            and voiced_overlap(sound, tail[brand_end_index]['end'], continuation[-1]['end']) >= .9
+            and all(voiced_overlap(sound, row['start'], row['end']) > 0 for row in continuation))
+
+
+def canonical_fused_dakar_signature(tail, sound, duration):
+    words = [tokens(row['word']) for row in tail]
+    if (words[:3] != [['a'], ['bientot'], ['djamimo']]
+        or not re.fullmatch(r'djamimo[.,!?]?', tail[2]['word'].strip(), re.I)
+        or words.count(['djamimo']) != 1
+        or sum(left == ['a'] and right == ['bientot'] for left, right in zip(words, words[1:])) != 1
+        or not supported_anchor_rows(tail[:3], sound, duration, weak_first=True)
+        or not signature_has_audible_continuation(tail, 2, sound, duration)):
         return None
-    return [*tail[:i], {**first, 'word': 'jamm'}, {**second, 'word': 'immo'}, *tail[i + 2:]]
+    # The tokenizer already accepts two words on one timed row. Keep this
+    # observed interval intact rather than guessing a boundary within the name.
+    return [*tail[:2], {**tail[2], 'word': 'Jamm Immo'}, *tail[3:]]
 
 
 def corroborated_dakar_signature(segments, words, split, focused, boundary, sound, duration):
-    """Only the two French brand rows receive canonical spelling, on one measured tail."""
+    """Canonicalize the French brand only when both decodes measure it on this tail."""
     if (segments[-1]['text'] != FIXED_SIGNATURE_TEXT or segments[-2]['id'] != 'socials'
         or not 0 < split < len(words) or words[split - 1]['end'] != boundary
         or words[split]['start'] < boundary):
@@ -490,11 +509,16 @@ def corroborated_dakar_signature(segments, words, split, focused, boundary, soun
         return None
     full = canonical_signature_brand(words[split:], sound, duration, dakar=True)
     window = canonical_signature_brand(focused, sound, duration, dakar=True)
-    if full is None or window is None:
-        return None
     # Each pair is recognized in its entirety on the same recording. Require
     # corresponding brand rows to overlap in source time across the two decodes.
-    if any(max(a['start'], b['start']) >= min(a['end'], b['end']) for a, b in zip(full[2:4], window[2:4])):
+    if full is not None and window is not None:
+        if any(max(a['start'], b['start']) >= min(a['end'], b['end']) for a, b in zip(full[2:4], window[2:4])):
+            return None
+        return window
+    full = canonical_fused_dakar_signature(words[split:], sound, duration)
+    window = canonical_fused_dakar_signature(focused, sound, duration)
+    if (full is None or window is None
+        or max(full[2]['start'], window[2]['start']) >= min(full[2]['end'], window[2]['end'])):
         return None
     return window
 
