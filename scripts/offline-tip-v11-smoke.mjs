@@ -212,6 +212,33 @@ async function main() {
         masterCaptionMaskBounds: masterMask.bounds,
       }),
     };
+    if (shortsMaster) {
+      const batch = join(output, fixture.id);
+      const voice = join(root, 'public', 'audio', 'voiceovers', fixture.id);
+      const reportPath = `${batch}.audit.json`;
+      const result = spawnSync('python3', [
+        'scripts/audit_tip_v11.py', '--video', video, '--alignment', `${batch}.alignment.json`,
+        '--render-manifest', `${batch}.manifest.json`, '--render-props', `${batch}.props.json`,
+        '--raw-wav', narration, '--narration-wav', `${voice}-v11.wav`,
+        '--mix-wav', `${voice}-v11-mix.wav`, '--brand-logo', 'public/tip-v11/logo.png',
+        '--report', reportPath,
+      ], { cwd: root, encoding: 'utf8', timeout: 180_000 });
+      assert.ok(result.status === 0 || result.status === 1, result.stderr || String(result.error));
+      const report = JSON.parse(await readFile(reportPath, 'utf8'));
+      const { final_brand_cta_visibility: brand, sampled_frame_ocr: ocr } = report;
+      assert.equal(report.media_sha256, receipt.mediaSha256);
+      receipt.shortsAudit = {
+        reportSha256: createHash('sha256').update(await readFile(reportPath)).digest('hex'),
+        manifestSha256: report.render_manifest_sha256,
+        cueCount: manifest.caption_geometry.cues.length,
+        sampleCount: manifest.caption_geometry.cues.reduce((count, cue) => count + cue.sample_frames.length, 0),
+        frameCount: manifest.caption_geometry.duration_frames,
+        brand, ocr, audioWaveformPassed: report.audio_waveform.passed,
+        audioPreservationStatus: report.audio_preservation.status,
+      };
+      // Fixed tone tests format and layout only, so the receipt stays unpublishable.
+      if (brand.status !== 'matched' || !ocr.passed) receipt.status = 'needs_review';
+    }
     if (process.argv.slice(2).includes('--destination-layouts')) {
       const layouts = await renderTipV11Destinations({
         root, outputDirectory: join(scratch, 'destination-layouts'), props,
@@ -230,6 +257,7 @@ async function main() {
     await rm(scratch, { recursive: true, force: true });
   }
   process.stdout.write(`${JSON.stringify(receipt)}\n`);
+  if (receipt.status !== 'passed') process.exitCode = 1;
 }
 
 main().catch(error => {
