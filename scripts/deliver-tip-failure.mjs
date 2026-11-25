@@ -1,10 +1,12 @@
 import { pathToFileURL } from 'node:url';
 import { lstat } from 'node:fs/promises';
 import { postTipDelivery, readTipDeliveryTarget, readTipVideo } from './deliver-tip-video.mjs';
+import { readTipAuditFailure, serializeTipAuditFailure } from './tip-render-failure-diagnostic.mjs';
 
 const FAILURE_TIMEOUT_MS = 12_000;
-const MAX_DIAGNOSTIC_BYTES = 512;
+const MAX_SIGNATURE_DIAGNOSTIC_BYTES = 512;
 const SIGNATURE_FAILURE_ENVELOPE = /^V11 speech alignment failed \((signature_evidence_insufficient|signature_retry_insufficient)\); GitHub run [1-9][0-9]{0,19}$/;
+const AUDIT_FAILURE_ENVELOPE = /^V11 technical delivery proof failed \((render_audit_[a-z_]+)\); GitHub run ([1-9][0-9]{0,19})$/;
 
 function hasExactKeys(value, expected) {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -37,12 +39,25 @@ export function canonicalVideoDiagnostic(reason, value) {
 async function readVideoDiagnostic(reason, env) {
   const path = env?.TIP_VIDEO_DIAGNOSTIC_FILE;
   if (typeof path !== 'string' || !path) return null;
+  const auditEnvelope = typeof reason === 'string' ? reason.match(AUDIT_FAILURE_ENVELOPE) : null;
+  if (auditEnvelope) {
+    const diagnostic = await readTipAuditFailure(path);
+    const packet = serializeTipAuditFailure(diagnostic);
+    if (!packet || (diagnostic.code !== auditEnvelope[1]
+      && !(auditEnvelope[1] === 'render_audit_rejected' && diagnostic.code.endsWith('_rejected')))) return null;
+    return {
+      packet,
+      reason: `V11 technical delivery proof failed (${diagnostic.code}); GitHub run ${auditEnvelope[2]}`,
+    };
+  }
   try {
     const metadata = await lstat(path);
-    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 2 || metadata.size > MAX_DIAGNOSTIC_BYTES) return null;
-    const bytes = readTipVideo(path, MAX_DIAGNOSTIC_BYTES);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 2
+      || metadata.size > MAX_SIGNATURE_DIAGNOSTIC_BYTES) return null;
+    const bytes = readTipVideo(path, MAX_SIGNATURE_DIAGNOSTIC_BYTES);
     if (!bytes || bytes.length !== metadata.size) return null;
-    return canonicalVideoDiagnostic(reason, JSON.parse(bytes.toString('utf8')));
+    const packet = canonicalVideoDiagnostic(reason, JSON.parse(bytes.toString('utf8')));
+    return packet ? { packet, reason } : null;
   } catch {
     return null;
   }
@@ -56,7 +71,10 @@ export async function deliverTipFailure(reason, env, transport) {
   url.searchParams.set('status', 'failed');
   const headers = { Authorization: `Bearer ${token}`, 'X-Job-Id': jobId, 'X-Error': reason };
   const diagnostic = await readVideoDiagnostic(reason, env);
-  if (diagnostic) headers['X-Video-Diagnostic'] = diagnostic;
+  if (diagnostic) {
+    headers['X-Error'] = diagnostic.reason;
+    headers['X-Video-Diagnostic'] = diagnostic.packet;
+  }
   const result = await postTipDelivery(url, { headers, timeout: FAILURE_TIMEOUT_MS },
     receipt => receipt?.ok === true && receipt.jobId === jobId && receipt.status === 'failed', transport);
   return result === 'confirmed' ? 'recorded' : result;

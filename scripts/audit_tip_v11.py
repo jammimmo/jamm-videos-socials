@@ -166,6 +166,8 @@ def measure_audio(segments, narration, mix, final):
     lag = find_lag(mix, final)
     window_size = SAMPLE_RATE // 4
     results = []
+    mix_gains = []
+    signature_tail_match = True
     for segment in segments:
         start = round(segment['start'] * SAMPLE_RATE)
         end = round(segment['end'] * SAMPLE_RATE)
@@ -175,24 +177,37 @@ def measure_audio(segments, narration, mix, final):
             for offset in range(start, end, window_size)
         ]
         audible = [(score, gain) for score, gain, rms in windows if rms >= 800]
+        mix_gains.extend(gain for _, gain in audible)
+        if segment['id'] == 'signature':
+            signature_tail_match = signature_tail_matches(narration, final, start, end, lag)
         # The encoded stereo-to-mono path can preserve a waveform at −3 dB.
         # Keep that case while rejecting attenuated or missing narration.
         passed = (
             voice_score >= .96 and .65 <= voice_gain <= 1.15 and bool(audible)
             and all(score >= .94 and .65 <= gain <= 1.20 for score, gain in audible)
-            and (segment['id'] != 'signature' or signature_tail_matches(narration, final, start, end, lag))
+            and (segment['id'] != 'signature' or signature_tail_match)
         )
+        mix_similarity = min((score for score, _ in audible), default=0)
         results.append({
             'segment': segment['id'], 'passed': passed,
-            'narration_similarity': round(voice_score, 5),
-            'narration_gain_ratio': round(voice_gain, 5),
+            'narration_similarity': round(voice_score, 5) if passed else voice_score,
+            'narration_gain_ratio': round(voice_gain, 5) if passed else voice_gain,
             'audible_mix_windows': len(audible),
-            'min_audible_mix_similarity': round(min((score for score, _ in audible), default=0), 5),
+            'min_audible_mix_similarity': round(mix_similarity, 5) if passed else mix_similarity,
         })
-    return {
-        'passed': abs(len(final) - len(mix)) <= SAMPLE_RATE // 8 and all(result['passed'] for result in results),
+    length_difference = abs(len(final) - len(mix))
+    report = {
+        'passed': length_difference <= SAMPLE_RATE // 8 and all(result['passed'] for result in results),
         'sample_rate': SAMPLE_RATE, 'lag_samples': lag, 'segments': results,
     }
+    if not report['passed']:
+        report['failure_measurements'] = {
+            'audio_length_difference_samples': length_difference,
+            'audio_signature_tail_match': int(signature_tail_match),
+            'audio_min_mix_gain': min(mix_gains, default=None),
+            'audio_max_mix_gain': max(mix_gains, default=None),
+        }
+    return report
 
 
 def render_audit_effects(alignment):
@@ -557,6 +572,7 @@ def main():
     parser.add_argument('--measure-final-french', action='store_true')
     parser.add_argument('--brand-logo', type=Path, help='Audit visible brand and CTA in the final MP4 with the pinned logo')
     parser.add_argument('--report', type=Path, required=True)
+    parser.add_argument('--redact-errors', action='store_true', help='Omit paths and tool arguments from shared logs')
     args = parser.parse_args()
     if any((args.render_manifest, args.render_props, args.raw_wav)) and not all((args.render_manifest, args.render_props, args.raw_wav)):
         parser.error('manifest, render props and original narration are required together')
@@ -567,7 +583,8 @@ def main():
             json.dump(report, output, indent=2, sort_keys=True)
             output.write('\n')
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
-        parser.exit(2, f'V11 audit unavailable: {error}\n')
+        message = 'V11 audit unavailable' if args.redact_errors else f'V11 audit unavailable: {error}'
+        parser.exit(2, f'{message}\n')
     return 0 if report['passed'] else 1
 
 

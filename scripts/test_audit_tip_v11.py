@@ -29,6 +29,7 @@ class V11FinalEvidenceTest(unittest.TestCase):
     def test_confirms_a_single_mux_offset_and_expected_gain(self):
         result = measure_audio(self.segments, self.voice, self.voice, self.final)
         self.assertTrue(result['passed'])
+        self.assertNotIn('failure_measurements', result)
         self.assertEqual(result['lag_samples'], 48)
         self.assertGreater(result['segments'][0]['narration_similarity'], .9999)
 
@@ -56,8 +57,26 @@ class V11FinalEvidenceTest(unittest.TestCase):
         final[tail_start + lag:tail_end + lag] = array.array('h', [0]) * len(tail)
         result = measure_audio(segments, self.voice, self.voice, final)
         self.assertFalse(result['passed'])
+        self.assertEqual(result['failure_measurements']['audio_signature_tail_match'], 0)
         self.assertTrue(result['segments'][0]['passed'])
         self.assertFalse(result['segments'][1]['passed'])
+
+    def test_reports_audio_length_and_window_gain_failures(self):
+        self.final.extend(array.array('h', [0]) * (SAMPLE_RATE // 8 + 1))
+        result = measure_audio(self.segments, self.voice, self.voice, self.final)
+        self.assertFalse(result['passed'])
+        self.assertTrue(all(segment['passed'] for segment in result['segments']))
+        self.assertEqual(result['failure_measurements']['audio_length_difference_samples'], SAMPLE_RATE // 8 + 49)
+
+        mix = self.voice[:]
+        window = SAMPLE_RATE // 4
+        mix[:window] = array.array('h', (round(sample / 2) for sample in mix[:window]))
+        mix[window:2 * window] = array.array('h', (sample * 2 for sample in mix[window:2 * window]))
+        result = measure_audio(self.segments, self.voice, mix, self.final[:SAMPLE_RATE * 4 + 48])
+        self.assertFalse(result['passed'])
+        self.assertLess(result['failure_measurements']['audio_min_mix_gain'], .65)
+        self.assertGreater(result['failure_measurements']['audio_max_mix_gain'], 1.20)
+        self.assertEqual(result['failure_measurements']['audio_signature_tail_match'], 1)
 
     def preservation(self, decoded, mix=None):
         buffer = io.BytesIO()
