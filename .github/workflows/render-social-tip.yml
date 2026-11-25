@@ -74,17 +74,23 @@ jobs:
           npm run render:batch -- --spec-file "${TIP_SPEC_FILE}" --voice-only
 
       - name: Measure V11 audio, French speech, captions and CTA in the rendered MP4
+        id: tip_v11_audit
         timeout-minutes: 6
         if: github.event.client_payload.contract == 'jamm-tip-render-v2' || github.event.client_payload.contract == 'jamm-tip-render-v3-reviewed-narration'
         continue-on-error: ${{ github.event.client_payload.contract == 'jamm-tip-render-v2' && github.event.client_payload.evidence.mediaStorageMode != 'job_owned_v1' }}
         run: |
           failure_code_file="${RUNNER_TEMP}/tip-v11-alignment-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          diagnostic_file="${failure_code_file}.diagnostic.json"
           record_audit_failure() {
             case "$1" in
               render_audit_dependency_unavailable|render_audit_unavailable|render_audit_rejected) ;;
               *) return 2 ;;
             esac
             printf '%s\n' "$1" > "${failure_code_file}"
+            if diagnostic=$(node scripts/tip-render-failure-diagnostic.mjs "$@") && [ -n "${diagnostic}" ]; then
+              printf 'Tip video diagnostic: %s\n' "${diagnostic}"
+              (umask 077; printf '%s\n' "${diagnostic}" > "${diagnostic_file}") || true
+            fi
             exit 1
           }
           python -I scripts/install_tip_ffmpeg.py --audit-tools || record_audit_failure render_audit_dependency_unavailable
@@ -100,12 +106,12 @@ jobs:
             --narration-wav "public/audio/voiceovers/${STEM}-v11.wav" \
             --mix-wav "public/audio/voiceovers/${STEM}-v11-mix.wav" \
             --ocr-language fra --measure-final-french \
-            --brand-logo public/tip-v11/logo.png --report "${REPORT}"; then
+            --brand-logo public/tip-v11/logo.png --report "${REPORT}" --redact-errors; then
             test -s "${REPORT}" || record_audit_failure render_audit_unavailable
           elif [ -s "${REPORT}" ]; then
             # Failed metrics leave their private report available for the
             # bounded terminal classification, but never authorize an upload.
-            record_audit_failure render_audit_rejected
+            record_audit_failure render_audit_rejected "${REPORT}"
           else
             record_audit_failure render_audit_unavailable
           fi
@@ -172,6 +178,7 @@ jobs:
         continue-on-error: true
         env:
           TIP_FAILURE_CONTRACT: ${{ github.event.client_payload.contract }}
+          TIP_AUDIT_OUTCOME: ${{ steps.tip_v11_audit.outcome }}
         run: |
           if [ -f "${RUNNER_TEMP}/tip-delivery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]; then
             echo 'Tip delivery remains subject to existing attempt recovery.'
@@ -180,23 +187,32 @@ jobs:
           if [ -n "${TIP_UPLOAD_URL:-}" ] && [ -n "${TIP_CALLBACK_TOKEN:-}" ] && [ -n "${TIP_JOB_ID:-}" ]; then
             reason="render workflow failed"
             code_file="${RUNNER_TEMP}/tip-v11-alignment-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            diagnostic_file="${code_file}.diagnostic.json"
+            code=""
             if [ -f "${code_file}" ]; then
               IFS= read -r code < "${code_file}" || code=""
-              case "${code}" in
-                narration_duration_out_of_range)
-                  reason="V11 narration duration out of range"
-                  ;;
-                signature_evidence_insufficient|signature_boundary_unconfirmed|signature_tail_too_quiet|signature_closing_unrecognized|signature_retry_insufficient|phone_evidence_unconfirmed|website_evidence_unconfirmed|script_evidence_unconfirmed|alignment_evidence_invalid)
-                  reason="V11 speech alignment failed (${code})"
-                  ;;
-                render_audit_dependency_unavailable|render_audit_unavailable|render_audit_rejected|render_evidence_unavailable|render_attestation_unavailable)
-                  reason="V11 technical delivery proof failed (${code})"
-                  ;;
-              esac
+            elif [ "${TIP_AUDIT_OUTCOME}" = 'failure' ]; then
+              # A hard audit timeout may end the step before it can write its code.
+              code='render_audit_unavailable'
+              if diagnostic=$(node scripts/tip-render-failure-diagnostic.mjs "${code}") && [ -n "${diagnostic}" ]; then
+                printf 'Tip video diagnostic: %s\n' "${diagnostic}"
+                (umask 077; printf '%s\n' "${diagnostic}" > "${diagnostic_file}") || true
+              fi
             fi
+            case "${code}" in
+              narration_duration_out_of_range)
+                reason="V11 narration duration out of range"
+                ;;
+              signature_evidence_insufficient|signature_boundary_unconfirmed|signature_tail_too_quiet|signature_closing_unrecognized|signature_retry_insufficient|phone_evidence_unconfirmed|website_evidence_unconfirmed|script_evidence_unconfirmed|alignment_evidence_invalid)
+                reason="V11 speech alignment failed (${code})"
+                ;;
+              render_audit_dependency_unavailable|render_audit_unavailable|render_audit_rejected|render_evidence_unavailable|render_attestation_unavailable)
+                reason="V11 technical delivery proof failed (${code})"
+                ;;
+            esac
             case "${TIP_FAILURE_CONTRACT}" in
               jamm-tip-render-v2|jamm-tip-render-v3-reviewed-narration)
-                TIP_VIDEO_DIAGNOSTIC_FILE="${code_file}.diagnostic.json" \
+                TIP_VIDEO_DIAGNOSTIC_FILE="${diagnostic_file}" \
                   node scripts/deliver-tip-failure.mjs "${reason}; GitHub run ${GITHUB_RUN_ID}"
                 ;;
               jamm-tip-render-v1)

@@ -130,19 +130,20 @@ export function GeneralScene({title, segment, time}: {title: string; segment: Ti
   );
 }
 
-export function fitTipV11Caption(measure: (size: number) => number): boolean {
-  for (let size = 49; size >= 30; size--) {
-    if (measure(size) <= captionHeight) return true;
+export function fitTipV11Caption(measure: (size: number) => number, maximumHeight = captionHeight, preferredSize = 49): boolean {
+  for (let size = preferredSize; size >= 30; size--) {
+    if (measure(size) <= maximumHeight) return true;
   }
   return false;
 }
 
-function TipCaption({text, fontsReady, sample, viewport, top, safeBounds, mask}: {
+function TipCaption({text, fontsReady, sample, viewport, top, safeBounds, mask, youtubeShorts}: {
   text: string; fontsReady: boolean; sample?: {frame: number; cue: number; run: string};
   viewport: React.RefObject<HTMLDivElement>;
   top: number;
   safeBounds?: Bounds;
   mask: string;
+  youtubeShorts: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [measurement, setMeasurement] = useState<{
@@ -160,7 +161,7 @@ function TipCaption({text, fontsReady, sample, viewport, top, safeBounds, mask}:
     const fits = fitTipV11Caption(size => {
       element.style.fontSize = `${size}px`;
       return element.offsetHeight;
-    });
+    }, youtubeShorts ? 116 : captionHeight, youtubeShorts ? 42 : 49);
     if (!fits) {
       cancelRender(new Error('Le sous-titre V11 ne tient pas dans la zone lisible.'));
       return;
@@ -187,12 +188,13 @@ function TipCaption({text, fontsReady, sample, viewport, top, safeBounds, mask}:
       setMeasurement({frame: sampleFrame, cue: sampleCue, run: sampleRun, mask,
         card, text: textBounds});
     }
-  }, [cancelRender, fontsReady, text, sampleFrame, sampleCue, sampleRun, viewport, safeBounds, mask]);
+  }, [cancelRender, fontsReady, text, sampleFrame, sampleCue, sampleRun, viewport, safeBounds, mask, youtubeShorts]);
   return (
     <div style={{position: 'absolute', left: 64, right: 120, top, display: 'flex', justifyContent: 'flex-start'}}>
       <div ref={ref} data-fit-region="caption" style={{
-        fontSize: 49, lineHeight: 1.2, fontWeight: 700, whiteSpace: 'pre-line', background: navy,
-        padding: '13px 20px', borderRadius: 15, borderLeft: `5px solid ${orange}`, maxWidth: '100%',
+        fontSize: youtubeShorts ? 42 : 49, lineHeight: youtubeShorts ? 1.12 : 1.2,
+        fontWeight: 700, whiteSpace: 'pre-line', background: navy,
+        padding: youtubeShorts ? '10px 20px' : '13px 20px', borderRadius: 15, borderLeft: `5px solid ${orange}`, maxWidth: '100%',
         overflowWrap: 'anywhere',
       }}>{text.replace(/ ([!?:;])/gu, '\u00a0$1')}</div>
       {sample && measurement?.frame === sample.frame && measurement.cue === sample.cue && measurement.run === sample.run
@@ -271,7 +273,8 @@ export const TipV11Fr: React.FC<TipV11FrProps> = ({
         <Header signature={showSignature} />
         {scene}
         {caption && <TipCaption text={caption.text} fontsReady={fontsReady} sample={geometrySample} viewport={viewport}
-          top={layout.captionTop} safeBounds={destination ? captionMask.bounds : undefined} mask={captionMask.id} />}
+          top={layout.captionTop} safeBounds={destination ? captionMask.bounds : undefined} mask={captionMask.id}
+          youtubeShorts={destination === 'youtube'} />}
       </AbsoluteFill>
       <ProgressFrame value={progress(frame / Math.max(1, durationInFrames - 1))} destination={destination} />
       {audio && <Audio src={staticFile(audio)} />}

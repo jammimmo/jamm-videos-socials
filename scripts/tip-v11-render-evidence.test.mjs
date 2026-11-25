@@ -87,6 +87,30 @@ test('requires the full bound manifest and declines cached or locally supplied v
   }
 });
 
+test('Shorts proof is fail-closed and scoped to the expected profile', () => {
+  const profile = 'youtube-shorts-v1';
+  const expected = { ...workflow, masterVisualProfile: profile };
+  const shorts = {
+    ...manifest, master_visual_profile: profile, reviewed_narration_sha256: manifest.raw_wav_sha256,
+    voice: { ...manifest.voice, model: 'reviewed-source-pcm-v1', source: 'reviewed-bundle' },
+    caption_geometry: { status: 'matched', mask: 'tip-v11-youtube-shorts-caption-20261125-v1', mask_bounds: [76, 1286, 838, 1372] },
+  };
+  const shortsReport = {
+    ...report, ...manifestFields(shorts), sampled_frame_ocr: { passed: true },
+    final_brand_cta_visibility: { status: 'matched', source: 'decoded_mp4_frames', contract: 'tip-v11-final-brand-cta-v1',
+      mask: 'tip-v11-youtube-shorts-brand-20261125-v1', mask_bounds: [76, 298, 838, 1372] },
+  };
+  assert.equal(renderEvidence(bytes(shortsReport), mediaSha, expected).sampled_ocr, 'matched');
+  assert.throws(() => renderEvidence(bytes(report), mediaSha, expected), /production render manifest/u);
+  assert.throws(() => renderEvidence(bytes(shortsReport), mediaSha, workflow), /production render manifest/u);
+  for (const voice of ['provider', 'fixture']) {
+    const substituted = { ...shortsReport, ...manifestFields({ ...shorts, voice: { ...shorts.voice, source: voice } }) };
+    assert.throws(() => renderEvidence(bytes(substituted), mediaSha, expected), /production render manifest/u);
+  }
+  assert.throws(() => renderEvidence(bytes({ ...shortsReport, final_brand_cta_visibility: null }), mediaSha, expected),
+    /decoded brand proof/u);
+});
+
 test('records the actual render inputs and only hashes of the script, audio, props and MP4', async () => {
   const temporary = await mkdtemp(join(tmpdir(), 'tip-manifest-test-'));
   try {

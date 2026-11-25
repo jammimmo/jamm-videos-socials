@@ -48,6 +48,8 @@ MIN_PHONE_WORD_AUDIBLE_SECONDS = .05
 HOOK_QUIET_WINDOW = SAMPLE_RATE // 100
 HOOK_QUIET_MIN_SIDE = SAMPLE_RATE // 10
 HOOK_QUIET_MIN_TOTAL = SAMPLE_RATE * 3 // 10
+HOOK_MAX_EARLIER_CUT = SAMPLE_RATE // 4
+HOOK_QUIET_NEAR_NOMINAL = 2 * HOOK_QUIET_WINDOW
 FIXED_BRAND_WORD_INDEX = {'services': 0, 'socials': 2}
 FIXED_DOMAIN_WORDS = ('retrouvez', 'nous', 'sur', 'notre', 'site', 'jamm', 'immo', 'point', 'com')
 FIXED_DOMAIN_JAMIMO_WORDS = ('retrouvez', 'nous', 'sur', 'notre', 'site', 'jamimo', 'com')
@@ -1133,23 +1135,49 @@ def recognize_final_window(wav_path):
     return recognize_with_timeout(wav_path, LOCAL_SPEECH_WINDOW_TIMEOUT_SECONDS)
 
 
-def verify_hook_samples(narration, decoded_pcm, lag_samples, directory, start, end, expected, recognize):
-    source_cut = round(start * SAMPLE_RATE)
-    first, last = source_cut + lag_samples, round(end * SAMPLE_RATE) + lag_samples
-    if not 0 <= first < last <= len(decoded_pcm) // 2:
-        return None
-    source_quiet = quiet_hook_cut(narration, source_cut)
-    if source_quiet is None:
-        return None
-    # Decode at most one second per side to attest the final cut at the same lag.
-    probe_start = max(0, first - SAMPLE_RATE)
-    probe_end = min(len(decoded_pcm) // 2, first + SAMPLE_RATE)
+def shared_hook_quiet_cut(narration, decoded_pcm, nominal, lag_samples):
+    decoded_nominal = nominal + lag_samples
+    probe_start = max(0, decoded_nominal - SAMPLE_RATE - HOOK_MAX_EARLIER_CUT)
+    probe_end = min(len(decoded_pcm) // 2, decoded_nominal + SAMPLE_RATE)
     probe = struct.unpack(f'<{probe_end - probe_start}h', decoded_pcm[probe_start * 2:probe_end * 2])
-    final_quiet = quiet_hook_cut(probe, first - probe_start)
-    if final_quiet is None:
+
+    def measurements_at(cut):
+        source = quiet_hook_cut(narration, cut)
+        if not source or source['end_sample'] < nominal - HOOK_QUIET_NEAR_NOMINAL:
+            return None
+        final = quiet_hook_cut(probe, cut + lag_samples - probe_start)
+        if not final or final['end_sample'] + probe_start < decoded_nominal - HOOK_QUIET_NEAR_NOMINAL:
+            return None
+        for field in ('start_sample', 'cut_sample', 'end_sample'):
+            final[field] += probe_start
+        return source, final
+
+    at_nominal = measurements_at(nominal)
+    if at_nominal:
+        return at_nominal
+
+    # The aligned scene can start on the first phoneme. Search the same
+    # nearby pause, then choose its midpoint within the bounded grid.
+    shared_run = []
+    for shift in range(HOOK_QUIET_WINDOW, HOOK_MAX_EARLIER_CUT + 1, HOOK_QUIET_WINDOW):
+        measurement = measurements_at(nominal - shift)
+        if measurement:
+            shared_run.append(measurement)
+        elif shared_run:
+            break
+    return shared_run[(len(shared_run) - 1) // 2] if shared_run else None
+
+
+def verify_hook_samples(narration, decoded_pcm, lag_samples, directory, start, end, expected, recognize):
+    nominal = round(start * SAMPLE_RATE)
+    last = round(end * SAMPLE_RATE) + lag_samples
+    if not 0 <= nominal + lag_samples < last <= len(decoded_pcm) // 2:
         return None
-    for field in ('start_sample', 'cut_sample', 'end_sample'):
-        final_quiet[field] += probe_start
+    quiet = shared_hook_quiet_cut(narration, decoded_pcm, nominal, lag_samples)
+    if quiet is None:
+        return None
+    source_quiet, final_quiet = quiet
+    first = final_quiet['cut_sample']
     clip = decoded_pcm[first * 2:last * 2]
     path = Path(directory) / 'decoded-final-hook.wav'
     try:
@@ -1157,14 +1185,15 @@ def verify_hook_samples(narration, decoded_pcm, lag_samples, directory, start, e
             output.setparams((1, 2, SAMPLE_RATE, 0, 'NONE', 'not compressed'))
             output.writeframes(clip)
         duration = (last - first) / SAMPLE_RATE
-        [rows], _ = words_by_segment([{'id': 'hook', 'start': 0, 'end': duration}], recognize(path), 0)
-        if (segment_words('hook', rows) != expected
+        [rows], crossed = words_by_segment([{'id': 'hook', 'start': 0, 'end': duration}], recognize(path), 0)
+        if (crossed or not rows or segment_words('hook', rows) != expected
             or any(row[2] > duration or row[3] < MIN_WORD_PROBABILITY for row in rows)):
             return None
     except Exception:
         return None
     return {
         'method': 'hook_exact_silence_boundary', 'start_sample': first, 'end_sample': last,
+        **({'nominal_source_cut_sample': nominal} if source_quiet['cut_sample'] != nominal else {}),
         'pcm_sha256': sha256(clip), 'source_quiet': source_quiet, 'decoded_quiet': final_quiet,
         'bounded_min_word_probability': min(row[3] for row in rows),
     }

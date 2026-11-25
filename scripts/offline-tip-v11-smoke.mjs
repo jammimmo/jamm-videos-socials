@@ -6,11 +6,12 @@ import {
 } from 'node:fs/promises';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildTipV11Narration } from './tip-v11-contract.mjs';
 import { decodedTipMediaFingerprints } from './tip-decoded-media-fingerprint.mjs';
 import { renderTipV11 } from './render-tip-v11.mjs';
 import { renderTipV11Destinations } from './render-tip-v11-destinations.mjs';
+import { tipV11CaptionMask, YOUTUBE_SHORTS_PROFILE } from '../src/compositions/tip-v11-caption-geometry.ts';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const forbiddenCredentials = [
@@ -30,6 +31,19 @@ const fixture = {
   ],
 };
 fixture.sourceScriptSha256 = createHash('sha256').update(fixture.body.join(' ')).digest('hex');
+
+export function parseTipOfflineSmokeOptions(args) {
+  const options = new Set(args);
+  const language = args.find(arg => arg.startsWith('--ocr-language='))?.split('=')[1];
+  if (options.size !== args.length || args.some(arg => ![
+    '--youtube-shorts-master', '--destination-layouts', '--ocr-language=fra', '--ocr-language=eng',
+  ].includes(arg)) || (options.has('--ocr-language=fra') && options.has('--ocr-language=eng'))) {
+    throw new Error('Expected --youtube-shorts-master, --destination-layouts or a single --ocr-language=fra|eng');
+  }
+  const shortsMaster = options.has('--youtube-shorts-master');
+  return { shortsMaster, destinationLayouts: options.has('--destination-layouts'),
+    auditLanguage: language ?? (shortsMaster ? 'fra' : undefined) };
+}
 
 function assertIsolatedProcess() {
   assert.equal(process.env.OFFLINE_SMOKE_NETWORK_ISOLATED, '1',
@@ -104,6 +118,7 @@ async function prepareScratchRoot(scratch) {
 
 async function main() {
   assertIsolatedProcess();
+  const { shortsMaster, destinationLayouts, auditLanguage } = parseTipOfflineSmokeOptions(process.argv.slice(2));
   const scratch = await mkdtemp(join(tmpdir(), 'jamm-offline-render-smoke-'));
   let receipt;
   try {
@@ -121,6 +136,7 @@ async function main() {
 
     const video = await renderTipV11(fixture, {
       root, localNarration: narration, localWordTimings: transcript,
+      ...(shortsMaster && { offlineMasterDestination: 'youtube' }),
     });
     const output = join(root, 'out', 'batch');
     const [alignment, manifest, media, props, videoStat] = await Promise.all([
@@ -137,6 +153,11 @@ async function main() {
     assert.equal(manifest.voice.source, 'fixture');
     assert.equal(manifest.source_script_sha256, fixture.sourceScriptSha256);
     assert.equal(manifest.caption_geometry?.status, 'matched');
+    const masterMask = tipV11CaptionMask(shortsMaster ? 'youtube' : undefined);
+    assert.equal(manifest.caption_geometry.mask, masterMask.id);
+    assert.deepEqual(manifest.caption_geometry.mask_bounds, masterMask.bounds);
+    assert.equal(manifest.master_visual_profile, shortsMaster ? YOUTUBE_SHORTS_PROFILE : undefined);
+    assert.equal(props.destination, shortsMaster ? 'youtube' : undefined);
     assert.equal(media.template, fixture.template);
     assert.equal(media.reviewRequired, true);
     assert.equal(media.width, 1080);
@@ -198,8 +219,41 @@ async function main() {
       audioBitrate: Number(audio.bit_rate), closedGopKeyframes: keyframes.length, closedGopSeconds: 3,
       ...decodedTipMediaFingerprints(video),
       mediaSha256: manifest.media_sha256, retainedArtifact: false,
+      ...(shortsMaster && {
+        masterVisualProfile: manifest.master_visual_profile,
+        masterCaptionMask: masterMask.id,
+        masterCaptionMaskBounds: masterMask.bounds,
+      }),
     };
-    if (process.argv.slice(2).includes('--destination-layouts')) {
+    if (auditLanguage) {
+      const batch = join(output, fixture.id);
+      const voice = join(root, 'public', 'audio', 'voiceovers', fixture.id);
+      const reportPath = `${batch}.audit.json`;
+      const result = spawnSync('python3', [
+        'scripts/audit_tip_v11.py', '--video', video, '--alignment', `${batch}.alignment.json`,
+        '--render-manifest', `${batch}.manifest.json`, '--render-props', `${batch}.props.json`,
+        '--raw-wav', narration, '--narration-wav', `${voice}-v11.wav`,
+        '--mix-wav', `${voice}-v11-mix.wav`, '--brand-logo', 'public/tip-v11/logo.png',
+        '--ocr-language', auditLanguage, '--report', reportPath,
+      ], { cwd: root, encoding: 'utf8', timeout: 180_000 });
+      assert.ok(result.status === 0 || result.status === 1, result.stderr || String(result.error));
+      const report = JSON.parse(await readFile(reportPath, 'utf8'));
+      const { final_brand_cta_visibility: brand, sampled_frame_ocr: ocr } = report;
+      assert.equal(report.media_sha256, receipt.mediaSha256);
+      receipt[shortsMaster ? 'shortsAudit' : 'visualAudit'] = {
+        reportSha256: createHash('sha256').update(await readFile(reportPath)).digest('hex'),
+        manifestSha256: report.render_manifest_sha256,
+        cueCount: manifest.caption_geometry.cues.length,
+        sampleCount: manifest.caption_geometry.cues.reduce((count, cue) => count + cue.sample_frames.length, 0),
+        frameCount: manifest.caption_geometry.duration_frames,
+        brand, ocr, audioWaveformPassed: report.audio_waveform.passed,
+        audioPreservationStatus: report.audio_preservation.status,
+      };
+      // Fixed tone tests format and layout only, so the receipt stays unpublishable.
+      if (brand.language !== auditLanguage || brand.status !== 'matched'
+        || ocr.language !== auditLanguage || ocr.passed !== true) receipt.status = 'needs_review';
+    }
+    if (destinationLayouts) {
       const layouts = await renderTipV11Destinations({
         root, outputDirectory: join(scratch, 'destination-layouts'), props,
       });
@@ -217,9 +271,12 @@ async function main() {
     await rm(scratch, { recursive: true, force: true });
   }
   process.stdout.write(`${JSON.stringify(receipt)}\n`);
+  if (receipt.status !== 'passed') process.exitCode = 1;
 }
 
-main().catch(error => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main().catch(error => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

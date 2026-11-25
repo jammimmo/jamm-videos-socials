@@ -430,6 +430,35 @@ class SourceScoringTest(unittest.TestCase):
             self.assertEqual([call.args[1] for call in decoder.call_args_list], [wav, window])
             self.assertTrue(all(call.args[0] is loader.return_value for call in decoder.call_args_list))
 
+    def test_resident_stdio_keeps_native_startup_and_decode_noise_out_of_json(self):
+        child = '''
+import os
+import sys
+from functools import partial
+import tip_source_asr_session as worker
+
+def load():
+    os.write(1, b'native startup diagnostic\\n')
+    return object()
+
+def decode(model, path):
+    os.write(1, b'native decoder diagnostic\\n')
+    return [(' observed', .1, .3, .9)]
+
+worker.serve = partial(worker.serve, loader=load, decode=decode)
+worker.serve_stdio(sys.argv[1])
+'''
+        with TemporaryDirectory() as folder:
+            wav = Path(folder) / 'source.wav'
+            wav.write_bytes(self.wav)
+            result = subprocess.run([sys.executable, '-B', '-c', child, folder],
+                                    input=json.dumps({'wav': str(wav)})+'\n', text=True,
+                                    cwd=Path(__file__).resolve().parent, capture_output=True, check=True, timeout=10)
+        self.assertEqual([json.loads(row) for row in result.stdout.splitlines()], [
+            {'status': 'ready'}, {'rows': [[' observed', .1, .3, .9]]},
+        ])
+        self.assertEqual(result.stderr.splitlines(), ['native startup diagnostic', 'native decoder diagnostic'])
+
     def test_resident_worker_rejects_foreign_symlink_or_oversized_requests_without_private_errors(self):
         with TemporaryDirectory() as folder, TemporaryDirectory() as foreign:
             directory = Path(folder)

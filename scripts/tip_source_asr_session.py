@@ -151,7 +151,16 @@ def serve(directory, *, loader=load_speech_model, decode=recognize_model_wav,
         emit({'status': 'error'})
 
 
+def serve_stdio(directory):
+    # Native inference libraries can write directly to fd 1. Reserve the
+    # original pipe for JSON and send their output to the discarded stderr.
+    sys.stdout.flush()
+    with os.fdopen(os.dup(sys.stdout.fileno()), 'w', encoding='utf-8') as protocol:
+        os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+        serve(directory, destination=protocol)
+
+
 if __name__ == '__main__':
     if len(sys.argv) != 2:
         sys.exit(2)
-    serve(sys.argv[1])
+    serve_stdio(sys.argv[1])

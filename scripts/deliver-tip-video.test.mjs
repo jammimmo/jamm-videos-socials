@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { deliverTipVideo } from './deliver-tip-video.mjs';
 import { canonicalVideoDiagnostic, deliverTipFailure } from './deliver-tip-failure.mjs';
+import { classifyTipAuditFailure, serializeTipAuditFailure } from './tip-render-failure-diagnostic.mjs';
 
 const jobId = '00000000-0000-4000-8000-000000000011';
 const attempt = '00000000-0000-4000-8000-000000000022';
@@ -139,6 +140,112 @@ test('strict private delivery requires both evidence and OIDC before any network
 
 const failure = 'V11 speech alignment failed (signature_retry_insufficient); GitHub run 123';
 const failed = { ok: true, jobId, status: 'failed' };
+const auditFailure = 'V11 technical delivery proof failed (render_audit_rejected); GitHub run 123';
+const auditReport = {
+  contract: 'tip-v11-fr-objective-media-evidence-v1',
+  passed: false,
+  audio_waveform: { passed: false, segments: [
+    { passed: false, segment: 'private scene label', narration_similarity: 0.91, narration_gain_ratio: 0.71,
+      min_audible_mix_similarity: 0.84, audible_mix_windows: 2 },
+    { passed: false, narration_similarity: 0.99, narration_gain_ratio: 0.8,
+      min_audible_mix_similarity: 0, audible_mix_windows: 0 },
+    { passed: true, narration_similarity: 0.97, narration_gain_ratio: 1.1,
+      min_audible_mix_similarity: 0.97, audible_mix_windows: 1 },
+  ] },
+  sampled_frame_ocr: { passed: false, frames: [
+    { passed: false, check: 'private OCR text', expected_text_sha256: 'c'.repeat(64), frame: 100 },
+    { passed: true, check: 'other content' },
+  ] },
+  final_french_speech: { passed: false, text: 'private speech' },
+};
+
+test('terminal V11 audit diagnostic projects failed metrics and strips private report content', () => {
+  const diagnostic = classifyTipAuditFailure('render_audit_rejected', auditReport);
+  assert.deepEqual(diagnostic, { version: 1, stage: 'quality', code: 'render_audit_audio_and_ocr_rejected', checks: [
+    { key: 'audio_segments_failed', actual: 2, threshold: 0, relation: 'eq' },
+    { key: 'audio_min_narration_similarity', actual: 0.91, threshold: 0.96, relation: 'gte' },
+    { key: 'audio_min_mix_similarity', actual: 0.84, threshold: 0.94, relation: 'gte' },
+    { key: 'audio_min_audible_windows', actual: 0, threshold: 1, relation: 'gte' },
+    { key: 'ocr_frames_failed', actual: 1, threshold: 0, relation: 'eq' },
+  ] });
+  const packet = serializeTipAuditFailure(diagnostic);
+  assert.deepEqual(JSON.parse(packet), diagnostic);
+  assert.doesNotMatch(packet, /private|sha256|frame":/);
+  assert.match(packet, /^[\x20-\x7e]{1,1800}$/);
+
+  const ocrOnly = classifyTipAuditFailure('render_audit_rejected', { ...auditReport, audio_waveform: { passed: true } });
+  assert.equal(ocrOnly.code, 'render_audit_sampled_ocr_rejected');
+  assert.deepEqual(ocrOnly.checks, [diagnostic.checks.at(-1)]);
+  const audioOnly = classifyTipAuditFailure('render_audit_rejected', { ...auditReport,
+    audio_waveform: { passed: false, segments: [{ passed: true }] }, sampled_frame_ocr: { passed: true } });
+  assert.deepEqual(audioOnly, { version: 1, stage: 'quality', code: 'render_audit_audio_waveform_rejected', checks: [] });
+  assert.deepEqual(classifyTipAuditFailure('render_audit_unavailable'), {
+    version: 1, stage: 'quality', code: 'render_audit_unavailable', checks: [],
+  });
+  assert.equal(classifyTipAuditFailure('render_audit_rejected', { ...auditReport, passed: true }).code,
+    'render_audit_rejected');
+});
+
+test('terminal failure attaches only a verified and compatible audit diagnostic', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'jamm-tip-audit-failure-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, 'diagnostic.json');
+  const diagnostic = classifyTipAuditFailure('render_audit_rejected', auditReport);
+  const headers = [];
+  const transport = { request: async (_url, options) => {
+    headers.push(options.headers);
+    return Response.json(failed);
+  } };
+  await writeFile(path, JSON.stringify(diagnostic) + '\n', { mode: 0o600 });
+  assert.equal(await deliverTipFailure(auditFailure, { ...env, TIP_VIDEO_DIAGNOSTIC_FILE: path }, transport), 'recorded');
+  assert.equal(headers[0]['X-Error'],
+    'V11 technical delivery proof failed (render_audit_audio_and_ocr_rejected); GitHub run 123');
+  assert.deepEqual(JSON.parse(headers[0]['X-Video-Diagnostic']), diagnostic);
+  const invalidPackets = [
+    { ...diagnostic, privateText: 'never forward this' },
+    { ...diagnostic, code: 'render_audit_unavailable', checks: [] },
+    { ...diagnostic, checks: [{ ...diagnostic.checks[0], threshold: 1 }] },
+    { ...diagnostic, checks: [{ ...diagnostic.checks[0], actual: 0 }] },
+    { ...diagnostic, checks: [{ ...diagnostic.checks[0], key: 'unknown_key' }] },
+    { ...diagnostic, checks: [diagnostic.checks[0], diagnostic.checks[0]] },
+    { ...diagnostic, code: 'render_audit_sampled_ocr_rejected' },
+  ];
+  for (const packet of invalidPackets) {
+    await writeFile(path, JSON.stringify(packet) + '\n', { mode: 0o600 });
+    assert.equal(await deliverTipFailure(auditFailure, { ...env, TIP_VIDEO_DIAGNOSTIC_FILE: path }, transport), 'recorded');
+  }
+  for (const entry of headers.slice(1)) {
+    assert.equal(entry['X-Error'], auditFailure);
+    assert.equal(entry['X-Video-Diagnostic'], undefined);
+  }
+});
+
+test('audit diagnostics preserve every supported failing measure in one bounded packet', () => {
+  const diagnostic = classifyTipAuditFailure('render_audit_rejected', { ...auditReport,
+    audio_waveform: {
+      ...auditReport.audio_waveform,
+      failure_measurements: { audio_length_difference_samples: 3_001, audio_signature_tail_match: 0,
+        audio_min_mix_gain: 0.64, audio_max_mix_gain: 1.21 },
+      segments: [
+        ...auditReport.audio_waveform.segments,
+        { passed: false, narration_gain_ratio: 1.3, narration_similarity: 0.9599999, audible_mix_windows: 1 },
+        { passed: false, narration_gain_ratio: 0.6, audible_mix_windows: 1 },
+        { passed: false, audible_mix_windows: 0 },
+      ],
+    },
+  });
+  assert.equal(diagnostic.checks.length, 11);
+  assert.deepEqual(diagnostic.checks.slice(0, 4), [
+    { key: 'audio_length_difference_samples', actual: 3_001, threshold: 3_000, relation: 'lte' },
+    { key: 'audio_signature_tail_match', actual: 0, threshold: 1, relation: 'eq' },
+    { key: 'audio_min_mix_gain', actual: 0.64, threshold: 0.65, relation: 'gte' },
+    { key: 'audio_max_mix_gain', actual: 1.21, threshold: 1.20, relation: 'lte' },
+  ]);
+  assert.equal(diagnostic.checks.at(-1).key, 'ocr_frames_failed');
+  const packet = serializeTipAuditFailure(diagnostic);
+  assert.ok(Buffer.byteLength(packet) <= 1800);
+  assert.deepEqual(JSON.parse(packet), diagnostic);
+});
 
 test('terminal failure retries the unchanged signed callback after transport loss and temporary refusal', async () => {
   const requests = [];

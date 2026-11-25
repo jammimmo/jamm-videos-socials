@@ -7,7 +7,7 @@ import { ensureBrowser } from '@remotion/renderer';
 import { compareTipRunnerParity } from './compare-tip-runner-parity.mjs';
 import { assertTipSourceRuntime, expectedTipRuntime } from './tip-runtime.mjs';
 
-const [fixtureLog, output, sourceSha, ffmpeg, ffprobe] = process.argv.slice(2);
+const [fixtureLog, output, sourceSha, ffmpeg, ffprobe, shortsLog] = process.argv.slice(2);
 const root = process.cwd();
 const digest = async path => {
   const sha = createHash('sha256');
@@ -20,13 +20,12 @@ const version = (command, option = '--version') => {
   return value;
 };
 
-const fixtureLine = (await readFile(fixtureLog, 'utf8')).trim().split('\n').at(-1);
-const fixture = JSON.parse(fixtureLine);
-const sha256 = /^[a-f0-9]{64}$/u;
-if (fixture.status !== 'passed' || fixture.scope !== 'non-publishable-offline-remotion-smoke' || fixture.retainedArtifact !== false
-  || ![fixture.decodedVideoSha256, fixture.decodedAudioSha256].every(value => typeof value === 'string' && sha256.test(value))) {
-  throw new Error('Expected a completed synthetic renderer fixture');
+async function readFixture(path) {
+  const fixtureLine = (await readFile(path, 'utf8')).trim().split('\n').at(-1);
+  return JSON.parse(fixtureLine);
 }
+const fixture = await readFixture(fixtureLog);
+const shortsFixture = shortsLog ? await readFixture(shortsLog) : undefined;
 const browser = await ensureBrowser({
   onBrowserDownload() { throw new Error('The locked Remotion Chromium was not prepared'); },
 });
@@ -50,6 +49,7 @@ const receipt = {
     speechRuntimeSha256: (await assertTipSourceRuntime((await expectedTipRuntime()).sha256)).sha256,
   },
   fixture,
+  ...(shortsFixture && { shortsFixture }),
 };
 compareTipRunnerParity(sourceSha, receipt, receipt);
 await writeFile(output, `${JSON.stringify(receipt, null, 2)}\n`, { flag: 'wx' });

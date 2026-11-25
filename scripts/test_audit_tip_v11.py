@@ -9,10 +9,40 @@ import wave
 from align_tip_v11 import ASR_REVISION, GREETING_WINDOW_EVIDENCE, PHONE_WINDOW_EVIDENCE, align, align_with_signature_retry, tokens
 from align_tip_v11 import GREETING_POSITION_EVIDENCE, GREETING_VAD_SHA256
 from audit_tip_v11 import (
-    AUDIO_PRESERVATION_WINDOW, CAPTION_SCENES, SAMPLE_RATE, bind_manifest, measure_audio,
-    measure_audio_preservation, normalized_ocr_text, sha256, verify_alignment,
+    AUDIO_PRESERVATION_WINDOW, CAPTION_SCENES, SAMPLE_RATE, SHORTS_CAPTION_HEIGHT, SHORTS_CAPTION_WIDTH,
+    bind_manifest, emphasize_shorts_word_gap, ink_ranges, measure_audio, measure_audio_preservation,
+    normalized_ocr_text, sha256, verify_alignment,
 )
 from test_align_tip_v11 import SEGMENTS, speech
+
+
+class ShortsCaptionPreprocessingTest(unittest.TestCase):
+    @staticmethod
+    def image(gap):
+        width, height = SHORTS_CAPTION_WIDTH, SHORTS_CAPTION_HEIGHT
+        rows = [bytearray([22]) * width for _ in range(height)]
+        # A bright decoration and three sets of glyph pixels. The space after
+        # the second glyph is the only possible short-word separation.
+        for row in rows:
+            row[7:11] = bytes([190]) * 4
+        for row in rows[20:45]:
+            for left, right in [(23, 28), (32, 37), (37 + gap, 54 + gap)]:
+                row[left:right] = bytes([240]) * (right - left)
+        return f'P5\n{width} {height}\n255\n'.encode() + b''.join(rows)
+
+    def test_changes_only_a_measured_gap_and_excludes_the_fixed_decoration(self):
+        transformed = emphasize_shorts_word_gap(self.image(9))
+        self.assertIsNotNone(transformed)
+        _, size, _, pixels = transformed.split(b'\n', 3)
+        width, height = map(int, size.split())
+        self.assertEqual((width, height), (728, 110))
+        row = pixels[32 * width:33 * width]
+        self.assertEqual(list(ink_ranges(value == 0 for value in row)), [(17, 22), (26, 31), (46, 63)])
+
+    def test_ordinary_letter_kerning_is_not_word_spacing(self):
+        self.assertIsNone(emphasize_shorts_word_gap(self.image(4)))
+        self.assertNotEqual(normalized_ocr_text('caption_step', 'Motlié'),
+                            normalized_ocr_text('caption_step', 'Mot lié'))
 
 
 class V11FinalEvidenceTest(unittest.TestCase):
@@ -29,6 +59,7 @@ class V11FinalEvidenceTest(unittest.TestCase):
     def test_confirms_a_single_mux_offset_and_expected_gain(self):
         result = measure_audio(self.segments, self.voice, self.voice, self.final)
         self.assertTrue(result['passed'])
+        self.assertNotIn('failure_measurements', result)
         self.assertEqual(result['lag_samples'], 48)
         self.assertGreater(result['segments'][0]['narration_similarity'], .9999)
 
@@ -56,8 +87,26 @@ class V11FinalEvidenceTest(unittest.TestCase):
         final[tail_start + lag:tail_end + lag] = array.array('h', [0]) * len(tail)
         result = measure_audio(segments, self.voice, self.voice, final)
         self.assertFalse(result['passed'])
+        self.assertEqual(result['failure_measurements']['audio_signature_tail_match'], 0)
         self.assertTrue(result['segments'][0]['passed'])
         self.assertFalse(result['segments'][1]['passed'])
+
+    def test_reports_audio_length_and_window_gain_failures(self):
+        self.final.extend(array.array('h', [0]) * (SAMPLE_RATE // 8 + 1))
+        result = measure_audio(self.segments, self.voice, self.voice, self.final)
+        self.assertFalse(result['passed'])
+        self.assertTrue(all(segment['passed'] for segment in result['segments']))
+        self.assertEqual(result['failure_measurements']['audio_length_difference_samples'], SAMPLE_RATE // 8 + 49)
+
+        mix = self.voice[:]
+        window = SAMPLE_RATE // 4
+        mix[:window] = array.array('h', (round(sample / 2) for sample in mix[:window]))
+        mix[window:2 * window] = array.array('h', (sample * 2 for sample in mix[window:2 * window]))
+        result = measure_audio(self.segments, self.voice, mix, self.final[:SAMPLE_RATE * 4 + 48])
+        self.assertFalse(result['passed'])
+        self.assertLess(result['failure_measurements']['audio_min_mix_gain'], .65)
+        self.assertGreater(result['failure_measurements']['audio_max_mix_gain'], 1.20)
+        self.assertEqual(result['failure_measurements']['audio_signature_tail_match'], 1)
 
     def preservation(self, decoded, mix=None):
         buffer = io.BytesIO()
@@ -282,6 +331,19 @@ class V11FinalEvidenceTest(unittest.TestCase):
                          {'narration_text_sha256': mix}, {'props_sha256': mix}):
             with self.assertRaisesRegex(ValueError, 'differs from the audited render inputs'):
                 bind_manifest(json.dumps(manifest | override).encode(), *args)
+        shorts_props = json.dumps(props | {'destination': 'youtube'}).encode()
+        shorts = manifest | {'props_sha256': sha256(shorts_props), 'master_visual_profile': 'youtube-shorts-v1',
+                             'caption_geometry': {'status': 'matched',
+                                                  'mask': 'tip-v11-youtube-shorts-caption-20261125-v1',
+                                                  'mask_bounds': [76, 1286, 838, 1372]}}
+        self.assertEqual(bind_manifest(json.dumps(shorts).encode(), shorts_props, *args[1:])['master_visual_profile'],
+                         'youtube-shorts-v1')
+        for invalid in (None, 'shared', 'instagram'):
+            with self.subTest(profile=invalid), self.assertRaisesRegex(ValueError, 'visual profile'):
+                bind_manifest(json.dumps(shorts | {'master_visual_profile': invalid}).encode(), shorts_props, *args[1:])
+        with self.assertRaisesRegex(ValueError, 'visual profile'):
+            bind_manifest(json.dumps(shorts | {'caption_geometry': {'status': 'inconclusive'}}).encode(),
+                          shorts_props, *args[1:])
 
 
 if __name__ == '__main__':

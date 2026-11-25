@@ -6,9 +6,25 @@ import test from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { fitTipV11Caption, GeneralScene } from '../src/compositions/TipV11Fr.tsx';
-import { CAPTION_GEOMETRY_MASK, TIKTOK_CAPTION_MASK, captionSampleFrames, containsBounds, pixelBounds, tipV11CaptionMask, tipV11Layout } from '../src/compositions/tip-v11-caption-geometry.ts';
+import {
+  CAPTION_GEOMETRY_MASK, captionSampleFrames, containsBounds, pixelBounds, tipV11CaptionMask, tipV11Layout,
+  TIKTOK_CAPTION_MASK, YOUTUBE_SHORTS_CAPTION_MASK,
+} from '../src/compositions/tip-v11-caption-geometry.ts';
 import { summarizeCaptionGeometry } from './tip-v11-caption-geometry.mjs';
 import { renderTipV11Destinations } from './render-tip-v11-destinations.mjs';
+import { parseTipOfflineSmokeOptions } from './offline-tip-v11-smoke.mjs';
+
+test('the explicit Shorts fixture requires French OCR unless a local English diagnostic is requested', () => {
+  assert.deepEqual(parseTipOfflineSmokeOptions(['--destination-layouts']),
+    { shortsMaster: false, destinationLayouts: true, auditLanguage: undefined });
+  assert.deepEqual(parseTipOfflineSmokeOptions(['--destination-layouts', '--ocr-language=fra']),
+    { shortsMaster: false, destinationLayouts: true, auditLanguage: 'fra' });
+  assert.deepEqual(parseTipOfflineSmokeOptions(['--youtube-shorts-master']),
+    { shortsMaster: true, destinationLayouts: false, auditLanguage: 'fra' });
+  assert.equal(parseTipOfflineSmokeOptions(['--youtube-shorts-master', '--ocr-language=eng']).auditLanguage, 'eng');
+  assert.throws(() => parseTipOfflineSmokeOptions(['--ocr-language=fra', '--ocr-language=eng']), /single/);
+  assert.throws(() => parseTipOfflineSmokeOptions(['--ocr-language=deu']), /single/);
+});
 
 test('V11 shows the full advice heading, including the end of a long sentence', () => {
   const text = 'Mandatez un agent immobilier local de confiance pour visiter les biens et évaluer leur état.';
@@ -58,10 +74,30 @@ test('the TikTok caption mask is raised above the native description and keeps r
   assert.ok(layout.top + (layout.captionTop + 146) * layout.scale < 1340);
 });
 
+test('the Shorts master has a distinct mask inside its measured overlay margins', () => {
+  const { left, top, scale, captionTop, safeBounds } = tipV11Layout('youtube');
+  const mask = tipV11CaptionMask('youtube');
+  assert.deepEqual(mask, { id: YOUTUBE_SHORTS_CAPTION_MASK, bounds: [76, 1286, 838, 1372] });
+  assert.deepEqual(safeBounds, [76, 298, 838, 1372]);
+  assert.ok(containsBounds(safeBounds, mask.bounds));
+  assert.ok(containsBounds(safeBounds, [
+    Math.floor(left + 64 * scale), Math.floor(top + 160 * scale),
+    Math.ceil(left + 960 * scale), Math.ceil(top + 258 * scale),
+  ]));
+  const preferredSizes = [];
+  assert.equal(fitTipV11Caption(size => {
+    preferredSizes.push(size);
+    return size === 42 ? 118 : 114;
+  }, 116, 42), true);
+  assert.deepEqual(preferredSizes, [42, 41]);
+  assert.ok(Math.ceil(top + (captionTop + 116) * scale) <= mask.bounds[3]);
+});
+
 test('destination export rules reject duplicates and long Facebook clips before reading audio', async () => {
   const props = { durationInFrames: 90 * 30 + 1 };
   await assert.rejects(renderTipV11Destinations({ props, selectedDestinations: ['facebook'] }), /narration length/i);
   await assert.rejects(renderTipV11Destinations({ props, selectedDestinations: ['tiktok', 'tiktok'] }), /distinct/i);
+  await assert.rejects(renderTipV11Destinations({ props, selectedDestinations: ['youtube'] }), /supported destinations/i);
 });
 
 const geometryRun = '44444444-4444-4444-8444-444444444444';

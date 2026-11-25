@@ -7,10 +7,21 @@ import { freshTipContract, OUTRO } from './fresh-tip-contract.mjs';
 import { makeTipV11Spec, TIP_V11_BRAND, TIP_V11_SLOGAN } from './tip-v11-contract.mjs';
 import { digestTipValue } from './tip-v11-render-manifest.mjs';
 import { parseReviewedNarration, REVIEWED_NARRATION_DISPATCH, stagePrivateReviewedNarration, TIP_DELIVERY_ORIGIN } from './tip-v11-reviewed-narration.mjs';
+import { YOUTUBE_SHORTS_PROFILE } from '../src/compositions/tip-v11-caption-geometry.ts';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HEX64_RE = /^[a-f0-9]{64}$/;
 export const TIP_DESTINATION_MEDIA_CONTRACT = 'tip-v11-destination-manifest-v1';
+
+export function hasApprovedTipMasterVisualProfile({
+  masterVisualProfile: profile, destinationMediaContract, mediaStorageMode, reviewedNarration,
+}, rendererSha) {
+  return profile != null && typeof profile === 'object' && !Array.isArray(profile)
+    && Object.keys(profile).length === 2 && Object.hasOwn(profile, 'id') && Object.hasOwn(profile, 'rendererSha')
+    && profile.id === YOUTUBE_SHORTS_PROFILE && profile.rendererSha === rendererSha
+    && destinationMediaContract === TIP_DESTINATION_MEDIA_CONTRACT && mediaStorageMode === 'job_owned_v1'
+    && parseReviewedNarration(reviewedNarration, rendererSha) !== null;
+}
 
 function object(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -78,6 +89,10 @@ export function materializeDispatchedTip(raw, { legacy = false, rendererSha } = 
   if ((reviewed && !reviewedNarration) || (!reviewed && Object.hasOwn(evidence, 'reviewedNarration'))) {
     throw new Error('invalid reviewed V11 narration contract or renderer identity');
   }
+  const masterVisualProfile = Object.hasOwn(evidence, 'masterVisualProfile');
+  if (masterVisualProfile && (!destinations || !hasApprovedTipMasterVisualProfile(evidence, rendererSha))) {
+    throw new Error('invalid V11 master visual profile or renderer identity');
+  }
   const strictDelivery = v11 && (reviewed || destinations || evidence.mediaStorageMode === 'job_owned_v1');
 
   const jobId = text(job.id, 'job.id', 36).toLowerCase();
@@ -121,6 +136,10 @@ export function materializeDispatchedTip(raw, { legacy = false, rendererSha } = 
       sourceScriptSha256: digestTipValue(content.scriptFr),
       ...(reviewedNarration && { reviewedNarration }),
       ...(destinations && { destinationMediaContract: TIP_DESTINATION_MEDIA_CONTRACT }),
+      ...(masterVisualProfile && {
+        masterVisualProfile: { id: YOUTUBE_SHORTS_PROFILE, rendererSha },
+        mediaStorageMode: 'job_owned_v1',
+      }),
     };
     return { jobId, callbackUrl, uploadUrl, callbackToken, spec, ...(strictDelivery && { strictDelivery: true }) };
   }

@@ -311,6 +311,36 @@ test('reviewed V11 dispatch requires the exact renderer and cannot downgrade to 
   assert.equal(materialize(input).spec.reviewedNarration, undefined);
 });
 
+test('a Shorts master requires the exact reviewed render attempt and keeps legacy staged specs unchanged', () => {
+  const input = v11Payload();
+  const rendererSha = 'a'.repeat(40);
+  const profile = { id: 'youtube-shorts-v1', rendererSha };
+  input.contract = REVIEWED_NARRATION_DISPATCH;
+  Object.assign(input.evidence, {
+    reviewedNarration: { contract: 'tip-v11-reviewed-narration-v1', rendererSha, sha256: 'b'.repeat(64) },
+    destinationMediaContract: TIP_DESTINATION_MEDIA_CONTRACT, mediaStorageMode: 'job_owned_v1',
+  });
+  const legacy = materialize(input, { rendererSha }).spec;
+  assert.equal(legacy.masterVisualProfile, undefined);
+  assert.equal(legacy.mediaStorageMode, undefined);
+  input.evidence.masterVisualProfile = profile;
+  assert.deepEqual(materialize(input, { rendererSha }).spec.masterVisualProfile, profile);
+  assert.equal(materialize(input, { rendererSha }).spec.mediaStorageMode, 'job_owned_v1');
+  input.evidence.reviewedNarration.source = 'private-attempt';
+  assert.deepEqual(materialize(input, { rendererSha }).spec.masterVisualProfile, profile);
+  const invalid = [null, profile.id, { ...profile, rendererSha: 'c'.repeat(40) },
+    { ...profile, path: 'fixture' }, { ...profile, id: 'instagram' }];
+  for (const value of invalid) {
+    assert.throws(() => materialize({ ...input, evidence: { ...input.evidence, masterVisualProfile: value } },
+      { rendererSha }), /visual profile/u);
+  }
+  delete input.evidence.destinationMediaContract;
+  assert.throws(() => materialize(input, { rendererSha }), /visual profile/u);
+  delete input.evidence.reviewedNarration;
+  input.contract = 'jamm-tip-render-v2';
+  assert.throws(() => materialize(input, { rendererSha }), /visual profile/u);
+});
+
 function privateFixture(bytes, scratchRoot) {
   const payload = v11Payload();
   payload.contract = REVIEWED_NARRATION_DISPATCH;

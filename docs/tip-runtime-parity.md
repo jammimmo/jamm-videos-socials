@@ -56,6 +56,17 @@ the master and cannot establish destination parity. The recorded `f0c73b26`
 exercise had equal tools and decoded audio but different decoded pictures. A
 new hosted and mini-PC comparison is required for the v4 receipt.
 
+For an additional YouTube Shorts layout check, install the French Tesseract
+pack and pass `--with-shorts` after the absolute receipt path to
+`check-tip-runner-parity.sh`. This measures French OCR, captions and decoded
+brand visibility on the shared master and the explicit Shorts master inside
+the existing outbound-blocked namespace. The Facebook, Instagram and TikTok
+variants are rendered once from the shared fixture. Both masters must use the
+same decoded synthetic audio and produce distinct pictures. The two runtimes
+must supply the extra Shorts fixture when comparing a Shorts-enabled receipt.
+The synthetic receipts establish format and layout. Speech and editorial
+review are handled by the production checks.
+
 The production Worker currently accepts only the existing GitHub-hosted advice
 identity. A qualified mini-PC fixture does not grant it a production identity.
 Runner identity authorization remains a separate explicit change.

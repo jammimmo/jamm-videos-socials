@@ -12,7 +12,7 @@ from align_tip_v11 import (
     align, align_with_phone_retry,
     align_with_signature_retry, recognize_initial_words, recognize_words, report_alignment_failure, tokens,
     alignment_failure_diagnostics, alignment_failure_receipt, audible_windows, bounded_domain_boundary,
-    canonical_signature_brand,
+    canonical_signature_brand, corroborated_dakar_signature,
 )
 from audit_tip_v11_speech import recognize_model_wav
 
@@ -744,6 +744,82 @@ class CorroboratedSignatureTests(unittest.TestCase):
         self.body[0]['word'], self.body[1]['word'] = 'prochains', 'conseils'
         with self.assertRaises(ValueError):
             self.compare(self.full, self.focus)
+
+    def fused_closing(self):
+        # Archive-derived timing and confidence on both passes of the same input.
+        # The continuation stands in for uncredited phonetic output.
+        scale = 58.8 / self.body[-1]['end']
+        self.body = [{**row, 'start': row['start'] * scale, 'end': row['end'] * scale} for row in self.body]
+        self.duration = 63.893
+        self.sound = [(0, 58.8), (59.4, 59.9), (60.4, 61.0), (61.5, 62.0), (62.3, 62.9)]
+        text = [' À', ' bientôt,', ' Djamimo,', ' suite,', ' finale.']
+        return [
+            [{'word': word, 'start': start, 'end': end, 'probability': confidence}
+             for word, (start, end, confidence) in zip(text, pass_rows)]
+            for pass_rows in [
+                [(59.10, 59.48, .603), (59.48, 59.80, .999), (60.18, 60.94, .997),
+                 (61.50, 61.94, .827), (62.40, 62.96, .779)],
+                [(58.699958333333335, 59.45995833333333, .420), (59.45995833333333, 59.799958333333336, .998),
+                 (60.25995833333334, 60.919958333333334, .675), (61.519958333333335, 61.93995833333334, .836),
+                 (62.39995833333334, 62.95995833333333, .762)],
+            ]
+        ]
+
+    def test_corroborated_fused_brand_keeps_one_measured_interval_and_review(self):
+        full, focus = self.fused_closing()
+        originals = [[dict(row) for row in rows] for rows in (full, focus)]
+        words = self.body + full
+        with self.assertRaises(SignatureEvidenceError):
+            align(self.segments, words, self.duration, self.sound)
+
+        normalized = corroborated_dakar_signature(self.segments, words, len(self.body), focus,
+                                                   self.body[-1]['end'], self.sound, self.duration)
+        self.assertEqual(normalized, [*focus[:2], {**focus[2], 'word': 'Jamm Immo'}, *focus[3:]])
+        self.assertEqual(tokens(normalized[2]['word']), ['jamm', 'immo'])
+        result = self.compare(full, focus)
+        self.assertEqual(result['segments'][-1]['text'], self.segments[-1]['text'])
+        self.assertTrue(result['reviewRequired'])
+        self.assertEqual([full, focus], originals)
+
+    def test_fused_brand_needs_two_matching_confident_measurements(self):
+        full, focus = self.fused_closing()
+        for capture in range(2):
+            for change in ['wrong brand', 'low confidence', 'missing confidence', 'split brand']:
+                with self.subTest(capture=capture, change=change):
+                    observations = [[dict(row) for row in rows] for rows in (full, focus)]
+                    selected = observations[capture]
+                    brand = selected[2]
+                    if change == 'wrong brand':
+                        brand['word'] = ' Djamina,'
+                    elif change == 'low confidence':
+                        brand['probability'] = .599
+                    elif change == 'missing confidence':
+                        del brand['probability']
+                    else:
+                        midpoint = (brand['start'] + brand['end']) / 2
+                        selected[2:3] = [{**brand, 'word': ' Djam', 'end': midpoint},
+                                         {**brand, 'word': ' Imo,', 'start': midpoint}]
+                    with self.assertRaises(SignatureEvidenceError):
+                        self.compare(*observations)
+
+        shifted = [*focus[:2], {**focus[2], 'start': 59.92, 'end': 60.15}, *focus[3:]]
+        with self.assertRaises(SignatureEvidenceError):
+            self.compare(full, shifted, sound=sorted([*self.sound, (59.93, 60.12)]))
+
+    def test_fused_brand_stays_scoped_to_the_fixed_signature_and_voiced_continuation(self):
+        full, focus = self.fused_closing()
+        changed = [*self.segments[:-1], {**self.segments[-1],
+                   'text': 'À bientôt ! Jamm Immo ! Merci pour votre visite et votre confiance !'}]
+        with self.assertRaises(SignatureEvidenceError):
+            self.compare(full, focus, segments=changed)
+        for shortened in ((full[:-1], focus), (full, focus[:-1])):
+            with self.subTest(continuation=[len(rows) for rows in shortened]), self.assertRaises(SignatureEvidenceError):
+                self.compare(*shortened)
+        # A later noise keeps the first case inside the outer trailing-silence
+        # limit while both recognized continuation rows remain unvoiced.
+        for sound in [[(0, 61), (63, 63.1)], [(0, 61), (61.62, 61.78), (62.45, 62.6)]]:
+            with self.subTest(sound=sound), self.assertRaises(SignatureEvidenceError):
+                self.compare(full, focus, sound=sound)
 
 
 class GreetingPositionTests(unittest.TestCase):

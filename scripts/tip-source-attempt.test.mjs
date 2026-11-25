@@ -48,3 +48,23 @@ test('invalid attempts and unbounded failure messages fail before network access
   assert.deepEqual(await updateTipSourceAttempt(sourceJob, 'failed', 'arbitrary provider exception', env, request), { status: 'rejected' });
   assert.deepEqual(await updateTipSourceAttempt(sourceJob, 'start', 'voice_unavailable', env, request), { status: 'rejected' });
 });
+
+test('attests the exact bounded signature count with the failure and never sends it on start', async () => {
+  const diagnostic = { code: 'signature_retry_insufficient', matched_words: 2, expected_words: 10 };
+  let signedDigest;
+  const request = async (url, options) => {
+    if (url.hostname === 'fixture.actions.githubusercontent.com') {
+      signedDigest = url.searchParams.get('audience');
+      return Response.json({ value: 'fixture.signed.jwt' });
+    }
+    assert.equal(signedDigest, `urn:jammimmo:tip-v11:machine-source-attempt:${createHash('sha256').update(options.body).digest('hex')}`);
+    assert.deepEqual(JSON.parse(options.body), { sourceJob, action: 'failed', reason: 'source_evidence_inconclusive', diagnostic });
+    return Response.json({ failed: true, sourceJob });
+  };
+  assert.equal((await updateTipSourceAttempt(sourceJob, 'failed', 'source_evidence_inconclusive', env, request, diagnostic)).status, 'confirmed');
+  const forbidden = () => assert.fail('Invalid diagnostic must not call transport');
+  for (const packet of [{ ...diagnostic, matched_words: 3 }, { ...diagnostic, expected_words: 9 }, { ...diagnostic, transcript: 'private' }]) {
+    assert.equal((await updateTipSourceAttempt(sourceJob, 'failed', 'source_evidence_inconclusive', env, forbidden, packet)).status, 'rejected');
+  }
+  assert.equal((await updateTipSourceAttempt(sourceJob, 'start', null, env, forbidden, diagnostic)).status, 'rejected');
+});

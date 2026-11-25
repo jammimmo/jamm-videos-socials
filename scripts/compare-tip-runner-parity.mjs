@@ -11,6 +11,43 @@ const exactFixtureKeys = ['renderer', 'voiceSource', 'alignment', 'captionGeomet
 const destinations = ['facebook', 'instagram', 'tiktok'];
 const exactDestinationKeys = ['width', 'height', 'duration', 'videoFrames', 'captionGeometrySha256',
   'decodedVideoSha256', 'decodedAudioSha256'];
+const shortsProfile = 'youtube-shorts-v1';
+const shortsCaptionMask = 'tip-v11-youtube-shorts-caption-20261125-v1';
+const shortsBrandMask = 'tip-v11-youtube-shorts-brand-20261125-v1';
+const sharedBrandMask = 'tip-v11-observed-short-feed-brand-20261114-v1';
+
+function verifyFixture(fixture, lane) {
+  if (fixture?.status !== 'passed' || fixture.scope !== 'non-publishable-offline-remotion-smoke'
+    || fixture.renderer !== 'TipV11Fr' || fixture.voiceSource !== 'fixture'
+    || fixture.alignment !== 'local-word-timings' || fixture.captionGeometry !== 'matched'
+    || fixture.width !== 1080 || fixture.height !== 1920 || fixture.closedGopSeconds !== 3
+    || !Number.isFinite(fixture.duration) || fixture.duration <= 60 || fixture.duration > 120
+    || !Number.isSafeInteger(fixture.closedGopKeyframes) || fixture.closedGopKeyframes < 2
+    || !Number.isFinite(fixture.audioBitrate) || fixture.audioBitrate <= 0 || fixture.audioBitrate > 132_000
+    || !['mediaSha256', 'decodedVideoSha256', 'decodedAudioSha256'].every(key => digest.test(fixture[key] ?? ''))
+    || fixture.retainedArtifact !== false) {
+    throw new Error(`${lane}: incomplete or failed offline render`);
+  }
+}
+
+function matchesBounds(actual, expected) {
+  return Array.isArray(actual) && actual.length === expected.length && expected.every((bound, index) => actual[index] === bound);
+}
+
+function verifyFrenchVisualAudit(audit, frames, mask, bounds, lane) {
+  if (!audit || !digest.test(audit.reportSha256 ?? '') || !digest.test(audit.manifestSha256 ?? '')
+    || audit.frameCount !== frames || !Number.isSafeInteger(audit.cueCount) || audit.cueCount <= 0
+    || !Number.isSafeInteger(audit.sampleCount) || audit.sampleCount < audit.cueCount || audit.sampleCount > audit.cueCount * 3
+    || audit.brand?.language !== 'fra' || audit.brand.status !== 'matched' || audit.brand.mask !== mask
+    || !matchesBounds(audit.brand.mask_bounds, bounds)
+    || !Array.isArray(audit.brand.checks) || audit.brand.checks.length !== 8
+    || audit.brand.checks.some(check => check?.status !== 'matched')
+    || audit.ocr?.language !== 'fra' || audit.ocr.passed !== true
+    || !Array.isArray(audit.ocr.frames) || audit.ocr.frames.length !== 10
+    || audit.ocr.frames.some(frame => frame?.status !== 'matched' || frame.passed !== true)) {
+    throw new Error(`${lane}: incomplete French OCR or decoded visibility proof`);
+  }
+}
 
 function verifyReceipt(receipt, expectedSha, lane) {
   if (receipt?.schema !== 'jamm-tip-runner-parity-v4' || receipt.sourceSha !== expectedSha
@@ -22,16 +59,9 @@ function verifyReceipt(receipt, expectedSha, lane) {
       || (key.endsWith('Sha256') && !digest.test(value));
   })) throw new Error(`${lane}: incomplete toolchain fingerprint`);
   const fixture = receipt.fixture;
-  if (fixture?.status !== 'passed' || fixture.scope !== 'non-publishable-offline-remotion-smoke'
-    || fixture.renderer !== 'TipV11Fr' || fixture.voiceSource !== 'fixture'
-    || fixture.alignment !== 'local-word-timings' || fixture.captionGeometry !== 'matched'
-    || fixture.width !== 1080 || fixture.height !== 1920 || fixture.closedGopSeconds !== 3
-    || !Number.isFinite(fixture.duration) || fixture.duration <= 60 || fixture.duration > 120
-    || !Number.isSafeInteger(fixture.closedGopKeyframes) || fixture.closedGopKeyframes < 2
-    || !Number.isFinite(fixture.audioBitrate) || fixture.audioBitrate <= 0 || fixture.audioBitrate > 132_000
-    || !['mediaSha256', 'decodedVideoSha256', 'decodedAudioSha256'].every(key => digest.test(fixture[key] ?? ''))
-    || fixture.retainedArtifact !== false) {
-    throw new Error(`${lane}: incomplete or failed offline render`);
+  verifyFixture(fixture, lane);
+  if (fixture.masterVisualProfile !== undefined || fixture.masterCaptionMask !== undefined) {
+    throw new Error(`${lane}: expected the legacy master in the shared fixture`);
   }
   if (!Array.isArray(fixture.destinationLayouts) || fixture.destinationLayouts.length !== destinations.length) {
     throw new Error(`${lane}: incomplete destination render evidence`);
@@ -51,6 +81,18 @@ function verifyReceipt(receipt, expectedSha, lane) {
     }
     pictures.add(layout.decodedVideoSha256);
   }
+  if (Object.hasOwn(receipt, 'shortsFixture')) {
+    verifyFrenchVisualAudit(fixture.visualAudit, frames, sharedBrandMask, [120, 255, 870, 1511], lane);
+    const shorts = receipt.shortsFixture;
+    verifyFixture(shorts, lane);
+    if (shorts.masterVisualProfile !== shortsProfile
+      || shorts.masterCaptionMask !== shortsCaptionMask || !matchesBounds(shorts.masterCaptionMaskBounds, [76, 1286, 838, 1372])
+      || shorts.decodedAudioSha256 !== fixture.decodedAudioSha256 || pictures.has(shorts.decodedVideoSha256)
+      || Math.abs(shorts.duration - fixture.duration) > .12) {
+      throw new Error(`${lane}: invalid Shorts master render evidence`);
+    }
+    verifyFrenchVisualAudit(shorts.shortsAudit, frames, shortsBrandMask, [76, 298, 838, 1372], lane);
+  }
   return layouts;
 }
 
@@ -65,6 +107,15 @@ export function compareTipRunnerParity(expectedSha, hosted, mini) {
   }
   for (const key of exactFixtureKeys) {
     if (hosted.fixture[key] !== mini.fixture[key]) differences.push(`fixture.${key}`);
+  }
+  if (hosted.shortsFixture || mini.shortsFixture) {
+    if (!hosted.shortsFixture || !mini.shortsFixture) {
+      differences.push('shortsFixture');
+    } else {
+      for (const key of exactFixtureKeys) {
+        if (hosted.shortsFixture[key] !== mini.shortsFixture[key]) differences.push(`shortsFixture.${key}`);
+      }
+    }
   }
   const sameDestinationMediaBytes = {};
   for (const destination of destinations) {
@@ -81,6 +132,9 @@ export function compareTipRunnerParity(expectedSha, hosted, mini) {
     differences,
     sameMediaBytes: hosted.fixture.mediaSha256 === mini.fixture.mediaSha256,
     sameDestinationMediaBytes,
+    ...(hosted.shortsFixture && mini.shortsFixture && {
+      sameShortsMediaBytes: hosted.shortsFixture.mediaSha256 === mini.shortsFixture.mediaSha256,
+    }),
   };
 }
 

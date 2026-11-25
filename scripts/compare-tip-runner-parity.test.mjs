@@ -24,6 +24,53 @@ const receipt = () => ({
   },
 });
 
+function withShorts() {
+  const value = receipt();
+  const visualAudit = (mask, bounds) => ({
+    reportSha256: 'a'.repeat(64), manifestSha256: 'b'.repeat(64), frameCount: 2010, cueCount: 26, sampleCount: 78,
+    brand: { language: 'fra', status: 'matched', mask, mask_bounds: bounds,
+      checks: Array.from({ length: 8 }, () => ({ status: 'matched' })) },
+    ocr: { language: 'fra', passed: true,
+      frames: Array.from({ length: 10 }, () => ({ status: 'matched', passed: true })) },
+  });
+  const { destinationLayouts, ...master } = value.fixture;
+  value.fixture.visualAudit = visualAudit('tip-v11-observed-short-feed-brand-20261114-v1', [120, 255, 870, 1511]);
+  value.shortsFixture = {
+    ...master, decodedVideoSha256: '1'.repeat(64), mediaSha256: '2'.repeat(64), masterVisualProfile: 'youtube-shorts-v1',
+    masterCaptionMask: 'tip-v11-youtube-shorts-caption-20261125-v1', masterCaptionMaskBounds: [76, 1286, 838, 1372],
+    shortsAudit: visualAudit('tip-v11-youtube-shorts-brand-20261125-v1', [76, 298, 838, 1372]),
+  };
+  return value;
+}
+
+test('compares the explicit French Shorts lane without altering legacy parity', () => {
+  const hosted = withShorts();
+  const mini = withShorts();
+  assert.equal(compareTipRunnerParity(sourceSha, hosted, mini).sameShortsMediaBytes, true);
+  mini.shortsFixture.decodedVideoSha256 = '3'.repeat(64);
+  assert.deepEqual(compareTipRunnerParity(sourceSha, hosted, mini).differences, ['shortsFixture.decodedVideoSha256']);
+  assert.deepEqual(compareTipRunnerParity(sourceSha, hosted, receipt()).differences, ['shortsFixture']);
+  assert.equal(compareTipRunnerParity(sourceSha, receipt(), receipt()).status, 'matched');
+});
+
+test('requires decoded French evidence for both masters and the distinct Shorts layout', () => {
+  const hosted = withShorts();
+  for (const alter of [
+    candidate => { candidate.fixture.visualAudit = undefined; },
+    candidate => { candidate.shortsFixture.shortsAudit.ocr.language = 'eng'; },
+    candidate => { candidate.shortsFixture.shortsAudit.ocr.frames[0].passed = false; },
+    candidate => { candidate.shortsFixture.shortsAudit.brand.checks.pop(); },
+    candidate => { candidate.shortsFixture.shortsAudit.brand.mask = 'tip-v11-observed-short-feed-brand-20261114-v1'; },
+  ]) {
+    const candidate = withShorts();
+    alter(candidate);
+    assert.throws(() => compareTipRunnerParity(sourceSha, hosted, candidate), /French OCR or decoded visibility proof/);
+  }
+  const mixed = withShorts();
+  mixed.shortsFixture.decodedVideoSha256 = hosted.fixture.decodedVideoSha256;
+  assert.throws(() => compareTipRunnerParity(sourceSha, hosted, mixed), /invalid Shorts master/);
+});
+
 test('a different speech runtime fails even when both decoded media streams match', () => {
   const hosted = receipt(); const mini = receipt();
   mini.toolchain.speechRuntimeSha256 = '7'.repeat(64);

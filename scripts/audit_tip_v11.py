@@ -5,7 +5,7 @@ from array import array
 import base64
 import hashlib
 import io
-from itertools import zip_longest
+from itertools import groupby, zip_longest
 import json
 import math
 import os
@@ -22,7 +22,9 @@ from align_tip_v11 import (
     FIXED_GREETING_TEXT, GREETING_POSITION_EVIDENCE, GREETING_VAD_FRAME, GREETING_VAD_MIN_SAMPLES, GREETING_VAD_SHA256,
     MAX_GREETING_SECONDS,
 )
-from audit_tip_v11_brand_cta import measure_final_brand_cta
+from audit_tip_v11_brand_cta import (
+    SHORTS_CAPTION_BOUNDS, SHORTS_CAPTION_MASK, SHORTS_OCR_TARGETS, SHORTS_PROFILE, measure_final_brand_cta,
+)
 from audit_tip_v11_speech import measure_final_french_speech
 
 
@@ -38,6 +40,19 @@ SEGMENT_IDS = (*CAPTION_SCENES, 'services', 'tools', 'domain', 'contact', 'phone
 CAPTION_WIDTH, CAPTION_HEIGHT = 746, 162
 CAPTION_CROP = f'{CAPTION_WIDTH}:{CAPTION_HEIGHT}:128:1372'
 CONTACT_CROPS = {'domain': '560:104:130:710', 'phone': '578:74:128:898', 'brand': '386:44:132:1056'}
+SHORTS_CAPTION_WIDTH, SHORTS_CAPTION_HEIGHT = 716, 86
+SHORTS_CAPTION_CROP = f'{SHORTS_CAPTION_WIDTH}:{SHORTS_CAPTION_HEIGHT}:122:1286'
+
+
+def ffmpeg_crop(bounds):
+    left, top, right, bottom = bounds
+    return f'{right - left}:{bottom - top}:{left}:{top}'
+
+
+SHORTS_CONTACT_CROPS = {
+    name: ffmpeg_crop(SHORTS_OCR_TARGETS[label][0])
+    for name, label in (('domain', 'domain'), ('phone', 'phone'), ('brand', 'brand_socials'))
+}
 AUDIO_PRESERVATION_CONTRACT = 'tip-v11-final-audio-preservation-v1'
 AUDIO_CODEC_PRESERVATION_CONTRACT = 'tip-v11-final-audio-preservation-v2'
 AUDIO_PRESERVATION_WINDOW = SAMPLE_RATE // 50
@@ -166,6 +181,8 @@ def measure_audio(segments, narration, mix, final):
     lag = find_lag(mix, final)
     window_size = SAMPLE_RATE // 4
     results = []
+    mix_gains = []
+    signature_tail_match = True
     for segment in segments:
         start = round(segment['start'] * SAMPLE_RATE)
         end = round(segment['end'] * SAMPLE_RATE)
@@ -175,24 +192,37 @@ def measure_audio(segments, narration, mix, final):
             for offset in range(start, end, window_size)
         ]
         audible = [(score, gain) for score, gain, rms in windows if rms >= 800]
+        mix_gains.extend(gain for _, gain in audible)
+        if segment['id'] == 'signature':
+            signature_tail_match = signature_tail_matches(narration, final, start, end, lag)
         # The encoded stereo-to-mono path can preserve a waveform at −3 dB.
         # Keep that case while rejecting attenuated or missing narration.
         passed = (
             voice_score >= .96 and .65 <= voice_gain <= 1.15 and bool(audible)
             and all(score >= .94 and .65 <= gain <= 1.20 for score, gain in audible)
-            and (segment['id'] != 'signature' or signature_tail_matches(narration, final, start, end, lag))
+            and (segment['id'] != 'signature' or signature_tail_match)
         )
+        mix_similarity = min((score for score, _ in audible), default=0)
         results.append({
             'segment': segment['id'], 'passed': passed,
-            'narration_similarity': round(voice_score, 5),
-            'narration_gain_ratio': round(voice_gain, 5),
+            'narration_similarity': round(voice_score, 5) if passed else voice_score,
+            'narration_gain_ratio': round(voice_gain, 5) if passed else voice_gain,
             'audible_mix_windows': len(audible),
-            'min_audible_mix_similarity': round(min((score for score, _ in audible), default=0), 5),
+            'min_audible_mix_similarity': round(mix_similarity, 5) if passed else mix_similarity,
         })
-    return {
-        'passed': abs(len(final) - len(mix)) <= SAMPLE_RATE // 8 and all(result['passed'] for result in results),
+    length_difference = abs(len(final) - len(mix))
+    report = {
+        'passed': length_difference <= SAMPLE_RATE // 8 and all(result['passed'] for result in results),
         'sample_rate': SAMPLE_RATE, 'lag_samples': lag, 'segments': results,
     }
+    if not report['passed']:
+        report['failure_measurements'] = {
+            'audio_length_difference_samples': length_difference,
+            'audio_signature_tail_match': int(signature_tail_match),
+            'audio_min_mix_gain': min(mix_gains, default=None),
+            'audio_max_mix_gain': max(mix_gains, default=None),
+        }
+    return report
 
 
 def render_audit_effects(alignment):
@@ -406,10 +436,11 @@ def normalized_ocr_text(identity, value):
     return normalized_words(value)
 
 
-def high_contrast_caption(image, threshold):
+def high_contrast_caption(image, threshold, size=(CAPTION_WIDTH, CAPTION_HEIGHT)):
     signature, shape, depth, pixels = image.split(b'\n', 3)
-    if (signature != b'P5' or shape != f'{CAPTION_WIDTH} {CAPTION_HEIGHT}'.encode() or depth != b'255'
-            or len(pixels) != CAPTION_WIDTH * CAPTION_HEIGHT):
+    width, height = size
+    if (signature != b'P5' or shape != f'{width} {height}'.encode() or depth != b'255'
+            or len(pixels) != width * height):
         raise ValueError('Unexpected OCR frame layout')
     # Rendered V11 captions use light text on a dark card. Convert the
     # captured pixels to dark-on-white without changing character geometry.
@@ -417,12 +448,60 @@ def high_contrast_caption(image, threshold):
     return b'\n'.join((signature, shape, depth, pixels.translate(lookup)))
 
 
+def ink_ranges(active):
+    start = 0
+    for ink, run in groupby(active):
+        end = start + sum(1 for _ in run)
+        if ink:
+            yield start, end
+        start = end
+
+
+def emphasize_shorts_word_gap(image):
+    """Widen a measured blank before OCR without consulting the expected words."""
+    width, height = SHORTS_CAPTION_WIDTH, SHORTS_CAPTION_HEIGHT
+    binary = high_contrast_caption(image, 175, (width, height)).split(b'\n', 3)[3]
+    # The first 18 pixels end at x=140, inside the left decoration and before
+    # the layout's text begins at x≈143.
+    rows = [binary[y * width + 18:(y + 1) * width] for y in range(height)]
+    lines = list(ink_ranges(row.count(0) >= 2 for row in rows))
+    if not 1 <= len(lines) <= 2 or any(not 12 <= bottom - top <= 38 for top, bottom in lines):
+        return None
+    seams = {}
+    for top, bottom in lines:
+        columns = list(ink_ranges(0 in column for column in zip(*rows[top:bottom])))
+        if len(columns) < 2 or columns[0][0] > 16:
+            continue
+        start = columns[0][0]
+        # Only a narrow leading word with one clearly separate physical gap.
+        # Intra-word kerning is intentionally too small to enter this range.
+        gaps = [(left, right) for (_, left), (right, _) in zip(columns, columns[1:])
+                if 8 <= left - start <= 26 and 8 <= right - left <= 16]
+        if len(gaps) == 1:
+            left, right = gaps[0]
+            seams.update({y: (left + right) // 2 for y in range(top, bottom)})
+    if not seams:
+        return None
+    extra = b'\xff' * 6
+    border = b'\xff' * 12
+    row_width = width - 18 + len(extra) + 2 * len(border)
+    edges = b'\xff' * (row_width * len(border))
+    framed = []
+    for y, row in enumerate(rows):
+        seam = seams.get(y, len(row))
+        framed.append(border + row[:seam] + extra + row[seam:] + border)
+    return f'P5\n{row_width} {height + 2 * len(border)}\n255\n'.encode() + edges + b''.join(framed) + edges
+
+
 def frame_at(start, end, portion=.5):
     return round((start + (end - start) * portion) * FPS)
 
 
-def measure_text(video, alignment, language):
+def measure_text(video, alignment, language, *, shorts=False):
     segments = {segment['id']: segment for segment in alignment['segments']}
+    caption_crop = SHORTS_CAPTION_CROP if shorts else CAPTION_CROP
+    caption_size = (SHORTS_CAPTION_WIDTH, SHORTS_CAPTION_HEIGHT) if shorts else (CAPTION_WIDTH, CAPTION_HEIGHT)
+    contact_crops = SHORTS_CONTACT_CROPS if shorts else CONTACT_CROPS
     checks = []
     for identity in CAPTION_SCENES:
         segment = segments[identity]
@@ -431,22 +510,22 @@ def measure_text(video, alignment, language):
         if not cues:
             raise ValueError(f'Missing V11 caption cue for {identity}')
         cue = max(cues, key=lambda item: item['end'] - item['start'])
-        checks.append((f'caption_{identity}', frame_at(cue['start'], cue['end']), CAPTION_CROP, 6, cue['text']))
+        checks.append((f'caption_{identity}', frame_at(cue['start'], cue['end']), caption_crop, 6, cue['text']))
     domain = segments['domain']
     phone = segments['phone']
     socials = segments['socials']
     signature = segments['signature']
     checks.extend([
-        ('domain', frame_at(domain['start'] + .35, domain['end']), CONTACT_CROPS['domain'], 7, 'jammimmo.com'),
-        ('phone', frame_at(phone['start'], phone['end']), CONTACT_CROPS['phone'], 7, '+221 76 944 48 49'),
-        ('brand_socials', frame_at(socials['start'] + .45, socials['end']), CONTACT_CROPS['brand'], 7, 'Retrouvez Jamm Immo'),
-        ('brand_signature', frame_at(signature['start'], signature['end']), CONTACT_CROPS['brand'], 7, 'Retrouvez Jamm Immo'),
+        ('domain', frame_at(domain['start'] + .35, domain['end']), contact_crops['domain'], 7, 'jammimmo.com'),
+        ('phone', frame_at(phone['start'], phone['end']), contact_crops['phone'], 7, '+221 76 944 48 49'),
+        ('brand_socials', frame_at(socials['start'] + .45, socials['end']), contact_crops['brand'], 7, 'Retrouvez Jamm Immo'),
+        ('brand_signature', frame_at(signature['start'], signature['end']), contact_crops['brand'], 7, 'Retrouvez Jamm Immo'),
     ])
     results = []
     for identity, frame, crop, psm, expected in checks:
         image = command('ffmpeg', '-v', 'error', '-protocol_whitelist', 'file,pipe', '-f', 'mov',
                         '-ss', f'{frame / FPS:.6f}', '-i', video,
-                        '-an', '-frames:v', '1', '-vf', f'crop={crop},format=gray',
+                        '-an', '-frames:v', '1', '-vf', f'crop={crop}{":exact=1" if shorts else ""},format=gray',
                         '-f', 'image2pipe', '-c:v', 'pgm', '-')
         expected_text = normalized_ocr_text(identity, expected)
         if not expected_text:
@@ -454,8 +533,12 @@ def measure_text(video, alignment, language):
         attempts = []
         variants = [('grayscale', image)]
         if identity.startswith('caption_'):
-            variants.extend((f'caption_threshold_{threshold}', high_contrast_caption(image, threshold))
-                            for threshold in (90, 190))
+            spaced = emphasize_shorts_word_gap(image) if shorts else None
+            variants.extend([
+                ('caption_threshold_90', high_contrast_caption(image, 90, caption_size)) if spaced is None
+                else ('shorts_measured_word_gap', spaced),
+                ('caption_threshold_190', high_contrast_caption(image, 190, caption_size)),
+            ])
         for variant, pixels in variants:
             recognized = command('tesseract', 'stdin', 'stdout', '-l', language, '--psm', str(psm), data=pixels)
             actual_text = normalized_ocr_text(identity, recognized.decode('utf-8'))
@@ -493,8 +576,17 @@ def bind_manifest(manifest_data, props_data, alignment_data, alignment, media_sh
         or manifest.get('mix_wav_sha256') != mix_sha or manifest.get('media_sha256') != media_sha
     ):
         raise ValueError('V11 manifest differs from the audited render inputs')
-    return {'render_manifest_sha256': sha256(manifest_data),
-            'render_manifest_b64': base64.b64encode(manifest_data).decode('ascii')}
+    bound = {'render_manifest_sha256': sha256(manifest_data),
+             'render_manifest_b64': base64.b64encode(manifest_data).decode('ascii')}
+    if 'master_visual_profile' in manifest or 'destination' in props:
+        geometry = manifest.get('caption_geometry')
+        if (manifest.get('master_visual_profile') != SHORTS_PROFILE or props.get('destination') != 'youtube'
+                or not isinstance(geometry, dict) or geometry.get('status') != 'matched'
+                or geometry.get('mask') != SHORTS_CAPTION_MASK
+                or geometry.get('mask_bounds') != list(SHORTS_CAPTION_BOUNDS)):
+            raise ValueError('V11 master visual profile differs from the audited render inputs')
+        bound['master_visual_profile'] = SHORTS_PROFILE
+    return bound
 
 
 def audit(args):
@@ -521,12 +613,14 @@ def audit(args):
         decoded = pcm(decoded_pcm)
         audio = measure_audio(alignment['segments'], narration, mix, decoded)
         preservation = measure_audio_preservation(alignment, narration, mix, decoded_pcm, audio.get('lag_samples'))
-        text = measure_text(video, alignment, args.ocr_language)
+        profile = bound.pop('master_visual_profile', None)
+        layout = {'shorts': True} if profile == SHORTS_PROFILE else {}
+        text = measure_text(video, alignment, args.ocr_language, **layout)
         speech = {'final_french_speech': measure_final_french_speech(
             alignment['segments'], decoded_pcm, audio, folder, narration=narration, preservation=preservation,
         )} if args.measure_final_french else {}
         visibility = {'final_brand_cta_visibility': measure_final_brand_cta(
-            video, alignment, args.brand_logo, args.ocr_language,
+            video, alignment, args.brand_logo, args.ocr_language, **layout,
         )} if getattr(args, 'brand_logo', None) else {}
     return {
         'contract': 'tip-v11-fr-objective-media-evidence-v1',
@@ -557,6 +651,7 @@ def main():
     parser.add_argument('--measure-final-french', action='store_true')
     parser.add_argument('--brand-logo', type=Path, help='Audit visible brand and CTA in the final MP4 with the pinned logo')
     parser.add_argument('--report', type=Path, required=True)
+    parser.add_argument('--redact-errors', action='store_true', help='Omit paths and tool arguments from shared logs')
     args = parser.parse_args()
     if any((args.render_manifest, args.render_props, args.raw_wav)) and not all((args.render_manifest, args.render_props, args.raw_wav)):
         parser.error('manifest, render props and original narration are required together')
@@ -567,7 +662,8 @@ def main():
             json.dump(report, output, indent=2, sort_keys=True)
             output.write('\n')
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
-        parser.exit(2, f'V11 audit unavailable: {error}\n')
+        message = 'V11 audit unavailable' if args.redact_errors else f'V11 audit unavailable: {error}'
+        parser.exit(2, f'{message}\n')
     return 0 if report['passed'] else 1
 
 

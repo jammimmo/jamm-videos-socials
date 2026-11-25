@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 from audit_tip_v11 import audit
 from audit_tip_v11_brand_cta import (
-    CONTRACT, FRAME_PLAN, HEIGHT, MASK, OCR_TARGETS, WIDTH, check_tsv, decode_frames, logo_check, measure_final_brand_cta,
-    sample_plan, text_check,
+    CONTRACT, FRAME_PLAN, HEIGHT, MASK, OCR_TARGETS, SHORTS_BRAND_BOUNDS, SHORTS_BRAND_MASK, SHORTS_OCR_TARGETS,
+    WIDTH, check_tsv, decode_frames, inside, logo_check, measure_final_brand_cta, sample_plan, text_check,
 )
 
 
@@ -22,6 +22,13 @@ def fixture_alignment():
 
 
 class BrandCtaEvidenceTest(unittest.TestCase):
+    def test_shorts_keeps_all_ocr_targets_inside_its_own_brand_mask(self):
+        self.assertTrue(all(inside(bounds, SHORTS_BRAND_BOUNDS) for bounds, _, _ in SHORTS_OCR_TARGETS.values()))
+        with patch('audit_tip_v11_brand_cta.decode_frames', side_effect=ValueError('fixture')):
+            result = measure_final_brand_cta('fixture.mp4', fixture_alignment(), Path('unread.png'), 'fra', shorts=True)
+        self.assertEqual((result['mask'], result['mask_bounds'], result['status']),
+                         (SHORTS_BRAND_MASK, SHORTS_BRAND_BOUNDS, 'inconclusive'))
+
     def test_samples_only_the_fixed_intro_and_fully_visible_outro_windows(self):
         alignment = fixture_alignment()
         plan = sample_plan(alignment)
@@ -87,6 +94,24 @@ class BrandCtaEvidenceTest(unittest.TestCase):
         self.assertFalse(passed)
         self.assertEqual(metrics['kind'], 'alpha_rgb_mae')
         self.assertGreater(metrics['worst_tile_error_milli'], metrics['mean_error_milli'])
+
+    def test_shorts_whatsapp_uses_red_channel_and_keeps_exact_mask_and_confidence(self):
+        bounds, _, _ = SHORTS_OCR_TARGETS['whatsapp']
+        left, top, right, bottom = bounds
+        count = (right - left) * (bottom - top)
+        rgb = bytes((245, 137, 44)) * count
+        with patch('audit_tip_v11_brand_cta.crop', return_value=rgb), \
+             patch('audit_tip_v11_brand_cta.run') as run_ocr:
+            run_ocr.return_value = tsv([(3, 14, 260, 33, 74.6, 'WhatsApp appels messages')])
+            passed, observed, _ = text_check(None, 'whatsapp', 'fra', shorts=True)
+            self.assertTrue(passed)
+            self.assertEqual(observed, (left + 3, top + 14, left + 263, top + 47))
+            header = f'P5\n{right - left} {bottom - top}\n255\n'.encode()
+            self.assertEqual(run_ocr.call_args.kwargs['data'], header + bytes((245,)) * count)
+            run_ocr.return_value = tsv([(3, 14, 260, 33, 53.2, 'WhatsApp appels messages')])
+            self.assertFalse(text_check(None, 'whatsapp', 'fra', shorts=True)[0])
+            run_ocr.return_value = tsv([(3, 14, 260, 33, 95., 'WhatsApp appels')])
+            self.assertFalse(text_check(None, 'whatsapp', 'fra', shorts=True)[0])
 
     def test_ffmpeg_receives_exact_frames_and_incomplete_output_stays_inconclusive(self):
         with patch('audit_tip_v11_brand_cta.run', return_value=b'bad') as command:

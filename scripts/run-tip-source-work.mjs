@@ -8,7 +8,7 @@ import { buildTipV11Narration } from './tip-v11-contract.mjs';
 import { generateSpeechPcm, pcmToWav } from './generate-gemini-voiceover.mjs';
 import { normalizeTipV11Narration } from './render-tip-v11.mjs';
 import { qualifyTipSource, validSourceJob, validateTipSourceJob } from './qualify-tip-source.mjs';
-import { updateTipSourceAttempt } from './tip-source-attempt.mjs';
+import { measuredSourceSignature, updateTipSourceAttempt } from './tip-source-attempt.mjs';
 import { TIP_DELIVERY_ORIGIN } from './tip-v11-reviewed-narration.mjs';
 import { captureFailureCapsule } from './source-failure-capsule.mjs';
 import { assertTipSourceRuntime } from './tip-runtime.mjs';
@@ -85,11 +85,13 @@ export async function runTipSourceWork(event, env, dependencies = {}) {
     if (result.status !== 'confirmed') throw new Error('Source delivery unconfirmed');
     return { status: 'confirmed', sourceJob: work.sourceJob, receipt: result.receipt };
   } catch {
-    // Capture under the live started lease. Transfer retries are byte-for-byte
-    // and a failed transfer never changes the recorded qualification failure.
+    // Settle the measured failure before the optional private audio transfer.
+    // Older failure types keep their existing capture order.
+    const signature = measuredSourceSignature(diagnostic);
+    if (signature) await update(work.sourceJob, 'failed', failure, env, undefined, signature).catch(() => undefined);
     const capsule = await captureFailureCapsule(scratch, work.sourceJob, diagnostic, env, dependencies.uploadCapsule)
       .catch(() => ({ status: 'temporarily_unavailable' }));
-    await update(work.sourceJob, 'failed', failure, env).catch(() => undefined);
+    if (!signature) await update(work.sourceJob, 'failed', failure, env).catch(() => undefined);
     return { status: 'incomplete', reason: failure, sourceJob: work.sourceJob, ...(diagnostic && { diagnostic }), capsule };
   } finally {
     if (scratch) await rm(scratch, { recursive: true, force: true });
