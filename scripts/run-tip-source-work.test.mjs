@@ -278,3 +278,33 @@ test('captures the exact complete WAV before failure and cleanup without repeati
     }
   } finally { await rm(scratch, { recursive: true, force: true }); }
 });
+
+test('settles a measured signature failure even when the optional audio cannot be uploaded', async () => {
+  const { event, env, sourceJob, wav } = fixture();
+  const scratch = await mkdtemp(join(tmpdir(), 'jamm-source-signature-receipt-'));
+  const calls = [];
+  try {
+    const result = await runTipSourceWork(event, { ...env, RUNNER_TEMP: scratch }, {
+      verifyRuntime: async () => {},
+      updateAttempt: async (job, action, reason, _env, _request, diagnostic) => {
+        assert.deepEqual(job, sourceJob);
+        calls.push(action);
+        if (action === 'failed') {
+          assert.equal(reason, 'source_evidence_inconclusive');
+          assert.deepEqual(diagnostic, { code: 'signature_retry_insufficient', matched_words: 2, expected_words: 10 });
+        } else assert.equal(diagnostic, undefined);
+        return { status: 'confirmed' };
+      },
+      generateSpeech: async () => { calls.push('voice'); return wav.subarray(44); },
+      normalize: async (_root, _raw, path) => writeFile(path, wav),
+      score: async () => ({ status: 'inconclusive', reason: 'signature_retry_insufficient',
+        matched_words: 2, expected_words: 10, transcript: 'private fixture' }),
+      uploadCapsule: async () => { calls.push('audio'); throw new Error('fixture upload outage'); },
+      qualify: async () => assert.fail('Failed measurement must not qualify a voice'),
+    });
+    assert.deepEqual(calls, ['start', 'voice', 'failed', 'audio']);
+    assert.equal(result.status, 'incomplete');
+    assert.equal(result.capsule.status, 'temporarily_unavailable');
+    assert.deepEqual(await readdir(scratch), []);
+  } finally { await rm(scratch, { recursive: true, force: true }); }
+});

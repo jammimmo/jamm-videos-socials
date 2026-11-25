@@ -4,13 +4,31 @@ import { validSourceJob } from './qualify-tip-source.mjs';
 
 const endpoint = new URL('/api/social/advice/source-attempt', TIP_DELIVERY_ORIGIN);
 const reasons = ['voice_unavailable', 'source_evidence_inconclusive', 'source_delivery_unconfirmed'];
+const signatureReasons = ['signature_retry_insufficient', 'signature_evidence_insufficient'];
+
+function validSignatureDiagnostic(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 3
+    && ['code','matched_words','expected_words'].every(key => Object.hasOwn(value, key))
+    && signatureReasons.includes(value.code) && value.expected_words === 10
+    && Number.isInteger(value.matched_words) && value.matched_words >= 0 && value.matched_words < 3;
+}
+
+export function measuredSourceSignature(diagnostic) {
+  if (diagnostic?.stage !== 'measured_inconclusive'
+    || diagnostic.incompleteRecognizerCall === true
+    || (diagnostic.alignment_code !== undefined && diagnostic.alignment_code !== diagnostic.reason)) return null;
+  const measurement = { code: diagnostic.reason, matched_words: diagnostic.matched_words, expected_words: diagnostic.expected_words };
+  return validSignatureDiagnostic(measurement) ? measurement : null;
+}
 
 /** A lost start acknowledgement never authorizes an extra voice request. */
-export async function updateTipSourceAttempt(sourceJob, action, reason, env, request = fetch) {
+export async function updateTipSourceAttempt(sourceJob, action, reason, env, request = fetch, diagnostic) {
   if (!validSourceJob(sourceJob) || !['start', 'failed'].includes(action)
-    || (action === 'start' ? reason !== null : !reasons.includes(reason))) return { status: 'rejected' };
+    || (action === 'start' ? reason !== null : !reasons.includes(reason))
+    || (diagnostic !== undefined && (action !== 'failed' || reason !== 'source_evidence_inconclusive'
+      || !validSignatureDiagnostic(diagnostic)))) return { status: 'rejected' };
   const identity = { id: sourceJob.id, claimToken: sourceJob.claimToken, attempt: sourceJob.attempt };
-  const body = Buffer.from(JSON.stringify({ sourceJob: identity, action, reason }));
+  const body = Buffer.from(JSON.stringify({ sourceJob: identity, action, reason, ...(diagnostic && { diagnostic }) }));
   let token;
   try {
     token = await requestTipSourceAttemptOidc(body, env, request);
