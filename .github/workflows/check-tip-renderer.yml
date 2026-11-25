@@ -38,7 +38,7 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -56,10 +56,10 @@ jobs:
           tesseract --list-langs 2>/dev/null | grep -Fx fra
       - name: Install local network isolation tools
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends iproute2
-      - name: Render and audit the non-publishable fixture without outbound network
+      - name: Render and audit shared and Shorts fixtures in French without outbound network
         env:
           TIP_PARITY_EXPECTED_SHA: ${{ github.sha }}
-        run: bash scripts/check-tip-runner-parity.sh "$RUNNER_TEMP/tip-runner-parity.json"
+        run: bash scripts/check-tip-runner-parity.sh "$RUNNER_TEMP/tip-runner-parity.json" --with-shorts
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: tip-runner-parity-hosted

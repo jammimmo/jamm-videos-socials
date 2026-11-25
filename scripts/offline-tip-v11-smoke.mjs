@@ -6,7 +6,7 @@ import {
 } from 'node:fs/promises';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildTipV11Narration } from './tip-v11-contract.mjs';
 import { decodedTipMediaFingerprints } from './tip-decoded-media-fingerprint.mjs';
 import { renderTipV11 } from './render-tip-v11.mjs';
@@ -31,6 +31,19 @@ const fixture = {
   ],
 };
 fixture.sourceScriptSha256 = createHash('sha256').update(fixture.body.join(' ')).digest('hex');
+
+export function parseTipOfflineSmokeOptions(args) {
+  const options = new Set(args);
+  const language = args.find(arg => arg.startsWith('--ocr-language='))?.split('=')[1];
+  if (options.size !== args.length || args.some(arg => ![
+    '--youtube-shorts-master', '--destination-layouts', '--ocr-language=fra', '--ocr-language=eng',
+  ].includes(arg)) || (options.has('--ocr-language=fra') && options.has('--ocr-language=eng'))) {
+    throw new Error('Expected --youtube-shorts-master, --destination-layouts or a single --ocr-language=fra|eng');
+  }
+  const shortsMaster = options.has('--youtube-shorts-master');
+  return { shortsMaster, destinationLayouts: options.has('--destination-layouts'),
+    auditLanguage: language ?? (shortsMaster ? 'fra' : undefined) };
+}
 
 function assertIsolatedProcess() {
   assert.equal(process.env.OFFLINE_SMOKE_NETWORK_ISOLATED, '1',
@@ -105,7 +118,7 @@ async function prepareScratchRoot(scratch) {
 
 async function main() {
   assertIsolatedProcess();
-  const shortsMaster = process.argv.slice(2).includes('--youtube-shorts-master');
+  const { shortsMaster, destinationLayouts, auditLanguage } = parseTipOfflineSmokeOptions(process.argv.slice(2));
   const scratch = await mkdtemp(join(tmpdir(), 'jamm-offline-render-smoke-'));
   let receipt;
   try {
@@ -212,7 +225,7 @@ async function main() {
         masterCaptionMaskBounds: masterMask.bounds,
       }),
     };
-    if (shortsMaster) {
+    if (auditLanguage) {
       const batch = join(output, fixture.id);
       const voice = join(root, 'public', 'audio', 'voiceovers', fixture.id);
       const reportPath = `${batch}.audit.json`;
@@ -221,13 +234,13 @@ async function main() {
         '--render-manifest', `${batch}.manifest.json`, '--render-props', `${batch}.props.json`,
         '--raw-wav', narration, '--narration-wav', `${voice}-v11.wav`,
         '--mix-wav', `${voice}-v11-mix.wav`, '--brand-logo', 'public/tip-v11/logo.png',
-        '--report', reportPath,
+        '--ocr-language', auditLanguage, '--report', reportPath,
       ], { cwd: root, encoding: 'utf8', timeout: 180_000 });
       assert.ok(result.status === 0 || result.status === 1, result.stderr || String(result.error));
       const report = JSON.parse(await readFile(reportPath, 'utf8'));
       const { final_brand_cta_visibility: brand, sampled_frame_ocr: ocr } = report;
       assert.equal(report.media_sha256, receipt.mediaSha256);
-      receipt.shortsAudit = {
+      receipt[shortsMaster ? 'shortsAudit' : 'visualAudit'] = {
         reportSha256: createHash('sha256').update(await readFile(reportPath)).digest('hex'),
         manifestSha256: report.render_manifest_sha256,
         cueCount: manifest.caption_geometry.cues.length,
@@ -237,9 +250,10 @@ async function main() {
         audioPreservationStatus: report.audio_preservation.status,
       };
       // Fixed tone tests format and layout only, so the receipt stays unpublishable.
-      if (brand.status !== 'matched' || !ocr.passed) receipt.status = 'needs_review';
+      if (brand.language !== auditLanguage || brand.status !== 'matched'
+        || ocr.language !== auditLanguage || ocr.passed !== true) receipt.status = 'needs_review';
     }
-    if (process.argv.slice(2).includes('--destination-layouts')) {
+    if (destinationLayouts) {
       const layouts = await renderTipV11Destinations({
         root, outputDirectory: join(scratch, 'destination-layouts'), props,
       });
@@ -260,7 +274,9 @@ async function main() {
   if (receipt.status !== 'passed') process.exitCode = 1;
 }
 
-main().catch(error => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main().catch(error => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

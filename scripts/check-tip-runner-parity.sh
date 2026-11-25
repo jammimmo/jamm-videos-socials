@@ -2,12 +2,14 @@
 set -euo pipefail
 umask 077
 
-if [[ $# -ne 1 || ( "$1" != --checks-only && "$1" != /* ) ]]; then
-  echo 'Usage: TIP_PARITY_EXPECTED_SHA=<commit> bash scripts/check-tip-runner-parity.sh <absolute receipt path|--checks-only>' >&2
+if [[ $# -lt 1 || $# -gt 2 || ( "$1" != --checks-only && "$1" != /* ) \
+  || ( $# -eq 2 && ( "$2" != --with-shorts || "$1" == --checks-only ) ) ]]; then
+  echo 'Usage: TIP_PARITY_EXPECTED_SHA=<commit> bash scripts/check-tip-runner-parity.sh <absolute receipt path [--with-shorts]|--checks-only>' >&2
   exit 2
 fi
 
 output=$1
+shorts_mode=${2:-}
 expected=${TIP_PARITY_EXPECTED_SHA:-}
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 if [[ ! "$expected" =~ ^[a-f0-9]{40}$ || "$(git rev-parse --verify HEAD)" != "$expected" \
@@ -23,6 +25,10 @@ fi
 # The real hosted and mini-PC fixture prepares the same speech runtime as the
 # source/render workflows. Source-only unit checks need no ASR model download.
 if [[ "$output" != --checks-only ]]; then
+  if [[ "$shorts_mode" == --with-shorts ]] && ! tesseract --list-langs 2>/dev/null | grep -Fx fra >/dev/null; then
+    echo 'Install the French Tesseract language data before running both visual profiles.' >&2
+    exit 1
+  fi
   source scripts/prepare-tip-runtime.sh --install
 fi
 
@@ -100,8 +106,17 @@ fi
 
 "${clean[@]}" npm exec --offline -- remotion browser ensure
 run_isolated "${clean[@]}" OFFLINE_SMOKE_NETWORK_ISOLATED=1 bash -euo pipefail -c '
-  node scripts/offline-tip-v11-smoke.mjs --destination-layouts | tee "$1"
-  node scripts/write-tip-runner-parity.mjs "$@"
-' _ "$scratch/fixture.log" "$scratch/receipt.json" "$expected" "$ffmpeg" "$ffprobe"
+  audit_options=()
+  shorts_receipt=()
+  if [[ "$6" == --with-shorts ]]; then
+    audit_options=(--ocr-language=fra)
+  fi
+  node scripts/offline-tip-v11-smoke.mjs --destination-layouts "${audit_options[@]}" | tee "$1"
+  if [[ "$6" == --with-shorts ]]; then
+    node scripts/offline-tip-v11-smoke.mjs --youtube-shorts-master "${audit_options[@]}" | tee "$7"
+    shorts_receipt=("$7")
+  fi
+  node scripts/write-tip-runner-parity.mjs "${@:1:5}" "${shorts_receipt[@]}"
+' _ "$scratch/fixture.log" "$scratch/receipt.json" "$expected" "$ffmpeg" "$ffprobe" "$shorts_mode" "$scratch/shorts.log"
 git diff --exit-code HEAD --quiet --
 (set -o noclobber; cat -- "$scratch/receipt.json" >"$output")

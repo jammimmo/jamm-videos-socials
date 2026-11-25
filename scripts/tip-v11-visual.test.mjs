@@ -12,6 +12,19 @@ import {
 } from '../src/compositions/tip-v11-caption-geometry.ts';
 import { summarizeCaptionGeometry } from './tip-v11-caption-geometry.mjs';
 import { renderTipV11Destinations } from './render-tip-v11-destinations.mjs';
+import { parseTipOfflineSmokeOptions } from './offline-tip-v11-smoke.mjs';
+
+test('the explicit Shorts fixture requires French OCR unless a local English diagnostic is requested', () => {
+  assert.deepEqual(parseTipOfflineSmokeOptions(['--destination-layouts']),
+    { shortsMaster: false, destinationLayouts: true, auditLanguage: undefined });
+  assert.deepEqual(parseTipOfflineSmokeOptions(['--destination-layouts', '--ocr-language=fra']),
+    { shortsMaster: false, destinationLayouts: true, auditLanguage: 'fra' });
+  assert.deepEqual(parseTipOfflineSmokeOptions(['--youtube-shorts-master']),
+    { shortsMaster: true, destinationLayouts: false, auditLanguage: 'fra' });
+  assert.equal(parseTipOfflineSmokeOptions(['--youtube-shorts-master', '--ocr-language=eng']).auditLanguage, 'eng');
+  assert.throws(() => parseTipOfflineSmokeOptions(['--ocr-language=fra', '--ocr-language=eng']), /single/);
+  assert.throws(() => parseTipOfflineSmokeOptions(['--ocr-language=deu']), /single/);
+});
 
 test('V11 shows the full advice heading, including the end of a long sentence', () => {
   const text = 'Mandatez un agent immobilier local de confiance pour visiter les biens et évaluer leur état.';
