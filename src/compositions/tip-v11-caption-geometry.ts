@@ -15,6 +15,7 @@ const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]
 export type TipV11Destination = 'tiktok' | 'instagram' | 'facebook' | 'youtube';
 export const YOUTUBE_SHORTS_PROFILE = 'youtube-shorts-v1';
 export const YOUTUBE_SHORTS_CAPTION_MASK = 'tip-v11-youtube-shorts-caption-20261125-v1';
+export const YOUTUBE_SHORTS_BRAND_MASK = 'tip-v11-youtube-shorts-brand-20261125-v1';
 export const YOUTUBE_SHORTS_SAFE_BOUNDS: Bounds = [76, 298, 838, 1372];
 export const TIKTOK_CAPTION_MASK = 'tip-v11-tiktok-caption-20261125-v2';
 type TipV11Layout = {

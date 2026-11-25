@@ -11,6 +11,13 @@ import { tipV11CaptionMask, YOUTUBE_SHORTS_PROFILE } from '../src/compositions/t
 export const TIP_V11_MANIFEST_CONTRACT = 'tip-v11-fr-render-inputs-v1';
 const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
+const shortsCaptionMask = tipV11CaptionMask('youtube');
+
+function matchesShortsCaptionGeometry(geometry) {
+  return geometry?.status === 'matched' && geometry.mask === shortsCaptionMask.id
+    && Array.isArray(geometry.mask_bounds) && geometry.mask_bounds.length === shortsCaptionMask.bounds.length
+    && shortsCaptionMask.bounds.every((bound, index) => geometry.mask_bounds[index] === bound);
+}
 
 // Current V11's React drawings use bundled source. Its only staticFile calls
 // load the logo, these fonts and the per-job mix. The lockfile pins Remotion
@@ -62,9 +69,9 @@ export async function buildTipV11RenderManifest({
     || (reviewed ? plan.assistantEnabled || !SHA256.test(reviewedNarrationSha256 ?? '') : reviewedNarrationSha256 !== undefined)) {
     throw new Error('V11 manifest render inputs are incomplete');
   }
-  if (masterVisualProfile !== undefined && (masterVisualProfile !== YOUTUBE_SHORTS_PROFILE || voiceSource !== 'fixture'
-    || captionGeometry?.mask !== tipV11CaptionMask('youtube').id || captionGeometry?.status !== 'matched')) {
-    throw new Error('V11 Shorts preview lacks matched caption geometry');
+  if (masterVisualProfile !== undefined && (masterVisualProfile !== YOUTUBE_SHORTS_PROFILE
+    || (!reviewed && voiceSource !== 'fixture') || !matchesShortsCaptionGeometry(captionGeometry))) {
+    throw new Error('V11 Shorts master lacks reviewed inputs or matched caption geometry');
   }
   const voiceProfile = inventory.files.find(([path]) => path === 'scripts/voice-profile.mjs')?.[1];
   if (!voiceProfile) throw new Error('V11 voice profile absent from manifest');
@@ -104,10 +111,12 @@ export async function buildTipV11RenderManifest({
   };
 }
 
-export function manifestHasProductionInputs(manifest) {
+export function manifestHasProductionInputs(manifest, expectedMasterVisualProfile) {
   const files = manifest?.static_files;
   return manifest?.contract === TIP_V11_MANIFEST_CONTRACT
-    && manifest.master_visual_profile === undefined
+    && manifest.master_visual_profile === expectedMasterVisualProfile
+    && (expectedMasterVisualProfile === undefined || (expectedMasterVisualProfile === YOUTUBE_SHORTS_PROFILE
+      && manifest.voice?.source === 'reviewed-bundle' && matchesShortsCaptionGeometry(manifest.caption_geometry)))
     && Array.isArray(files) && files.length === V11_STATIC_FILES.length
     && files.every((entry, index) => Array.isArray(entry) && entry.length === 2
       && entry[0] === V11_STATIC_FILES[index] && typeof entry[1] === 'string' && SHA256.test(entry[1]))
