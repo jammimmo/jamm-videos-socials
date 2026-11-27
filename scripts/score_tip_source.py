@@ -13,12 +13,14 @@ import wave
 
 from align_tip_v11 import (
     AlignmentFailure, ASR_REVISION, DEFERRED_DOMAIN_CHECKS, PHONE_WORDS, PhoneEvidenceError,
-    SIGNATURE_PREROLL_SECONDS, align_with_phone_retry, alignment_failure_diagnostics, audible_windows, protected_speech, tokens,
+    SIGNATURE_PREROLL_SECONDS, align_with_phone_retry, alignment_failure_diagnostics, audible_windows, protected_speech,
+    supported_anchor_rows, tokens,
 )
 from audit_tip_v11 import pcm
 from audit_tip_v11_speech import (
     EXCLUDED_SEGMENTS, MAX_RECOGNIZED_WORDS, SAMPLE_RATE, SpeechComparisonError, compare_french_segments, french_speech_outcome,
-    recognize_final_window, recognize_with_timeout, sha256, verify_hook_samples, verify_phone_with_context,
+    MIN_WORD_PROBABILITY, POINT_PROTECTED_NAMES, normalized_words, recognize_final_window, recognize_with_timeout,
+    sha256, speech_edits, timed_rows_digest, verify_hook_samples, verify_phone_with_context,
     verify_services_samples, verify_untimed_socials_samples,
 )
 from tip_source_asr_session import SourceAsrSession
@@ -135,6 +137,83 @@ def phone_gap_allows_remeasurement(segments, words, failure):
     # Check even untimed rows that matching discarded. A competing number or
     # negation must keep the take held, regardless of a later recognition.
     return not protected_speech([token for row in rows[prior[-1]:following[0] + 1] for token in row])
+
+
+EDITORIAL_IDS = ('hook', 'step1', 'step2', 'step3', 'takeaway')
+EDITORIAL_METHOD = 'source_editorial_exact_scene_v1'
+EDITORIAL_NAMES = POINT_PROTECTED_NAMES | {'com', 'dakar', 'senegal'}
+
+
+def editorial_protected(words):
+    return [w for w in words if w is not None and (w in EDITORIAL_NAMES or protected_speech([w]))]
+
+
+def confirm_editorial_scene(parts, results, recognized, raw, report, directory, recognize, inspection):
+    """An unprompted exact crop can resolve one weak, fully bounded editorial scene."""
+    held = [row for row in results if row['status'] != 'matched']
+    calls = report['recognizer_diagnostics']
+    if (len(held) != 1 or held[0]['segment'] not in EDITORIAL_IDS or 'reason' in held[0] or 'measurement' in held[0]
+        or len(calls) >= 12 or any(call['outcome'] != 'completed' for call in calls)):
+        return False
+    row = held[0]
+    parts_by_id = {part['id']: part for part in parts}
+    words = {r['segment']: normalized_words(r['segment'], parts_by_id[r['segment']]['text']) for r in results}
+    identity = row['segment']
+    expected, full = words[identity], row['observed_words']
+    errors = speech_edits(expected, full)
+    if (len(expected) < 12 or not 25 * len(expected) < 100 * errors <= 40 * len(expected)
+        or not full or full.count(None) > 1 or editorial_protected(full) != editorial_protected(expected)):
+        return False
+    total_errors = sum(speech_edits(words[r['segment']], r['observed_words']) for r in results)
+    if 100 * total_errors > 15 * sum(map(len, words.values())):
+        return False
+
+    part = parts_by_id[identity]
+    first, last = (round(part[edge] * SAMPLE_RATE) for edge in ('start', 'end'))
+    if not (0 <= first < last <= len(raw) // 2 and .65 * SAMPLE_RATE <= last - first <= 20 * SAMPLE_RATE):
+        return False
+    inside = [r for r in recognized if r[1] < part['end'] and r[2] > part['start']]
+    original = []
+    for text, start, end, probability in inside:
+        tokens_here = normalized_words(identity, text)
+        if (not part['start'] <= start < end <= part['end'] or not tokens_here or '+' in text
+            or (probability < MIN_WORD_PROBABILITY and editorial_protected(tokens_here))):
+            return False
+        original.extend(tokens_here if probability >= MIN_WORD_PROBABILITY else [None] * len(tokens_here))
+    if original != full:
+        return False
+
+    clip = raw[2 * first:2 * last]
+    path = directory / 'source-editorial-scene.wav'
+    with wave.open(str(path), 'wb') as target:
+        target.setparams((1, 2, SAMPLE_RATE, 0, 'NONE', 'not compressed'))
+        target.writeframes(clip)
+    # A failed optional crop leaves the full observation intact and ineligible.
+    if inspection is not None:
+        inspection.editorial_focus(identity)
+    try:
+        focused = measured_recognizer(recognize, 'audit_editorial', calls, inspection=inspection, first_sample=first)(path)
+        timed = timed_words(focused)
+    except (SourceRecognitionError, ValueError):
+        return False
+    actual = [word for text, *_ in focused for word in normalized_words(identity, text)]
+    # Retain the sample bounds used for the voiced-row checks so the Worker can
+    # repeat them directly on the bytes it read from private storage.
+    if any(not 0 <= a < b <= (last - first) / SAMPLE_RATE for _, a, b, _ in focused):
+        return False
+    sample_rows = [[text, round(a * SAMPLE_RATE), round(b * SAMPLE_RATE), p] for text, a, b, p in focused]
+    for index, (_, a, b, _) in enumerate(sample_rows):
+        timed[index].update(start=a / SAMPLE_RATE, end=b / SAMPLE_RATE)
+    if (actual != expected or any(len(text) > 300 or not normalized_words(identity, text) or '+' in text for text, *_ in focused)
+        or not supported_anchor_rows(timed, list(audible_windows(clip, SAMPLE_RATE)), (last - first) / SAMPLE_RATE)):
+        return False
+    row.update(status='matched', observed_words=actual, observed_token_count=len(actual), observed_sha256=sha256(' '.join(actual).encode()),
+               measurement={'method': EDITORIAL_METHOD, 'full_observed_words': full, 'start_sample': first, 'end_sample': last,
+                            'decoded_pcm_sha256': report['decoded_pcm_sha256'], 'pcm_sha256': sha256(clip),
+                            'full_raw_timed_rows_sha256': timed_rows_digest(inside), 'focused_rows': sample_rows})
+    if inspection is not None:
+        inspection.editorial_focus(identity, confirmed=True)
+    return True
 
 
 def score_source(plan, wav, directory, recognize=None, recognize_window=None, *, inspection_nonce=None, inspection_attempt=1):
@@ -256,6 +335,8 @@ def _score_source(plan, wav, directory, recognize, recognize_window, *, startup=
     # pass independently before automatic approval or publication.
     checked_segments = [segment for segment in segments if segment['id'] != 'domain']
     checked_results = [row for row in results if row['segment'] != 'domain']
+    if confirm_editorial_scene(checked_segments, checked_results, recognized, raw, report, directory, recognize_window, inspection):
+        report['contract'] = 'tip-v11-fr-source-speech-v3'
     return {**report, **french_speech_outcome(checked_segments, checked_results)}
 
 

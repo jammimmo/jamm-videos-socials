@@ -63,6 +63,22 @@ test('stale or mismatched evidence never uploads a source or starts qualificatio
   } }, wav, speech, env, { request }), { status: 'rejected' });
 });
 
+test('source v3 retains both deferred checks when submitting the signed editorial observation', async () => {
+  const { job, wav, speech } = fixture();
+  speech.contract = 'tip-v11-fr-source-speech-v3';
+  const receipts = [];
+  const transport = { request: async (url, options) => {
+    if (url.hostname === 'fixture.actions.githubusercontent.com') return Response.json({ value: 'fixture.signed.jwt' });
+    if (url.pathname.endsWith('/source-narration')) return Response.json({ sha256: hash(wav), bytes: wav.length, version: 'v1', etag: 'e1' });
+    receipts.push(JSON.parse(options.body.toString()).speech);
+    return Response.json({ postId: job.postId, draftSha256: 'd'.repeat(64), recipeId: job.policyId, qualificationId: job.hookId });
+  } };
+  assert.equal((await qualifyTipSource(job, wav, speech, env, transport)).status, 'confirmed');
+  assert.deepEqual(receipts, [speech]);
+  assert.equal((await qualifyTipSource(job, wav, { ...speech, deferred_checks: ['domain_audio'] }, env, transport)).status, 'rejected');
+  assert.equal(receipts.length, 1);
+});
+
 test('an unconfirmed private upload stops the chain and cannot register or regenerate a source', async () => {
   const { job, wav, speech } = fixture();
   let requests = 0;

@@ -127,6 +127,11 @@ class SourceInspection:
             scene['protectedMatch'] = protected_speech(expected) == protected_speech(reported)
         scene['gateFlags'] = [key for key, present in flags.items() if present]
 
+    def editorial_focus(self, identity, confirmed=False):
+        flags = self.scenes[identity]['gateFlags']
+        flags[:] = [f for f in flags if f not in ('focus_not_eligible', 'focused_unconfirmed')]
+        flags.extend(['focused_matched', 'score_matched'] if confirmed else ['focused_unconfirmed'])
+
     def finish(self, report):
         for item in report['segments']:
             identity = item['segment']

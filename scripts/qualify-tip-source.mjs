@@ -74,13 +74,13 @@ export async function qualifyTipSource(input, wavInput, speechInput, env, transp
     ({ job, identity } = checkedJob(input));
     wav = Buffer.from(wavInput);
     speech = structuredClone(speechInput);
-    if (!['tip-v11-fr-source-speech-v1', 'tip-v11-fr-source-speech-v2'].includes(speech?.contract)
+    if (!['tip-v11-fr-source-speech-v1', 'tip-v11-fr-source-speech-v2', 'tip-v11-fr-source-speech-v3'].includes(speech?.contract)
       || speech.status !== 'matched' || speech.source !== 'normalized_wav_pcm_s16le_mono_24khz'
       || speech.draft_sha256 !== identity.draft_sha256 || speech.source_script_sha256 !== identity.source_script_sha256
       || speech.narration_wav_sha256 !== hash(wav)
       || typeof speech.decoded_pcm_sha256 !== 'string' || !SHA256.test(speech.decoded_pcm_sha256)
       || speech.accent_evaluated !== false) return { status: 'rejected' };
-    if (speech.contract === 'tip-v11-fr-source-speech-v2'
+    if (speech.contract !== 'tip-v11-fr-source-speech-v1'
       && JSON.stringify(speech.deferred_checks) !== '["domain_audio","visible_domain_cta"]') return { status: 'rejected' };
     if (Buffer.byteLength(JSON.stringify({ ...job, speech })) > 47 * 1024) return { status: 'rejected' };
   } catch {

@@ -57,7 +57,7 @@ export async function inspectTipSource(event, env, dependencies = {}) {
       const attempt = attempts.length + 1;
       attempts.push({ status: 'unavailable', attempt });
       const report = await (dependencies.score ?? score)(...args, { nonce, attempt });
-      if (report?.contract !== 'tip-v11-fr-source-speech-v2' || report.narration_wav_sha256 !== identity.wavSha256
+      if (!['tip-v11-fr-source-speech-v2', 'tip-v11-fr-source-speech-v3'].includes(report?.contract) || report.narration_wav_sha256 !== identity.wavSha256
         || report.draft_sha256 !== capsule.scoringInput.draft_sha256
         || report.source_script_sha256 !== capsule.scoringInput.source_script_sha256) throw new Error('Replay input mismatch');
       attempts[attempt - 1] = projectInspection(report.inspection_evidence, { nonce, attempt, wavSha256: identity.wavSha256,

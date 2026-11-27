@@ -28,7 +28,7 @@ export async function readScoreReport(report, exitCode) {
   } catch {
     throw new ScoreError('score_report_invalid', exitCode);
   }
-  if (speech?.contract !== 'tip-v11-fr-source-speech-v2' || speech.status !== (exitCode === 0 ? 'matched' : 'inconclusive')) {
+  if (!['tip-v11-fr-source-speech-v2', 'tip-v11-fr-source-speech-v3'].includes(speech?.contract) || speech.status !== (exitCode === 0 ? 'matched' : 'inconclusive')) {
     throw new ScoreError('score_protocol_invalid', exitCode);
   }
   return speech;

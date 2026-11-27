@@ -30,7 +30,7 @@ class SourceScoringTest(unittest.TestCase):
     wav = make_wav(data)
     plan = {'segments': SEGMENTS, 'draft_sha256': 'a' * 64, 'source_script_sha256': 'b' * 64}
 
-    def run_source(self, rows=None, wav=None, recognizer=None, window=None):
+    def run_source(self, rows=None, wav=None, recognizer=None, window=None, *, inspection_nonce=None):
         if rows is None:
             rows = [(row['word'], row['start'], row['end'], .95) for row in speech(self.plan['segments'])]
         wav = self.wav if wav is None else wav
@@ -41,7 +41,8 @@ class SourceScoringTest(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), wav)
                 return rows
 
-            return score_source(self.plan, wav, directory, recognizer or recognize, window or Mock(return_value=[]))
+            return score_source(self.plan, wav, directory, recognizer or recognize, window or Mock(return_value=[]),
+                                inspection_nonce=inspection_nonce)
 
     def test_scores_exact_source_with_bound_pcm_draft_and_model(self):
         report = self.run_source()
@@ -91,6 +92,61 @@ class SourceScoringTest(unittest.TestCase):
         wrong = [(('jamais' if word == 'observations' else word), start, end, p) for word, start, end, p in rows]
         with patch('align_tip_v11.greeting_speech_samples', return_value=16384):
             self.assertEqual(self.run_source(wrong)['status'], 'inconclusive')
+
+    def test_one_weak_editorial_scene_needs_the_exact_words_in_its_own_pcm(self):
+        from align_tip_v11 import align, audible_windows
+        text = 'Comparez les trajets vers votre quartier et gardez des notes précises pour choisir le logement selon vos besoins.'
+        self.plan = {**self.plan, 'segments': [{**s, 'text': text} if s['id'] == 'takeaway' else s for s in SEGMENTS]}
+        clean = [(w['word'], w['start'], w['end'], .95) for w in speech(self.plan['segments'])]
+        start = next(i for i, r in enumerate(clean) if r[0] == 'trajets') - 2
+        original = clean[start:start + 18]
+        full = list(clean)
+        full[start + 4] = ('autre', *full[start + 4][1:])
+        full[start + 10] = (*full[start + 10][:3], .45)
+        word, a, b, p = full[start + 7]
+        full[start + 7:start + 8] = [(token, a + (b-a)*i/6, a + (b-a)*(i+1)/6, p)
+                                      for i, token in enumerate([word, 'ce', 'matin', 'durant', 'la', 'visite'])]
+        aligned = align(self.plan['segments'], [dict(word=t, start=a, end=b) for t, a, b, _ in full],
+                        70, list(audible_windows(self.data, SAMPLE_RATE)), defer_domain=True)
+        part = next(s for s in aligned['segments'] if s['id'] == 'takeaway')
+        first, last = (round(part[k] * SAMPLE_RATE) for k in ('start', 'end'))
+        focused = [(t, a - first / SAMPLE_RATE, b - first / SAMPLE_RATE, p) for t, a, b, p in original]
+        def exact_crop(path):
+            self.assertEqual(path.read_bytes(), make_wav(self.data[2*first:2*last]))
+            return focused
+        read = Mock(side_effect=exact_crop)
+        report = self.run_source(full, window=read, inspection_nonce='d' * 32)
+        read.assert_called_once()
+        self.assertEqual((report['status'], report['contract']), ('matched', 'tip-v11-fr-source-speech-v3'))
+        self.assertEqual([c['stage'] for c in report['recognizer_diagnostics']], ['full_audio', 'audit_editorial'])
+        row = next(r for r in report['segments'] if r['segment'] == 'takeaway')
+        self.assertEqual(row['observed_words'], [r[0] for r in original])
+        m = row['measurement']
+        self.assertEqual((m['method'], m['start_sample'], m['end_sample'], len(m['full_observed_words'])),
+                         ('source_editorial_exact_scene_v1', first, last, 23))
+        self.assertEqual(m['full_observed_words'].count(None), 1)
+        self.assertEqual(m['pcm_sha256'], sha256(self.data[2*first:2*last]))
+        trace = report['inspection_evidence']
+        self.assertEqual(trace['calls'][-1]['pcmSha256'], m['pcm_sha256'])
+        self.assertEqual(trace['scenes'][4]['gateFlags'], ['edit_budget_exceeded', 'focused_matched', 'score_matched'])
+        for variant in ([('loin', *focused[0][1:]), *focused[1:]], [(*focused[0][:3], .59), *focused[1:]],
+                        [(focused[0][0], -1, *focused[0][2:]), *focused[1:]], [], [('invalid',)]):
+            with self.subTest(variant=variant[:1]):
+                held = self.run_source(full, window=Mock(return_value=variant))
+                self.assertEqual((held['status'], held['reason']), ('inconclusive', 'ordered_words_unconfirmed'))
+                self.assertEqual(held['segments'][4]['observed_words'], m['full_observed_words'])
+        for other in ('jamais', 'deux', 'Jamm', 'WhatsApp'):
+            with self.subTest(protected_word=other):
+                changed = list(full)
+                changed[start + 4] = (other, *changed[start + 4][1:])
+                read = Mock(return_value=focused)
+                self.assertEqual(self.run_source(changed, window=read)['status'], 'inconclusive')
+                read.assert_not_called()
+        both = [(('autre' if word in ('logement', 'commence', 'observations', 'utiles') and i < 16 else word), a, b, p)
+                for i, (word, a, b, p) in enumerate(full)]
+        read = Mock(return_value=focused)
+        self.assertEqual(self.run_source(both, window=read)['status'], 'inconclusive')
+        read.assert_not_called()
 
     @unittest.skipUnless(find_spec('faster_whisper') and find_spec('onnxruntime'), 'requires packaged Silero runtime')
     def test_packaged_vad_rejects_silence_noise_click_and_sustained_tone(self):
