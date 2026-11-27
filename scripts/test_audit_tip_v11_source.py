@@ -319,6 +319,27 @@ class SourceScoringTest(unittest.TestCase):
         self.assertLess(failed['window_duration_ms'], 10_000)
         self.assertNotIn('private-path', json.dumps(report))
 
+    def test_marks_only_an_undecided_phone_gap_for_a_new_measurement(self):
+        full, phone, index, _ = phone_gap()
+        before, after = full[:index], full[index:]
+        uncertain = {**phone[0], 'word': 'murmure'}
+        number = {**phone[0], 'word': 'sept'}
+        untimed_number = {**number, 'end': number['start']}
+        for words, eligible in (
+            ([*before, uncertain, *after], True),
+            ([*before, number, *after], False),
+            ([*before, untimed_number, *after], False),
+            ([*before, {**number, 'word': '78'}, *after], False),
+            ([*before, phone[0], *after], False),
+        ):
+            with self.subTest(eligible=eligible, inserted=words[index]['word']):
+                window = Mock()
+                rows = [(row['word'], row['start'], row['end'], .95) for row in words]
+                report = self.run_source(rows=rows, window=window)
+                self.assertEqual(report['alignment_code'], 'phone_gap_unconfirmed')
+                self.assertIs(report.get('phone_remeasurement_eligible', False), eligible)
+                window.assert_not_called()
+
     def test_rejects_changed_negation_and_number(self):
         rows = [(row['word'], row['start'], row['end'], .95) for row in speech(self.plan['segments'])]
         index = next(index for index, row in enumerate(rows) if row[0] == 'commence')

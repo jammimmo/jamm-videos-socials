@@ -1,5 +1,6 @@
 """Score the French words of an exact local V11 narration before video exists."""
 
+from difflib import SequenceMatcher
 import io
 import json
 import math
@@ -11,8 +12,8 @@ from time import monotonic
 import wave
 
 from align_tip_v11 import (
-    AlignmentFailure, ASR_REVISION, DEFERRED_DOMAIN_CHECKS, SIGNATURE_PREROLL_SECONDS, align_with_phone_retry,
-    alignment_failure_diagnostics, audible_windows,
+    AlignmentFailure, ASR_REVISION, DEFERRED_DOMAIN_CHECKS, PHONE_WORDS, PhoneEvidenceError,
+    SIGNATURE_PREROLL_SECONDS, align_with_phone_retry, alignment_failure_diagnostics, audible_windows, protected_speech, tokens,
 )
 from audit_tip_v11 import pcm
 from audit_tip_v11_speech import (
@@ -108,6 +109,34 @@ def timed_words(rows, offset=0):
     return words
 
 
+def phone_gap_allows_remeasurement(segments, words, failure):
+    """Bound a possible phone replay without changing the render alignment."""
+    if (not isinstance(failure, PhoneEvidenceError) or failure.code != 'phone_gap_unconfirmed'
+        or failure.metrics.get('matched_words') != 0):
+        return False
+    scene_index = failure.metrics.get('segment_index', -1)
+    if (not 0 < scene_index < len(segments) - 1 or segments[scene_index - 1]['id'] != 'contact'
+        or segments[scene_index + 1]['id'] != 'socials' or tokens(segments[scene_index]['text']) != PHONE_WORDS):
+        return False
+
+    groups = [tokens(segment['text']) for segment in segments]
+    rows = [tokens(word['word']) for word in words]
+    observed = [(token, row_index) for row_index, (row, word) in enumerate(zip(rows, words))
+                if word['start'] < word['end'] for token in row]
+    expected = [token for group in groups for token in group]
+    matcher = SequenceMatcher(None, expected, [token for token, _ in observed], autojunk=False)
+    offset = sum(map(len, groups[:scene_index]))
+    mapping = {block.a + i: observed[block.b + i][1] for block in matcher.get_matching_blocks() for i in range(block.size)}
+    prior = [mapping[i] for i in range(offset - len(groups[scene_index - 1]), offset) if i in mapping]
+    after = offset + len(PHONE_WORDS)
+    following = [mapping[i] for i in range(after, after + len(groups[scene_index + 1])) if i in mapping]
+    if not prior or not following or prior[-1] >= following[0]:
+        return False
+    # Check even untimed rows that matching discarded. A competing number or
+    # negation must keep the take held, regardless of a later recognition.
+    return not protected_speech([token for row in rows[prior[-1]:following[0] + 1] for token in row])
+
+
 def score_source(plan, wav, directory, recognize=None, recognize_window=None, *, inspection_nonce=None, inspection_attempt=1):
     # The production score remains independent of the optional private inspection.
     inspection = (SourceInspection(plan, wav, extract_pcm(wav), inspection_nonce, inspection_attempt)
@@ -160,12 +189,14 @@ def _score_source(plan, wav, directory, recognize, recognize_window, *, startup=
             target.writeframes(raw[first * 2:last * 2])
         return timed_words(measured(recognize_window, stage, first)(path), first / SAMPLE_RATE)
 
+    timed = []
     try:
         if startup is not None:
             measured(lambda _: startup(), 'model_load')(source_path)
         recognized = measured(recognize, 'full_audio', 0)(source_path)
+        timed = timed_words(recognized)
         alignment = align_with_phone_retry(
-            plan['segments'], timed_words(recognized), duration, sound,
+            plan['segments'], timed, duration, sound,
             lambda boundary: alignment_window(boundary - SIGNATURE_PREROLL_SECONDS, stage='alignment_signature'), alignment_window,
             defer_domain=True,
             opening_pcm=raw,
@@ -178,7 +209,10 @@ def _score_source(plan, wav, directory, recognize, recognize_window, *, startup=
     except SourceRecognitionError as error:
         return {**report, 'reason': error.reason}
     except ValueError as error:
-        return {**report, **alignment_failure_diagnostics(error)}
+        details = alignment_failure_diagnostics(error)
+        if phone_gap_allows_remeasurement(plan['segments'], timed, error):
+            details['phone_remeasurement_eligible'] = True
+        return {**report, **details}
     except Exception:
         return {**report, 'reason': 'recognizer_unavailable'}
 

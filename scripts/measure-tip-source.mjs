@@ -87,13 +87,30 @@ function inspectionComparisonFailure(speech) {
   return safe;
 }
 
-export async function measureSource(measure, draft, wav, scratch, env, { inspectComparison = false } = {}) {
+const sourceIdentityFields = ['draft_sha256', 'source_script_sha256', 'narration_wav_sha256', 'decoded_pcm_sha256'];
+
+function canRemeasurePhone(speech) {
+  const calls = speech.recognizer_diagnostics;
+  return speech.reason === 'phone_evidence_unconfirmed' && speech.alignment_code === 'phone_gap_unconfirmed'
+    && speech.matched_words === 0 && speech.phone_remeasurement_eligible === true
+    && Array.isArray(calls) && calls.some(call => call?.stage === 'full_audio' && call?.outcome === 'completed')
+    && calls.every(call => call?.outcome === 'completed' && call?.stage !== 'alignment_phone')
+    && sourceIdentityFields.every(key => typeof speech[key] === 'string' && /^[a-f0-9]{64}$/u.test(speech[key]));
+}
+
+export async function measureSource(measure, draft, wav, scratch, env, {
+  inspectComparison = false, remeasureUnconfirmedPhone = false,
+} = {}) {
+  let firstPhoneMeasurement;
   for (let attempt = 1; attempt <= 2; attempt++) {
     let transient = false;
     let alignment = {};
     let reason = 'score_protocol_invalid';
     try {
       const speech = await measure(draft, wav, resolve(scratch, 'speech-' + attempt + '.json'), env);
+      if (firstPhoneMeasurement && sourceIdentityFields.some(key => speech?.[key] !== firstPhoneMeasurement.identity[key])) {
+        return { diagnostic: { ...firstPhoneMeasurement.diagnostic, measurementAttempts: attempt } };
+      }
       if (speech?.status === 'matched') return { speech, measurementAttempts: attempt };
       if (speech?.status === 'inconclusive' && measuredReasons.has(speech.reason)) {
         // Optional verification windows can record a failed recognizer call
@@ -101,6 +118,10 @@ export async function measureSource(measure, draft, wav, scratch, env, { inspect
         const incompleteRecognizerCall = Array.isArray(speech.recognizer_diagnostics)
           && speech.recognizer_diagnostics.some(call => call?.outcome !== 'completed');
         const diagnostic = { ...measuredDiagnostic(speech), incompleteRecognizerCall, measurementAttempts: attempt };
+        if (attempt === 1 && remeasureUnconfirmedPhone && canRemeasurePhone(speech)) {
+          firstPhoneMeasurement = { diagnostic, identity: Object.fromEntries(sourceIdentityFields.map(key => [key, speech[key]])) };
+          continue;
+        }
         const comparison = inspectComparison && inspectionComparisonFailure(speech);
         return comparison ? { diagnostic, comparison } : { diagnostic };
       }

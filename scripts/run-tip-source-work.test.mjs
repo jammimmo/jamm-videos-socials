@@ -163,7 +163,7 @@ test('scorer CLI maps a Python report to exit 0 or 1, and rejects an unusable me
   } finally { await rm(scratch, { recursive: true, force: true }); }
 });
 
-test('only a reported recognizer timeout retries once on the same normalized WAV', async () => {
+test('a recognizer timeout still retries once, while other failures stay held', async () => {
   const { event, env, wav, speech } = fixture();
   const scratch = await mkdtemp(join(tmpdir(), 'jamm-measure-retry-'));
   const timeout = { status: 'inconclusive', reason: 'recognizer_timeout' };
@@ -208,6 +208,60 @@ test('only a reported recognizer timeout retries once on the same normalized WAV
   } finally { await rm(scratch, { recursive: true, force: true }); }
 });
 
+
+test('an undecided phone gap can qualify only after one full measurement of the exact same take', async () => {
+  const { event, env, wav, speech } = fixture();
+  const scratch = await mkdtemp(join(tmpdir(), 'jamm-phone-source-remeasurement-'));
+  const completed = [{ stage: 'model_load', outcome: 'completed' }, { stage: 'full_audio', outcome: 'completed' }];
+  const undecided = { ...speech, status: 'inconclusive', reason: 'phone_evidence_unconfirmed',
+    alignment_code: 'phone_gap_unconfirmed', phone_remeasurement_eligible: true,
+    matched_words: 0, expected_words: 16, recognizer_diagnostics: completed };
+  const timeout = { ...speech, status: 'inconclusive', reason: 'recognizer_timeout' };
+  try {
+    for (const [reports, accepts] of [
+      [[undecided, speech], true],
+      [[undecided, undecided], false],
+      [[undecided, timeout], false],
+      [[timeout, undecided], false],
+      ...['draft_sha256', 'source_script_sha256', 'narration_wav_sha256', 'decoded_pcm_sha256']
+        .map(key => [[undecided, { ...speech, [key]: '0'.repeat(64) }], false]),
+      [[{ ...undecided, phone_remeasurement_eligible: false }], false],
+      [[{ ...undecided, matched_words: 1 }], false],
+      [[{ ...undecided, alignment_code: 'phone_window_unconfirmed' }], false],
+      [[{ ...undecided, recognizer_diagnostics: [{ stage: 'model_load', outcome: 'completed' }] }], false],
+      [[{ ...undecided, recognizer_diagnostics: [...completed, { stage: 'alignment_phone', outcome: 'completed' }] }], false],
+      [[{ ...undecided, recognizer_diagnostics: [...completed, { stage: 'alignment_greeting', outcome: 'timeout' }] }], false],
+    ]) {
+      const actions = [], inputs = [], outputs = [];
+      const result = await runTipSourceWork(event, { ...env, RUNNER_TEMP: scratch }, {
+        verifyRuntime: async () => {},
+        updateAttempt: async (_job, action) => { actions.push(action); return { status: 'confirmed' }; },
+        generateSpeech: async () => { actions.push('voice'); return wav.subarray(44); },
+        normalize: async (_root, _raw, path) => { actions.push('normalize'); await writeFile(path, wav); },
+        score: async (draft, path, reportPath) => {
+          inputs.push({ draft, path }); outputs.push(reportPath);
+          assert.deepEqual(await readFile(path), wav);
+          assert.deepEqual(JSON.parse(await readFile(draft, 'utf8')), event.client_payload.source.draft);
+          return reports[inputs.length - 1];
+        },
+        qualify: async (_work, audio, match) => {
+          actions.push('qualify'); assert.deepEqual(audio, wav); assert.equal(match, speech);
+          return { status: 'confirmed' };
+        },
+      });
+      assert.equal(result.status, accepts ? 'confirmed' : 'incomplete');
+      assert.equal(inputs.length, reports.length);
+      assert.ok(inputs.every(input => input.draft === inputs[0].draft && input.path === inputs[0].path));
+      assert.equal(new Set(outputs).size, reports.length);
+      assert.deepEqual(actions, ['start', 'voice', 'normalize', accepts ? 'qualify' : 'failed']);
+      if (!accepts) {
+        assert.equal(result.diagnostic.measurementAttempts, reports.length);
+        assert.equal(Object.hasOwn(result.diagnostic, 'phone_remeasurement_eligible'), false);
+      }
+      assert.deepEqual(await readdir(scratch), []);
+    }
+  } finally { await rm(scratch, { recursive: true, force: true }); }
+});
 
 test('real scoring CLI preserves a measured signature failure through the runner', async () => {
   const { event, env } = fixture();

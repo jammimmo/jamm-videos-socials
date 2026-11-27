@@ -81,7 +81,9 @@ export async function runTipSourceWork(event, env, dependencies = {}) {
     failure = 'source_evidence_inconclusive';
     diagnostic = { stage: 'normalization_failed', reason: 'normalization_failed', measurementAttempts: 0 };
     await (dependencies.normalize ?? normalizeTipV11Narration)(root, raw, normalized, { exactTourV8: true });
-    const measured = await measureSource(dependencies.score ?? score, draftFile, normalized, scratch, env);
+    const measured = await measureSource(dependencies.score ?? score, draftFile, normalized, scratch, env, {
+      remeasureUnconfirmedPhone: true,
+    });
     diagnostic = measured.diagnostic;
     if (!measured.speech) throw new Error('Source speech inconclusive');
     const speech = measured.speech;
