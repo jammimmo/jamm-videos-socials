@@ -40,6 +40,8 @@ CAPTION_CROP = f'{CAPTION_WIDTH}:{CAPTION_HEIGHT}:128:1372'
 CONTACT_CROPS = {'domain': '560:104:130:710', 'phone': '578:74:128:898', 'brand': '386:44:132:1056'}
 AUDIO_PRESERVATION_CONTRACT = 'tip-v11-final-audio-preservation-v1'
 AUDIO_CODEC_PRESERVATION_CONTRACT = 'tip-v11-final-audio-preservation-v2'
+AUDIO_REFERENCE_CONTRACT = 'tip-v11-final-audio-preservation-v3'
+AUDIO_REFERENCE_METHOD = 'remotion-fdk-aac-128k-stereo-48k-v1'
 AUDIO_PRESERVATION_WINDOW = SAMPLE_RATE // 50
 AUDIO_PRESERVATION_HOP = SAMPLE_RATE // 100
 AUDIO_PRESERVATION_FLOOR = 20
@@ -228,7 +230,7 @@ def codec_window_metrics(reference, decoded, start, length, gain):
 def verified_codec_exceptions(reference, decoded, gain, offsets, over_limit):
     """Keep the fixed lag. Verify the source waveform inside every exceptional window."""
     if len(over_limit) * 100 > len(offsets):
-        return None
+        return None, {'check': 'window_count'}
     window = AUDIO_PRESERVATION_WINDOW
     rows = []
     union_start = union_end = union_samples = 0
@@ -236,32 +238,69 @@ def verified_codec_exceptions(reference, decoded, gain, offsets, over_limit):
         start = offsets[index]
         end = start + window
         if start < window or end + window > len(reference):
-            return None
+            return None, {'check': 'edge_context', 'window': index}
         if start > union_end:
             union_start = union_end = start
         union_samples += end - union_end
         union_end = end
-        if end - union_start > window + AUDIO_PRESERVATION_HOP or union_samples * 100 > len(reference):
-            return None
+        if end - union_start > window + AUDIO_PRESERVATION_HOP:
+            return None, {'check': 'cluster_duration', 'window': index}
+        if union_samples * 100 > len(reference):
+            return None, {'check': 'total_duration', 'window': index}
 
         local = codec_window_metrics(reference, decoded, start, window, gain)
         context = codec_window_metrics(reference, decoded, start - window, 3 * window, gain)
         if local is None or context is None:
-            return None
+            return None, {'check': 'unmeasurable_power', 'window': index}
         residual, rms, projection, cosine = local
         context_residual, _, _, context_cosine = context
         # Where the absolute noise floor dominates, the projection must still explain
         # at least half of decoded energy. At higher levels require the waveform cosine.
         minimum_cosine = 940_000 if rms * 180_000 >= 20_000 * 1_000_000 else 707_107
-        if (not 1_000_000 < residual <= 2_000_000 or rms <= 20_000
-            or not 820_000 <= projection <= 1_180_000 or cosine < minimum_cosine
-            or context_residual > 1_000_000 or context_cosine < 940_000):
-            return None
+        checks = (
+            ('window_residual', 1_000_000 < residual <= 2_000_000),
+            ('reference_level', rms > 20_000),
+            ('projection', 820_000 <= projection <= 1_180_000),
+            ('waveform_cosine', cosine >= minimum_cosine),
+            ('context_residual', context_residual <= 1_000_000),
+            ('context_cosine', context_cosine >= 940_000),
+        )
+        for check, passed in checks:
+            if not passed:
+                return None, {'check': check, 'window': index}
         rows.append([index, residual, rms, projection, cosine, context_residual, context_cosine])
-    return rows
+    return rows, None
 
 
-def measure_audio_preservation(alignment, narration, mix, decoded_pcm, lag, effects=render_audit_effects):
+def aac_packet_sha256(path, container):
+    # Hash the AAC packets themselves. The container/ADTS headers are not audible.
+    value = command('ffmpeg', '-nostdin', '-v', 'error', '-xerror', '-protocol_whitelist', 'file',
+                    '-f', container, '-i', path, '-map', '0:a:0', '-c:a', 'copy', '-bsf:a', 'aac_adtstoasc',
+                    '-f', 'hash', '-hash', 'sha256', 'pipe:1').strip()
+    match = re.fullmatch(rb'SHA256=([a-f0-9]{64})', value)
+    if not match:
+        raise ValueError('AAC packet stream hash unavailable')
+    return match[1].decode('ascii')
+
+
+def reference_aac_proof(mix_path, expected_sha256, video):
+    """Independently encode only the canonical mono WAV with the render's locked AAC encoder."""
+    mix_wav = limited_read(mix_path, MAX_PCM_SECONDS * SAMPLE_RATE * 2 + 4096)
+    if sha256(mix_wav) != expected_sha256:
+        raise ValueError('Canonical mix changed before the audio reference was encoded')
+    with TemporaryDirectory() as directory:
+        reference = Path(directory) / 'reference.aac'
+        mix_path = Path(directory) / 'mix.wav'
+        mix_path.write_bytes(mix_wav)
+        command('node', Path(__file__).with_name('tip-v11-reference-aac.mjs'), mix_path, reference)
+        reference_pcm = command('ffmpeg', '-v', 'error', '-xerror', '-protocol_whitelist', 'file,pipe', '-f', 'aac',
+                                '-i', reference, '-map', '0:a:0', '-t', str(MAX_PCM_SECONDS),
+                                '-ac', '1', '-ar', str(SAMPLE_RATE), '-f', 's16le', '-')
+        return reference_pcm, aac_packet_sha256(reference, 'aac'), aac_packet_sha256(video, 'mov')
+
+
+def measure_audio_preservation(alignment, narration, mix, decoded_pcm, lag, effects=render_audit_effects,
+                               *, reference_proof=None, mix_wav_sha256=None):
     """Check which samples survived the mux. Only a lexical test can verify the spoken words."""
     result = {
         'contract': AUDIO_PRESERVATION_CONTRACT, 'status': 'inconclusive', 'sample_rate': SAMPLE_RATE,
@@ -323,11 +362,27 @@ def measure_audio_preservation(alignment, narration, mix, decoded_pcm, lag, effe
     })
     if not over_limit:
         return {**result, 'status': 'matched'}
+    rejection = {'check': 'peak_residual'}
     if result['worst_residual_to_limit_ppm'] <= 2_000_000:
-        rows = verified_codec_exceptions(mix, aligned, gain, offsets, over_limit)
+        rows, rejection = verified_codec_exceptions(mix, aligned, gain, offsets, over_limit)
         if rows:
             return {**result, 'contract': AUDIO_CODEC_PRESERVATION_CONTRACT,
                     'status': 'matched', 'codec_exceptions': rows}
+    result['codec_v2_rejection'] = rejection
+    if (reference_proof is not None and mix_wav_sha256 and len(over_limit) <= 6
+        and len(over_limit) * 1000 <= len(offsets) and result['worst_residual_to_limit_ppm'] <= 1_500_000):
+        try:
+            reference, reference_packets, rendered_packets = reference_proof()
+        except (OSError, ValueError, subprocess.SubprocessError):
+            result['codec_reference_status'] = 'unavailable'
+        else:
+            if reference == decoded_pcm and reference_packets == rendered_packets:
+                return {**result, 'contract': AUDIO_REFERENCE_CONTRACT, 'status': 'matched', 'codec_reference': {
+                    'method': AUDIO_REFERENCE_METHOD, 'mix_wav_sha256': mix_wav_sha256,
+                    'decoded_pcm_sha256': sha256(reference), 'reference_aac_packets_sha256': reference_packets,
+                    'rendered_aac_packets_sha256': rendered_packets, 'over_limit_indices': over_limit,
+                }}
+            result['codec_reference_status'] = 'different'
     return {**result, 'reason': 'local_sample_residual_over_limit'}
 
 
@@ -520,7 +575,11 @@ def audit(args):
                             '-t', str(MAX_PCM_SECONDS), '-ac', '1', '-ar', str(SAMPLE_RATE), '-f', 's16le', '-')
         decoded = pcm(decoded_pcm)
         audio = measure_audio(alignment['segments'], narration, mix, decoded)
-        preservation = measure_audio_preservation(alignment, narration, mix, decoded_pcm, audio.get('lag_samples'))
+        preservation = measure_audio_preservation(
+            alignment, narration, mix, decoded_pcm, audio.get('lag_samples'),
+            reference_proof=(lambda: reference_aac_proof(args.mix_wav, mix_sha, video)) if bound and audio['passed'] else None,
+            mix_wav_sha256=mix_sha,
+        )
         text = measure_text(video, alignment, args.ocr_language)
         speech = {'final_french_speech': measure_final_french_speech(
             alignment['segments'], decoded_pcm, audio, folder, narration=narration, preservation=preservation,

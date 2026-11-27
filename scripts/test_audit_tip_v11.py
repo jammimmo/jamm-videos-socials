@@ -2,15 +2,19 @@ import array
 import base64
 import io
 import json
+import math
+from pathlib import Path
 import random
+from tempfile import TemporaryDirectory
 import unittest
 import wave
+from unittest.mock import Mock
 
 from align_tip_v11 import ASR_REVISION, GREETING_WINDOW_EVIDENCE, PHONE_WINDOW_EVIDENCE, align, align_with_signature_retry, tokens
 from align_tip_v11 import GREETING_POSITION_EVIDENCE, GREETING_VAD_SHA256
 from audit_tip_v11 import (
     AUDIO_PRESERVATION_WINDOW, CAPTION_SCENES, SAMPLE_RATE, bind_manifest, measure_audio,
-    measure_audio_preservation, normalized_ocr_text, sha256, verify_alignment,
+    command, find_lag, measure_audio_preservation, normalized_ocr_text, pcm, reference_aac_proof, sha256, verify_alignment,
 )
 from test_align_tip_v11 import SEGMENTS, speech
 
@@ -59,14 +63,14 @@ class V11FinalEvidenceTest(unittest.TestCase):
         self.assertTrue(result['segments'][0]['passed'])
         self.assertFalse(result['segments'][1]['passed'])
 
-    def preservation(self, decoded, mix=None):
+    def preservation(self, decoded, mix=None, **options):
         buffer = io.BytesIO()
         with wave.open(buffer, 'wb') as effects:
             effects.setparams((1, 2, SAMPLE_RATE, 0, 'NONE', 'not compressed'))
             effects.writeframes(bytes(2 * len(self.voice)))
         return measure_audio_preservation(
             {}, self.voice, self.voice if mix is None else mix, decoded.tobytes(), 48,
-            effects=lambda _: buffer.getvalue(),
+            effects=lambda _: buffer.getvalue(), **options,
         )
 
     def test_preservation_rejects_quiet_local_mute_and_substitution_missed_by_waveform(self):
@@ -176,6 +180,80 @@ class V11FinalEvidenceTest(unittest.TestCase):
         result = self.preservation(self.final)
         self.assertEqual(result['reason'], 'local_sample_residual_over_limit')
         self.assertLessEqual(result['worst_residual_to_limit_ppm'], 2_000_000)
+
+    def test_reference_requires_every_sample_and_the_same_stereo_aac_packets(self):
+        self.voice *= 8
+        self.final.extend(self.final[48:] * 7)
+        start, window = SAMPLE_RATE, AUDIO_PRESERVATION_WINDOW
+        for left in (start - window, start + window):
+            self.voice[left:left + window] = array.array('h', [0]) * window
+            self.final[48 + left:48 + left + window] = array.array('h', [0]) * window
+        self.add_local_noise(self.final, start, window)
+        expected = self.final.tobytes()
+        packets = 'a' * 64
+        mix_sha = 'b' * 64
+        proof = self.preservation(self.final, reference_proof=lambda: (expected, packets, packets),
+                                  mix_wav_sha256=mix_sha)
+        self.assertEqual(proof['contract'], 'tip-v11-final-audio-preservation-v3')
+        self.assertEqual(proof['status'], 'matched')
+        self.assertEqual(proof['codec_v2_rejection'], {'check': 'context_residual', 'window': 99})
+        self.assertEqual(proof['codec_reference']['over_limit_indices'], [99, 100, 101])
+        self.assertEqual(proof['codec_reference']['decoded_pcm_sha256'], sha256(expected))
+        self.assertEqual(proof['codec_reference']['mix_wav_sha256'], mix_sha)
+        for name, witness in [('one changed decoded sample', (expected[:-2] + b'xx', packets, packets)),
+                              ('different stereo stream', (expected, packets, 'c' * 64))]:
+            with self.subTest(name=name):
+                failed = self.preservation(self.final, reference_proof=lambda: witness, mix_wav_sha256=mix_sha)
+                self.assertEqual(failed['status'], 'inconclusive')
+                self.assertEqual(failed['codec_reference_status'], 'different')
+        unavailable = self.preservation(self.final, reference_proof=Mock(side_effect=OSError),
+                                        mix_wav_sha256=mix_sha)
+        self.assertEqual(unavailable['status'], 'inconclusive')
+        self.assertEqual(unavailable['codec_reference_status'], 'unavailable')
+
+    def test_real_fdk_aac_mild_burst_matches_both_streams(self):
+        # A chirp establishes one unique lag. One very quiet 11.5 kHz burst
+        # causes a small projection miss in otherwise identical FDK output.
+        duration = 61
+        signal = array.array('h', [0]) * (duration * SAMPLE_RATE)
+        for index in range(4 * SAMPLE_RATE):
+            seconds = index / SAMPLE_RATE
+            envelope = min(1, index / 480, (4 * SAMPLE_RATE - index) / 480)
+            signal[index] = round(5000 * math.sin(2 * math.pi * (200 * seconds + 130 * seconds ** 2)) * envelope)
+        for index in range(1350):
+            envelope = min(1, index / 40, (1350 - index) / 40)
+            signal[31 * SAMPLE_RATE + index] = round(90 * math.sin(2 * math.pi * 11500 * index / SAMPLE_RATE) * envelope)
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            mix, aac, master = root / 'mix.wav', root / 'audio.aac', root / 'mux.m4a'
+            with wave.open(str(mix), 'wb') as wav:
+                wav.setparams((1, 2, SAMPLE_RATE, 0, 'NONE', 'none'))
+                wav.writeframes(signal.tobytes())
+            command('node', Path(__file__).with_name('tip-v11-reference-aac.mjs'), mix, aac)
+            command('ffmpeg', '-v', 'error', '-i', aac, '-c:a', 'copy', '-use_editlist', '0', master)
+            decoded = command('ffmpeg', '-v', 'error', '-f', 'mov', '-i', master,
+                              '-ac', '1', '-ar', str(SAMPLE_RATE), '-f', 's16le', '-')
+            mix_sha = sha256(mix.read_bytes())
+            proof = measure_audio_preservation(
+                {'segments': [], 'durationInFrames': duration * 30}, signal, signal, decoded,
+                find_lag(signal, pcm(decoded)), reference_proof=lambda: reference_aac_proof(mix, mix_sha, master),
+                mix_wav_sha256=mix_sha,
+            )
+        self.assertEqual((proof['status'], proof['contract']), ('matched', 'tip-v11-final-audio-preservation-v3'))
+        self.assertEqual(proof['codec_v2_rejection'], {'check': 'projection', 'window': 3100})
+        self.assertEqual(proof['codec_reference']['over_limit_indices'], [3100, 3101, 3102, 3103, 3104])
+        self.assertEqual(proof['codec_reference']['reference_aac_packets_sha256'],
+                         proof['codec_reference']['rendered_aac_packets_sha256'])
+
+    def test_ordinary_or_severe_measurements_do_not_invoke_the_reference_encoder(self):
+        unused = Mock(side_effect=AssertionError)
+        self.assertEqual(self.preservation(self.final, reference_proof=unused,
+                                          mix_wav_sha256='b' * 64)['status'], 'matched')
+        self.final[SAMPLE_RATE:2 * SAMPLE_RATE] = array.array('h', [0]) * SAMPLE_RATE
+        self.assertEqual(self.preservation(self.final, reference_proof=unused,
+                                          mix_wav_sha256='b' * 64)['status'], 'inconclusive')
+        unused.assert_not_called()
 
     def test_contact_ocr_preserves_meaningful_punctuation_and_digits(self):
         phone = normalized_ocr_text('phone', '+221 76 944 48 49')

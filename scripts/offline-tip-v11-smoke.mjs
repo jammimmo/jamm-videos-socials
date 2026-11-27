@@ -146,6 +146,20 @@ async function main() {
     assert.equal(props.assistantEnabled, false);
     assert.ok(videoStat.size > 0 && videoStat.size <= 50 * 1024 * 1024);
 
+    // The real Remotion mux and the independent WAV-only reference must agree on both
+    // stereo AAC packet content and the mono samples used to recognize final speech.
+    const reference = spawnSync('python3', ['-c', [
+      'from audit_tip_v11 import command, reference_aac_proof',
+      'from pathlib import Path',
+      'import sys',
+      'mix, sha, video = sys.argv[1:]',
+      'reference, expected, actual = reference_aac_proof(Path(mix), sha, Path(video))',
+      "final = command('ffmpeg', '-v', 'error', '-f', 'mov', '-i', video, '-map', '0:a:0', '-ac', '1', '-ar', '24000', '-f', 's16le', '-')",
+      'assert expected == actual and reference == final',
+    ].join('\n'), join(root, 'public', props.audio), manifest.mix_wav_sha256, video],
+    { cwd: join(root, 'scripts'), encoding: 'utf8', timeout: 60_000 });
+    assert.equal(reference.status, 0, reference.stderr);
+
     const probe = spawnSync('ffprobe', [
       '-v', 'trace', '-show_packets', '-show_entries',
       'stream=codec_type,codec_name,profile,sample_rate,channels,bit_rate,start_time,pix_fmt,field_order,nal_length_size:packet=codec_type,size,pos,flags,pts_time',
